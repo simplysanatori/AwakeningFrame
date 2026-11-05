@@ -76,6 +76,11 @@ DEPINC   := $(if $(DEPS),-I$(DEPS)/include)
 ifeq ($(ARCH),x86_64)
 GENARCH  ?= -march=x86-64-v3  # as on Windows: AVX2 + FMA for the lifted FP/SIMD code (checked at startup)
 endif
+ifeq ($(ARCH),aarch64)
+# the lifted code's inline asm (CRC32, AES / SHA / PMULL, tools/lifter.py, tools/simd_c.py): clang's baseline armv8-a
+# refuses those instructions ("instruction requires: crc"), Apple's clang assembles them by default
+GENARCH  ?= -mcpu=generic+crc+crypto  # (-mcpu, not -march: gamebuild.c rewrites -march= for zig cc as a CPU name)
+endif
 GENFLAGS += $(GENARCH) -fPIC
 OSFLAGS  := -Wno-format  # (%llx for uint64_t, which is unsigned long here: the same size)
 # shaderc as the system's pkg-config file names it (Arch / Fedora / AOSC ship only libshaderc_shared, issue #22);
