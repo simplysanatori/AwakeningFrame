@@ -1074,17 +1074,34 @@ bool vk_frame_begin(const float clear[4]) {
     if (trace < 0) trace = getenv("LARECOMP_VK_TRACE") != NULL;
     if (trace) LOG("[vk] frame begin %dx%d (swapchain %ux%u)\n", w, h, g_vk.sc_extent.width, g_vk.sc_extent.height);
     slot = (slot + 1) % FRAMES;
-    if (!acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
+    // LARECOMP_VK_ACQUIRE_FENCE=1: the window image is waited for on the CPU (a fence), not by the GPU (a semaphore).
+    // Turnip waits for the compositor's release inside the submission that clears the image, and now and then that
+    // wait didn't end on Android: the kernel's hang detection, device lost (breadcrumbs: the GPU done with the game's
+    // frame, stuck before the window image's first pass). A lever for a device lost like that on a Turnip desktop
+    // (Android-Plus 5a1b2f1: there the default); off by default here.
+    static int by_fence = -1;
+    if (by_fence < 0) by_fence = getenv("LARECOMP_VK_ACQUIRE_FENCE") && atoi(getenv("LARECOMP_VK_ACQUIRE_FENCE")) != 0;
+    static VkFence acquire_fence;
+    if (by_fence && !acquire_fence) {
+        VkFenceCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        VK_CHECK(vkCreateFence(g_vk.dev, &fi, NULL, &acquire_fence));
+    }
+    if (!by_fence && !acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
     WAITING_AT(0, vk_wait_seq(slot_seq[slot]));
+    VkSemaphore asem = by_fence ? VK_NULL_HANDLE : acquire_sem[slot];
+    VkFence afence = by_fence ? acquire_fence : VK_NULL_HANDLE;
     VkResult r;
-    WAITING_AT(1, r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image));
+    WAITING_AT(1, r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, asem, afence, &cur_frame.image));
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
         recreate_swapchain();
-        WAITING_AT(1, r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE,
-                                          &cur_frame.image));
+        WAITING_AT(1, r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, asem, afence, &cur_frame.image));
     }
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { LOG("[vk] acquire failed: %d\n", r); return false; }
-    cur_frame.acquired = acquire_sem[slot];
+    if (by_fence) {
+        WAITING_AT(1, vkWaitForFences(g_vk.dev, 1, &acquire_fence, VK_TRUE, UINT64_MAX));
+        vkResetFences(g_vk.dev, 1, &acquire_fence);
+    }
+    cur_frame.acquired = asem;
     cur_frame.id++;
     cur_frame.secondary = false;
     slot_seq[slot] = vk_pending_seq();
