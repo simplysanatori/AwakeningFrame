@@ -104,6 +104,8 @@ typedef struct {
 // slots by the entry's slot bits (exec.c gmap_build) - which slots each program writes.
 #define GFAST_FLAG_WORD ((32u << 20) / 4 - 64u)
 extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
+// 0: no subgroup shuffles in fragment shaders (Adreno: compute only); quad shuffles emulated with derivatives
+extern int maxwell_frag_subgroups;
 // (GLSL / Vulkan) The heap reaches shaders in chunks of 1 << maxwell_gmem_chunk_shift bytes in two cases:
 // - windows of one import where a storage buffer can't span the heap (issue #8) and lazy chunks aren't possible (or
 //   LARECOMP_VK_GMEM_LAZY=0): one binding per window (GMEM_CHUNK_BINDING + k in set GMEM_CHUNK_SET) and plain
