@@ -186,6 +186,19 @@ void fov_device_setup(VkPhysicalDevice phys, bool fdm_ext, bool fsr_ext, const c
 
 bool fov_on(void) { return F.dev_ok && g_vk.dev; }
 
+// The VR tab's live hook (runtime/vr_settings.c; VRS_FOV_OFF..HIGH = off, low, medium, high). Off at start leaves the
+// extension out of the device, so turning it on then waits for a restart.
+void fov_set_level(int level) {
+    cfg();
+    if (level < LV_OFF || level > LV_HIGH) return;
+    if (!F.dev_ok) {
+        if (level != LV_OFF) LOG("[fov] foveation %s: applies after a restart (it was off when the game started)\n", k_names[level]);
+        return;
+    }
+    if (level != F.level) LOG("[fov] foveation %s (VR settings)\n", k_names[level]);
+    F.level = level;
+}
+
 VkPipelineCreateFlags fov_pipeline_flags(void) {
     return !F.dev_ok ? 0 : F.vrs ? VK_PIPELINE_CREATE_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR
                                  : VK_PIPELINE_CREATE_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_BIT_EXT;
@@ -400,7 +413,7 @@ static const void *vrs_pass(int eye, uint32_t w, uint32_t h, float cx, float cy,
 }
 
 const void *fov_pass(int eye, bool per_eye, uint32_t w, uint32_t h, float fx, float fy) {
-    if (!F.dev_ok || eye < 0 || eye > 1) return NULL;
+    if (!F.dev_ok || F.level == LV_OFF || eye < 0 || eye > 1) return NULL;
     F.st_eye_passes++;
     uint32_t ew = 0, eh = 0;
     bool size_ok = stereo_eye_size(&ew, &eh) && w >= ew * F.min_scale && h >= eh * F.min_scale;

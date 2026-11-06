@@ -80,6 +80,8 @@ and it works in both of Turnip's modes (sysmem and GMEM).
   whole bins black in a checkerboard whenever one map holds more than one density. A uniform map is fine, and hw
   binning, bin merging and concurrent binning are not the cause. It is kept for later drivers. Turnip reads density maps
   on the CPU when the pass is recorded, one density per bin, and forces those passes into GMEM.
+- **VR tab:** `fov_set_level` changes the level live. If foveation was off when the game started, the extension is
+  not enabled, so turning it on needs a restart.
 - **Log:** `[fov] eye gaze in N of M game frames ... ; X of Y eye passes foveated` every 10 s.
   `LARECOMP_VR_FOVEATION_LOG=1` logs each pass decision (the first 400).
 

@@ -35,7 +35,7 @@ The refresh rate is the one option the game cannot apply itself: SteamVR's per-a
 | Tilt | 0, -30 to +30 degrees in steps of 5 | `vr_table_tilt = <degrees>` | none | hook `xr_rig_set_tilt_deg` (stub) |
 | Recentre Table | button | none | none | hook `xr_rig_recentre` (stub; the row is greyed out until it exists) |
 | Table Edge | Fog, Gradient, Black, Passthrough | `vr_edge = fog \| gradient \| black \| passthrough` | `LARECOMP_VR_EDGE` | hook `edge_set_mode` (stub), else restart |
-| Foveation | Off, Low, Medium, High (eye-tracked only) | `vr_foveation = off \| low \| medium \| high` | `LARECOMP_VR_FOVEATION` (default medium) | hook `fov_set_level` (stub) |
+| Foveation | Off, Low, Medium, High (eye-tracked only) | `vr_foveation = off \| low \| medium \| high` | `LARECOMP_VR_FOVEATION` (default medium) | live (`fov_set_level`); Off at start: restart to turn it on |
 | Dynamic Resolution | Off, On | `vr_dynamic_resolution = 1 \| 0` | `LARECOMP_VR_DYNRES=0` | hook `diet_set_dynres` (stub) |
 | Culling | Fit, Wide, Stock | `vr_culling = fit \| wide \| stock` | `LARECOMP_VR_CULL` | hook `vr_cull_set_mode` (stub) |
 | Panel Distance | 2.0 m, 0.8 to 4.0 m | `vr_panel_distance = <metres>` | `LARECOMP_XR_QUAD=<dist>,<width>` | live (`vrui_set_hud_quad`) |

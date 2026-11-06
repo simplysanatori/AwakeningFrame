@@ -19,6 +19,8 @@
 void fov_device_setup(VkPhysicalDevice phys, bool fdm_ext, bool fsr_ext, const char **ext, uint32_t *n_ext, VkPhysicalDeviceFeatures2 *f);
 // Foveation is on (device ready, extension enabled, level not off).
 bool fov_on(void);
+// The VR tab's live hook (runtime/vr_settings.c): 0..3 = off, low, medium, high.
+void fov_set_level(int level);
 // Extra flags for every graphics pipeline that may draw in a foveated pass (0 when off).
 VkPipelineCreateFlags fov_pipeline_flags(void);
 // The pNext for those pipelines' VkPipelineRenderingCreateInfo (shading-rate mode: the attachment's rate replaces the
