@@ -199,7 +199,9 @@ void xr_rig_recentre(void) {
 static int classify(const XrRigIn *in) {
     if (in->overworld == 1) return XR_RIG_OPEN;  // (its camera zones are areas, not rooms)
     if (in->zone) return in->zhi[2] - in->zlo[2] < SIDE_THIN ? XR_RIG_SIDE : XR_RIG_ROOM;
-    return fabsf(in->fwd[1]) < 0.2f ? XR_RIG_SIDE : XR_RIG_OPEN;
+    if (fabsf(in->fwd[1]) < 0.2f) return XR_RIG_SIDE;
+    // no zone in a dungeon or an interior: between rooms (a scroll, stairs, a fall); keep the area there was
+    return in->overworld == 0 && R.valid && R.area != XR_RIG_OPEN ? R.area : XR_RIG_OPEN;
 }
 static bool box_differs(const float alo[3], const float ahi[3], const float blo[3], const float bhi[3]) {
     return fabsf(alo[0] - blo[0]) + fabsf(alo[2] - blo[2]) + fabsf(ahi[0] - bhi[0]) + fabsf(ahi[2] - bhi[2]) > 0.5f;
@@ -287,14 +289,15 @@ void xr_rig_update(const XrRigIn *in, XrRigPose *out) {
         // the area / room the frame shows, once it has held for STABLE frames (or at once on a camera cut)
         kind = classify(in);
         bool camcut = R.valid && jump2 > CUT_JUMP * CUT_JUMP;
-        bool same_cand = kind == R.cand_area && (kind == XR_RIG_OPEN || !box_differs(in->zlo, in->zhi, R.cand_lo, R.cand_hi));
+        bool same_cand = kind == R.cand_area && (kind == XR_RIG_OPEN || !in->zone || !box_differs(in->zlo, in->zhi, R.cand_lo, R.cand_hi));
         R.cand_n = same_cand ? R.cand_n + 1 : 1;
         R.cand_area = kind;
         if (in->zone) memcpy(R.cand_lo, in->zlo, 12), memcpy(R.cand_hi, in->zhi, 12);
-        bool changed = kind != R.area || (kind != XR_RIG_OPEN && box_differs(in->zlo, in->zhi, R.zlo, R.zhi));
+        bool changed = kind != R.area || (kind != XR_RIG_OPEN && in->zone && box_differs(in->zlo, in->zhi, R.zlo, R.zhi));
         bool take = !R.valid || (changed && (R.cand_n >= STABLE || camcut));
         if (!take) kind = R.area;  // (keep the old area's rule until the new one holds)
-        const float *lo = take || !R.valid ? in->zlo : R.zlo, *hi = take || !R.valid ? in->zhi : R.zhi;
+        bool use_in = in->zone && (take || !R.valid);
+        const float *lo = use_in ? in->zlo : R.zlo, *hi = use_in ? in->zhi : R.zhi;
         memcpy(target, in->raw, sizeof target);
         if (kind == XR_RIG_ROOM && (in->zone || R.valid)) {
             target[0] = room_axis(in->raw[0], lo[0], hi[0], SCREEN_X * 0.5f);
@@ -318,8 +321,9 @@ void xr_rig_update(const XrRigIn *in, XrRigPose *out) {
             R.area = kind, R.valid = true;
             if (in->zone) memcpy(R.zlo, in->zlo, 12), memcpy(R.zhi, in->zhi, 12);
         } else {
-            // filtered (a single-screen room's target does not move: only the height follows Link, slowly)
-            float a = 1 - expf(-dt / R.tau), ay = 1 - expf(-dt / (R.tau * 2));
+            // filtered (a single-screen room's target does not move; a room keeps the height it was entered at: Link's
+            // jumps and falls into holes do not move the table)
+            float a = 1 - expf(-dt / R.tau), ay = kind == XR_RIG_ROOM ? 0 : 1 - expf(-dt / (R.tau * 2));
             R.p[0] += (target[0] - R.p[0]) * a, R.p[2] += (target[2] - R.p[2]) * a, R.p[1] += (target[1] - R.p[1]) * ay;
         }
     }
