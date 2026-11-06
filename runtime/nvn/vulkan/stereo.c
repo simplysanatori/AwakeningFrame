@@ -9,6 +9,7 @@
 #include "../../platform.h"
 #include "../../rt.h"
 #include "../cam_override.h"
+#include "edge.h"
 #ifdef LARECOMP_HAVE_XR
 #include "../../xr/xr.h"
 #endif
@@ -100,6 +101,7 @@ static bool eye_fn(const CamLatch *l, const float pivot[3], float V[2][16], floa
     }
     float cy = cosf(-cfg.yaw * (float)(M_PI / 180.0)), sy = sinf(-cfg.yaw * (float)(M_PI / 180.0));  // Ry(-yaw): app -> world
     const float *gp = l->ref.P;
+    float edge_pdist = 0;
     for (int e = 0; e < 2; e++) {
         float m[3][3], w[3][3];
         quat_mat(ev[e].orientation, m);
@@ -109,6 +111,7 @@ static bool eye_fn(const CamLatch *l, const float pivot[3], float V[2][16], floa
             w[2][c] = -sy * m[0][c] + cy * m[2][c];
         }
         float d[3] = {(ev[e].position[0] - cfg.A[0]) / cfg.s, (ev[e].position[1] - cfg.A[1]) / cfg.s, (ev[e].position[2] - cfg.A[2]) / cfg.s};
+        if (e == 0) edge_pdist = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
         float E[3] = {pivot[0] + cy * d[0] + sy * d[2], pivot[1] + d[1], pivot[2] - sy * d[0] + cy * d[2]};
         float *v = V[e];
         for (int r = 0; r < 3; r++) {  // rows: the eye's right, up, back in world; rigid, game units
@@ -157,6 +160,7 @@ static bool eye_fn(const CamLatch *l, const float pivot[3], float V[2][16], floa
                 gp[0], gp[5], gp[2], gp[6], l->ref.V[4], l->ref.V[5], l->ref.V[6], -v[8], -v[9], -v[10], c[0] / c[3], c[1] / c[3], c[2] / c[3]);
         }
     }
+    edge_note_cameras(V, P, edge_pdist);  // (edge lane: interim, until the eye hook hands each eye's camera over)
     return true;
 }
 #endif

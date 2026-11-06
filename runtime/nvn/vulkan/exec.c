@@ -30,6 +30,7 @@
 #include "../weather.h"
 #include "../cam_override.h"
 #include "stereo.h"
+#include "edge.h"
 
 // ---- stereo executor (VR mode, stereo.h; docs/af/STEREO.md): the eye being executed (-1: not in stereo). In eye 1 a
 // draw, clear or copy runs only when a target is twinned (vk_tex_twinned); compute, counters and read-backs run in
@@ -8703,6 +8704,23 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
         VkExtent2D ext;
         if (!eye_target(eye, &img, &view, &fmt, &ext)) continue;
         vk_full_barrier(cb);
+        float fx = b->scalable && b->ax > 0 ? b->sx / b->ax : 1, fy = b->scalable && b->ay > 0 ? b->sy / b->ay : 1;
+        {   // (edge treatment instead of the present draw: runtime/nvn/vulkan/edge.c)
+            TexBackend *db = wx_depth ? (TexBackend *)wx_depth->backend : NULL;
+            if (db && eye == 1) db = db->twin;
+            EdgeEye ein = {.eye = eye};
+            if (edge_mode() != EDGE_BLACK && db && db->image && edge_cameras(eye, ein.V, ein.P, &ein.pivot_dist)) {
+                static const VkComponentMapping id = {0};
+                ein.depth = vk_image_view(db, VK_IMAGE_VIEW_TYPE_2D, db->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
+                ein.color = raw_view(b);
+                ein.color_crop[0] = fx, ein.color_crop[1] = fy;
+                ein.depth_crop[0] = db->scalable && db->ax > 0 ? db->sx / db->ax : 1;
+                ein.depth_crop[1] = db->scalable && db->ay > 0 ? db->sy / db->ay : 1;
+                ein.origin_lower_left = renderer_origin_lower_left();
+                ein.zn = wx_zn, ein.zf = wx_zf, ein.depth_minus1 = nvn_depth_mode() == 0;
+                if (edge_eye(cb, &ein, view, fmt, ext.width, ext.height)) { drawn |= 1 << eye; continue; }
+            }
+        }
         VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = view,
                                         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                         .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
@@ -8711,7 +8729,6 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
         rec_CmdBeginRendering(cb, &ri);
         VkRect2D sc = {{0, 0}, ext};
         rec_CmdSetScissor(cb, 0, 1, &sc);
-        float fx = b->scalable && b->ax > 0 ? b->sx / b->ax : 1, fy = b->scalable && b->ay > 0 ? b->sy / b->ay : 1;
         VkPipeline p = present_pipeline_ex(fmt, false);
         VkDescriptorSet ds = vk_alloc_set(present_set_layout);
         VkDescriptorImageInfo ii = {vk_default_sampler(true), raw_view(b), VK_IMAGE_LAYOUT_GENERAL};
