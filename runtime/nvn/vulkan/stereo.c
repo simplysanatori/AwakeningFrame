@@ -79,6 +79,16 @@ static void cfg_init(void) {
         cfg.follow == FOLLOW_ROOM ? "room (held; glides to a new camera zone)" : cfg.follow == FOLLOW_FIXED ? "fixed (held)" : "smooth", cfg.tau);
 }
 
+// The VR tab's Follow Mode while the game runs (runtime/vr_settings.c; VRS_FOLLOW_*): Smooth is the tab's default, which
+// leaves LARECOMP_VR_FOLLOW unset at the start (the rig's per-area anchoring), so it goes back to that; Room and Fixed are
+// the explicit follow. Taken by the next latch (eye_fn), where the explicit anchor starts at the table's current one: the
+// table does not jump.
+static int g_follow_req = -1;  // (atomic) -1 none, else VRS_FOLLOW_*
+void stereo_set_follow(int mode) {
+    if (mode < 0 || mode > 2) return;
+    __atomic_store_n(&g_follow_req, mode, __ATOMIC_RELEASE);
+}
+
 // The table's anchor in the world: where the game's camera looks (the raw pivot, once per game frame) followed per
 // LARECOMP_VR_FOLLOW, on new game frames only (called once per latch):
 //   smooth  filtered (time constant cfg.tau; the height twice that: Link's jumps)
@@ -151,6 +161,18 @@ static bool eye_fn(const CamLatch *l, const float pivot_in[3], float V[2][16], f
     g_rv.ok = false;
     if (!xr_latch_views_id(ev, &vid)) return false;
     if (!cfg.init) cfg_init();
+    {
+        int req = __atomic_exchange_n(&g_follow_req, -1, __ATOMIC_ACQ_REL);
+        if (req >= 0) {
+            bool ex = req != 0;  // (VRS_FOLLOW_SMOOTH 0: the rig's own anchoring)
+            if (ex && g_table.ok) memcpy(anc.p, g_table.anchor, 12), memcpy(anc.last, pivot_in, 12), anc.ok = true, anc.gliding = false,
+                                  anc.t_ns = plat_now_ns(), anc.zone = cam_override_zone(anc.lo, anc.hi);
+            else if (ex) anc.ok = false;
+            cfg.explicit_follow = ex;
+            cfg.follow = req == 1 ? FOLLOW_ROOM : req == 2 ? FOLLOW_FIXED : FOLLOW_SMOOTH;
+            LOG("[stereo] follow mode %s (VR settings)\n", req == 1 ? "room" : req == 2 ? "fixed" : "smooth (the rig's area anchoring)");
+        }
+    }
     float pivot_raw[3] = {pivot_in[0], pivot_in[1], pivot_in[2]}, pivot[3];
     if (cfg.explicit_follow) anchor_update(pivot_raw, pivot);
     else memcpy(pivot, pivot_raw, sizeof pivot);
