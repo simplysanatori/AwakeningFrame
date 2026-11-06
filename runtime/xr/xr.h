@@ -107,6 +107,9 @@ bool xr_latch_views(XrEyeView out[2]);
 // kept). Located for the display time that frame is expected at (LARECOMP_XR_PREDICT: measured latch -> display,
 // default; vsync: the latest vsync's display time). false: no session / no valid pose.
 bool xr_latch_views_id(XrEyeView out[2], uint64_t *id);
+// (foveation) the eye gaze (unit direction in the app space of latch `id`, at its display time): false when there is
+// none (no eye tracker / extension, not tracked) or the latch is gone.
+bool xr_latch_gaze(uint64_t id, float dir[3]);
 // Between xr_set_begin and xr_set_submit: the projection layer of this set gets the views of the latches its eye images
 // were rendered with (eye i's pose from latch id[i]; both ids are the same unless the eyes come from different frames),
 // for every refresh it is shown. rendered: the views the eye cameras were built with, as the executor kept them (the

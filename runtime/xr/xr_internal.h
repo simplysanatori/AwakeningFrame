@@ -83,7 +83,7 @@ typedef struct {
     void *loader;
     XrInstance inst;
     XrSystemId sys;
-    bool has_refresh_fb, has_format_list;
+    bool has_refresh_fb, has_format_list, has_gaze;  // has_gaze: XR_EXT_eye_gaze_interaction enabled (foveation)
     // session
     XrSession session;
     XrSessionState state;
