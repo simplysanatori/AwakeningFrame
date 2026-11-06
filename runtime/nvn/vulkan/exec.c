@@ -28,6 +28,7 @@
 #include "../shader_prep.h"
 #include "../../settings.h"
 #include "../weather.h"
+#include "../cam_override.h"
 
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 // (the guest heap for shaders in chunks: with the heap import below)
@@ -3654,6 +3655,14 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
     if ((si->cbuf_dynamic & (1u << k)) && r.size) size = r.size > 0x10000 ? 0x10000 : r.size;
     if (size > r.size && r.size) size = r.size;
     if (size < 16) size = 16;
+    if (cam_override_active() && size <= 320) {  // (free-camera probe, runtime/nvn/cam_override.c: the main camera's host copy)
+        uint8_t cb[320];
+        if (cam_override_ubo(stage, r.addr, r.size, cb)) return ubo_span(vk_transient_copy(cb, size, 256), size);
+    }
+    if (cam_override_active() && size <= 4096) {  // (the camera's matrices copied into the pass's other blocks: cam_override_patch)
+        uint8_t pb[4096];
+        if (cam_override_patch((const void *)(uintptr_t)r.addr, size, pb)) return ubo_span(vk_transient_copy(pb, size, 256), size);
+    }
     // snapshot: later CPU writes must not leak in. Shared by the draws of one submission binding the same range:
     // within a command list nothing writes guest memory (no inline UpdateUniformBuffer: that writes through below
     // and drops the shared copies).
@@ -6656,6 +6665,25 @@ static void draw_(CmdRec *r, bool indexed) {
         if (last_hash) widescreen_backdrop_seen(last_hash);
         extern void widescreen_scene_ubo(const float *u, uint64_t size);  // (the camera's view-projection)
         if (st.ubuf[0][5].addr) widescreen_scene_ubo((const float *)(uintptr_t)st.ubuf[0][5].addr, st.ubuf[0][5].size);
+        if (cam_override_active()) {  // (free-camera probe: the frame's main camera, and with LARECOMP_FREECAM_LOG the draw's buffers)
+            if (st.ubuf[0][5].addr) cam_override_latch((const float *)(uintptr_t)st.ubuf[0][5].addr, st.ubuf[0][5].addr, st.ubuf[0][5].size, renderer_exec_frame());
+            if (cam_override_logging()) {
+                static uint64_t vs_addr, vs_hash;
+                uint64_t va = st.program->stages[0].code_addr;
+                if (va != vs_addr) vs_addr = va, vs_hash = va ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(va + 0x30), 0x200) : 0;
+                bool depth = false;
+                for (int i = 0; pr->fi && i < pr->fi->ntex && !depth; i++) {  // (a depth texture among the fragment shader's)
+                    int slot = ((int)pr->fi->tex[i].handle_offset - 0x20) / 8;
+                    uint32_t tic = slot >= 0 && slot < 32 ? (uint32_t)(st.tex[1][slot] & 0xFFFFF) : ~0u;
+                    NvnTexEntry *e = st.tpool && tic < (uint32_t)st.tpool->count ? &((NvnTexEntry *)st.tpool->entries)[tic] : NULL;
+                    depth = e && e->tex && renderer_format_is_depth(e->tex->format);
+                }
+                CamDrawInfo cd = {last_hash, vs_hash, {(const uint64_t *)st.ubuf[0], (const uint64_t *)st.ubuf[1]},
+                                  st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->width >= 640 && st.rt.color[0]->height * 16 == st.rt.color[0]->width * 9,
+                                  depth, renderer_exec_frame()};
+                cam_override_draw(&cd);
+            }
+        }
         // (the weather: the camera, and the depth it draws into - renderer.m says why the level model's too)
         bool into_scene = st.rt.ncolor && st.rt.color[0] && st.rt.depth && st.rt.depth->width >= 640 &&
                           st.rt.color[0]->width == st.rt.depth->width && renderer_format_is_depth(st.rt.depth->format);
@@ -6995,10 +7023,23 @@ static void draw_(CmdRec *r, bool indexed) {
         const ShaderInfo *si = sg ? pr->fi : pr->vi;
         if (!si->npush) continue;
         uint32_t pw[64];
+        uint8_t cam_cb[4096];  // (free-camera probe: the substituted camera buffer, as cbuf_info binds it; promoted words come from here too)
+        int cam_tried = -1;
+        bool cam_hit = false;
         for (int i = 0; i < si->npush; i++) {
             Range r = st.ubuf[sg][si->push_cb[i] - 3];
             uint32_t o = si->push_off[i];
             pw[i] = r.addr && o + 4 <= (r.size ? r.size : 0x10000) ? *(const uint32_t *)(uintptr_t)(r.addr + o) : 0;  // (as cbuf_info)
+            if (r.addr && cam_override_active()) {
+                int idx = si->push_cb[i] - 3;
+                uint64_t psz = r.size ? r.size : 4096;
+                if (psz > sizeof cam_cb) psz = sizeof cam_cb;
+                if (cam_tried != idx) {
+                    cam_tried = idx;
+                    cam_hit = (r.size == 320 && cam_override_ubo(sg, r.addr, r.size, cam_cb)) || cam_override_patch((const void *)(uintptr_t)r.addr, psz, cam_cb);
+                }
+                if (cam_hit && o + 4 <= psz) memcpy(&pw[i], cam_cb + o, 4);
+            }
         }
         rec_CmdPushConstants(cb, pr->layout, sg ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT, si->push_base,
                              si->npush * 4u, pw);
