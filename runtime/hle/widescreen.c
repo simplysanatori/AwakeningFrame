@@ -139,7 +139,7 @@ float rt_indoor_aspect(void) {
     return 16.0f / 9.0f;
 }
 
-void romfs_file_read_hook(const char *path) { (void)path; }
+// (romfs_file_read_hook: runtime/hle/stream.c)
 
 // Interior backdrop (16:9 quad covering the overworld behind rooms), identified by shader code hash.
 static uint64_t g_backdrop_hash = 0;  // set below once known
