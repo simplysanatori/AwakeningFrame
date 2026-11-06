@@ -129,7 +129,7 @@ void vr_settings_apply_env(void) {
     }
     if (!g_given[VRO_EDGE] && VR.edge != VRS_EDGE_FOG) put("LARECOMP_VR_EDGE", k_edge[VR.edge]);
     if (!g_given[VRO_FOVEATION] && VR.foveation != VRS_FOV_DEFAULT) put("LARECOMP_VR_FOVEATION", k_fov[VR.foveation]);
-    if (!g_given[VRO_DYNRES] && !VR.dynres) put("LARECOMP_VR_DYNRES", "0");
+    if (!g_given[VRO_DYNRES] && VR.dynres) put("LARECOMP_VR_DYNRES", "1");  // off by default (owner), so only On is passed on
     if (!g_given[VRO_CULL] && VR.cull != VRS_CULL_FIT) put("LARECOMP_VR_CULL", k_cull[VR.cull]);
     if (!g_given[VRO_HUD_DIST] && (VR.hud_dist != 2.0f || VR.hud_width != 2.2f)) {
         snprintf(b, sizeof b, "%.2f,%.2f", VR.hud_dist, VR.hud_width);

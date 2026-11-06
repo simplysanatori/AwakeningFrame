@@ -36,7 +36,7 @@ The refresh rate is the one option the game cannot apply itself: SteamVR's per-a
 | Recentre Table | button | none | none | hook `xr_rig_recentre` (stub; the row is greyed out until it exists) |
 | Table Edge | Fog, Gradient, Black, Passthrough | `vr_edge = fog \| gradient \| black \| passthrough` | `LARECOMP_VR_EDGE` | hook `edge_set_mode` (stub), else restart |
 | Foveation | Default, Off, Low, Medium, High, Fixed | `vr_foveation = default \| off \| low \| medium \| high \| fixed` | `LARECOMP_VR_FOVEATION` (Default: not set) | hook `fov_set_level` (stub) |
-| Dynamic Resolution | On, Off | `vr_dynamic_resolution = 1 \| 0` | `LARECOMP_VR_DYNRES=0` | hook `diet_set_dynres` (stub) |
+| Dynamic Resolution | Off, On | `vr_dynamic_resolution = 1 \| 0` | `LARECOMP_VR_DYNRES=0` | hook `diet_set_dynres` (stub) |
 | Culling | Fit, Wide, Stock | `vr_culling = fit \| wide \| stock` | `LARECOMP_VR_CULL` | hook `vr_cull_set_mode` (stub) |
 | Panel Distance | 2.0 m, 0.8 to 4.0 m | `vr_panel_distance = <metres>` | `LARECOMP_XR_QUAD=<dist>,<width>` | live (`vrui_set_hud_quad`) |
 | Panel Width | 2.2 m, 0.6 to 4.0 m | `vr_panel_width = <metres>` | the same | live |
@@ -77,7 +77,7 @@ was: the variable, or the existing menu text. Style as Moonlight / Apollo: Title
 | right stick click with left grip held | Recentre Table | (button) | Puts the table in front of you again. |
 | `LARECOMP_VR_EDGE=fog` / `gradient` / `black` / `passthrough` | Table Edge | Fog, Gradient, Black, Passthrough | What surrounds the table. Fog fades the world into the distance, Gradient fills the empty space with a soft backdrop, Black leaves it empty, Passthrough shows the room. |
 | `LARECOMP_VR_FOVEATION=off` / `low` / `medium` / `high` / `fixed` | Foveation | Default, Off, Low, Medium, High, Fixed | Draws the edges of your view at a lower resolution. Higher levels save more GPU time, Fixed keeps the sharp area in the middle. |
-| `LARECOMP_VR_DYNRES` | Dynamic Resolution | On, Off | Lowers the resolution when the GPU can't keep up and raises it again when it can. |
+| `LARECOMP_VR_DYNRES` | Dynamic Resolution | Off, On | Lowers the resolution when the GPU can't keep up and raises it again when it can. |
 | `LARECOMP_VR_CULL=fit` / `wide` / `stock` | Culling | Fit, Wide, Stock | How much of the world outside the table is skipped. Fit follows the table's edges, Wide keeps more, Stock keeps everything the game would draw. |
 | `LARECOMP_XR_QUAD` (distance) | Panel Distance | 0.8 m to 4.0 m | How far away the HUD and menus float. |
 | `LARECOMP_XR_QUAD` (width) | Panel Width | 0.6 m to 4.0 m | How wide the HUD and menus are. |

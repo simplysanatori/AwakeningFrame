@@ -32,7 +32,7 @@ typedef struct {
 } VrSettings;
 
 #define VR_DEFAULTS {.refresh = VRS_REFRESH_120, .layout = VRS_LAYOUT_SWITCH, .follow = VRS_FOLLOW_SMOOTH, .height_cm = 0, \
-                     .size_pct = 100, .tilt_deg = 0, .edge = VRS_EDGE_FOG, .foveation = VRS_FOV_DEFAULT, .dynres = true, \
+                     .size_pct = 100, .tilt_deg = 0, .edge = VRS_EDGE_FOG, .foveation = VRS_FOV_DEFAULT, .dynres = false, \
                      .cull = VRS_CULL_FIT, .hud_dist = 2.0f, .hud_width = 2.2f}
 
 #ifdef __cplusplus
