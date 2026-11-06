@@ -1,8 +1,8 @@
-# Free-camera probe (AwakeningFrame lane 1)
+# Free-camera probe
 
 The headset-free GO / NO-GO test for the diorama design: on the flat window, replace the game's camera with an orbiting
 or pulled-back one and look at whether the world holds up from other angles (geometry present, lighting, shadows, water
-and fog plausible) and which shaders use camera data outside the camera buffer. Design: `~/.claude/plans/awakeningframe-vr-design.md` section 7.
+and fog plausible) and which shaders use camera data outside the camera buffer.
 
 Status: run against the game on the Frame (flat, `SDL_VIDEODRIVER=offscreen ENABLE_GAMESCOPE_WSI=0`). Two things the first run
 found: the level's shaders read the view-projection from a 1 KB scene block at slot 1 (and other blocks hold inverse /
@@ -69,7 +69,7 @@ hash of the same draws or a look at the shader with `LARECOMP_LOG_FSHASH`.
 
 ```
 steam-frame/prepare-game.sh game.nsp prod.keys --dest $PWD/extracted     # once (see BUILD-frame.md)
-~/Games/AwakeningFrame/afbuild.sh                                        # make gen + make; refuses while ~/.cache/headset-in-use exists
+make gen && make DEPS=$PWD/build/linux/aarch64/deps                     # the game code, then the program (see BUILD-frame.md)
 tools/test_cam_override.sh                                               # unit test, no game files
 tools/freecam_sweep.sh --plan                                            # what it will do, no game files needed
 tools/freecam_sweep.sh --identity-check                                  # identity / off alternating inside one run
@@ -102,7 +102,7 @@ at the top of the script); locators are from `runtime/ui/warp_data.h` **[G]**, a
 
 - The spec put the module at `runtime/nvn/cam_override.c`, the task at `runtime/hle/`; it is under `nvn/` (backend neutral, built by the existing wildcard).
 - Link's position is read directly (`[[game manager + 0x4b8] + 0x80] + 0x80`, as doorjump.c finds it) in
-  `widescreen_frame_end`, not published from `input_frame` (input.c is not this lane's). **[G]** untested without the game.
+  `widescreen_frame_end`, not published from `input_frame` (it is not input.c's job). **[G]** untested without the game.
 - Orbit's up vector is world +y; "floor" is y 0 (as widescreen.c's `view_point`); pivot on the side view assumes the zone box.
 - Far plane stays as the game's by default, so a long pull-back can clip the far geometry (`LARECOMP_FREECAM_FAR`); anything linearising depth with the game's constants from another buffer then stays consistent, which is the point.
 - Rewriting by address: a buffer re-written with another camera mid-frame (`CMD_UPDATE_UNIFORM_BUFFER`) is detected by its

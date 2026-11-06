@@ -1,7 +1,7 @@
-// Free-camera probe (AwakeningFrame lane 1): replaces the game's main camera in the vertex uniform buffer the
+// Free-camera probe: replaces the game's main camera in the vertex uniform buffer the
 // renderer binds (guest cbuf slot 5 = hardware cbuf 8 = GLSL binding 8, 320 bytes: floats 0-15 view, 16-31
 // projection, 32-47 view-projection, row-major, column vectors: clip = P * V * x, GL-style depth [-1, 1]).
-// Backend neutral; the stereo executor (lane 4) reuses the latch / rewrite entry points.
+// Backend neutral; the stereo executor reuses the latch / rewrite entry points.
 //
 // Everything is off unless one of these is set (the hot path is one test of g_cam_on / g_cam_cull / g_cam_log):
 //   LARECOMP_FREECAM=identity | passthrough | orbit:<yaw>:<pitch>:<dist>[:<fovy>] | spin:<deg/frame>:<pitch>:<dist>
@@ -59,7 +59,7 @@ typedef struct {
 } CamDrawInfo;
 void cam_override_draw(const CamDrawInfo *d);
 
-// ---- stereo (AwakeningFrame lane 4, runtime/nvn/vulkan/stereo.c): one substitute camera per eye
+// ---- stereo (runtime/nvn/vulkan/stereo.c): one substitute camera per eye
 // fn is called once per latched frame (the render thread, at the frame's first main-camera draw) with the game's camera
 // and the screen-centre pivot on the floor; it fills each eye's view and projection (game units, the game's conventions:
 // row-major, clip = P * V * x, view down -z) and returns false when there are none (no head pose yet: the game's own

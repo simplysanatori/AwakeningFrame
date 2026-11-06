@@ -7059,7 +7059,7 @@ static void draw(CmdRec *r, bool indexed) {
     if (wx_composite && g_eye <= 0) weather_encode();
     PROF_ADD(prof_draw);
 }
-// ---- (lane ring; vr_cull.h, LARECOMP_VR_RING) in stereo, the draws outside the table fit's footprint ("ring" draws) go
+// ---- (ring draws; vr_cull.h, LARECOMP_VR_RING) in stereo, the draws outside the table fit's footprint ("ring" draws) go
 // into the eyes' colour passes only: not into the shared passes (the shadow casters; LARECOMP_VR_RING_CAST keeps the
 // nearer ones casting) nor the eyes' depth-only pre-pass. In the colour pass their EQUAL against the pre-pass's depth
 // becomes LESS_OR_EQUAL with depth write, which is right in any draw order. A draw is ring when its world box (vertex box
@@ -7284,7 +7284,7 @@ static bool diet_draw(Prog *pr, uint64_t last_hash) {
     }
     return false;
 }
-// (lane ring) the early route: a ring draw in a depth-only pass (the shared casters, an eye's pre-pass) is skipped at the
+// (ring draws) the early route: a ring draw in a depth-only pass (the shared casters, an eye's pre-pass) is skipped at the
 // top of draw_, before the program lookup and the per-draw bookkeeping, which matter only for passes with colour
 // targets. What a skipped draw must still leave behind is done here: the frame's first scene camera (cam_override's
 // latch, whose address the stereo patch matches, widescreen's and the weather's), the weather's scene depth, the
@@ -7390,7 +7390,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
     g_mvp = false, g_tex_amask = 0, g_mv_bits[0] = g_mv_bits[1] = 0;
     if (!st.program) { SKIP(SK_NO_PROGRAM); return; }
-    if (ring_early(r, indexed)) { SKIP(SK_RING); return; }  // (lane ring: a ring draw in a depth-only pass)
+    if (ring_early(r, indexed)) { SKIP(SK_RING); return; }  // (ring draws: a ring draw in a depth-only pass)
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
@@ -7535,7 +7535,7 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     if (g_debug_frame) debug_draw(pr, r, indexed);
     snow_cover_check(r, indexed, pr);  // (the snow on the ground: its stencil marks, the cover after the opaque draws)
-    if (ring_route(r, indexed)) { SKIP(SK_RING); return; }  // (lane ring: a ring draw outside the eyes' colour passes)
+    if (ring_route(r, indexed)) { SKIP(SK_RING); return; }  // (ring draws: a ring draw outside the eyes' colour passes)
     if (ct_on()) ct_draw(pr, "draw");
     alias_draw_check();
     resolve_feedback(pr);
@@ -7643,7 +7643,7 @@ static void draw_(CmdRec *r, bool indexed) {
     bool dt = st.ds[0] && !nodt && pass_depth;
     if (ss_need(SS_DT, ss.dt == (VkBool32)dt)) { ss.dt = dt; rec_CmdSetDepthTestEnable(cb, dt); }
     VkCompareOp dop = dt ? compare_fn(st.ds[2]) : VK_COMPARE_OP_ALWAYS;
-    bool ring_leq = g_ring_leq && dop == VK_COMPARE_OP_EQUAL;  // (lane ring: no pre-pass depth of its own: tests and writes)
+    bool ring_leq = g_ring_leq && dop == VK_COMPARE_OP_EQUAL;  // (ring draws: no pre-pass depth of its own: tests and writes)
     if (ring_leq) dop = VK_COMPARE_OP_LESS_OR_EQUAL;
     VkBool32 dw = dt && (st.ds[1] || ring_leq);
     if (ss_need(SS_DW, ss.dw == dw)) { ss.dw = dw; rec_CmdSetDepthWriteEnable(cb, dw); }
@@ -9755,7 +9755,7 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
     return drawn;
 }
 
-// The eye post hook's default (stereo.h): nothing. The edge lane defines the real one.
+// The eye post hook's default (stereo.h): nothing. edge.c defines the real one.
 __attribute__((weak)) void stereo_eye_post(const StereoEyePost *e) { (void)e; }
 
 // (device.c, LARECOMP_STEREO_DUMP_AT=<frame>,...: the eye outputs as PNGs, <dir>/stereo_<frame>_eye<n>.png)

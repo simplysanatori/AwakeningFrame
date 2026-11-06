@@ -1,5 +1,5 @@
 #!/bin/bash
-# Streaming lane measurement (docs/af/STREAM.md): one headless session warps to Mabe Village, the Mysterious Forest and
+# Streaming measurement (docs/af/STREAM.md): one headless session warps to Mabe Village, the Mysterious Forest and
 # Field_09B and at each takes the stock view and free-camera orbits that look past the loaded world (yaw 180 / 90,
 # distance 50, widened culling), 240 frames per step. Per step: void % (black pixels of the shot), draws per frame,
 # GPU ms (LARECOMP_LOG_PACE), resident memory (MB) and the game's Vulkan memory in use.

@@ -1,12 +1,11 @@
-// The diorama rig (AwakeningFrame lane "rig"; design: ~/.claude/plans/awakeningframe-vr-design.md section 6; docs:
-// docs/af/RIG.md). Where the game world sits in the player's room, what the player's controls do to it, and the blink
+// The diorama rig (docs/af/RIG.md). Where the game world sits in the player's room, what the player's controls do to it, and the blink
 // that hides every sudden change.
 //
 //   app = A + s * R * (world - anchor)      (app: the XR app space, metres, y up, -z ahead, origin = the head after
 //                                            the last recentre; world: game units)
 //   anchor  the world point on the table's centre: per area type (overworld: the game camera's focus at Link's height,
 //           filtered; interiors and dungeon rooms: the room's centre, snapped behind a blink on a room change; side
-//           views: the focus on the side plane, filtered) or, with LARECOMP_VR_FOLLOW set, the comfort lane's follow
+//           views: the focus on the side plane, filtered) or, with LARECOMP_VR_FOLLOW set, the Follow Mode's follow
 //   A       the table point in app space: LARECOMP_VR_DIST in front of the head at LARECOMP_VR_PITCH below the horizon
 //           (side views: SIDE_PITCH, a wall at about eye height), plus the player's height offset
 //   s       LARECOMP_VR_SCALE (0.067 m per unit) times the player's size

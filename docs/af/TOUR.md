@@ -10,7 +10,7 @@ tools/vr_tour.sh --quick                         # 3 spots, 90 Hz, about 2.6 min
 tools/vr_tour.sh                                 # 7 spots, 90 and 120 Hz, about 7 minutes of runs
 tools/vr_tour.sh --compare build/vr_tour/<older> # run, then compare with an older report
 tools/vr_tour.sh --diff <older> <newer>          # compare two reports without a run
-tools/vr_tour.sh --tree ~/Games/AwakeningFrame/wt/perf --only cave
+tools/vr_tour.sh --tree ../other-checkout --only cave
 ```
 
 Needs, in the tree it checks: `build/lasrecomp`, `build/lasgame.so`, `extracted/`, the test save
@@ -119,7 +119,7 @@ are meant to trip it. Exit status 1 when anything is flagged; the result is `com
 - Shader compiles on first visit can make a spot slow once; the second tour (the cache is kept) is the one to trust.
 - Screenshots are of what was submitted, at a sway phase that differs from run to run.
 
-## Requests for the overseer (log lines the tour would like; nothing was added to `runtime/`)
+## Log lines the tour would like (none exist yet)
 
 - A way to get the `[xr] N s:` line at a chosen interval (say `LARECOMP_XR_STATS_INTERVAL=2`): the fixed 5 s lines
   rarely fall inside a 6-10 s spot window, so sets/s is a partial window for some spots (`~`).

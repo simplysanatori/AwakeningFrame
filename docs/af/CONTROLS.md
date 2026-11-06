@@ -32,6 +32,20 @@ Plus, Minus) name the Frame control that does it:
 
 What the rig does with these (ranges, the blink, side views): docs/af/RIG.md.
 
+**View + Menu.** The overlay menu opens on Back + Start together, and the other press must not reach the game as Minus
+or Plus. `chord_filter` (`xr_input.c`) holds a press of either back for `LARECOMP_XR_CHORD_MS` (120 ms) or until it is
+released: the other joining in that time is the chord, which goes to the menus only, both in one refresh, and keeps both
+from the game until both are up. Otherwise the press goes to the game, a tap (released inside the window) replayed for
+the time it was held, 60 ms at least. Once one has gone to the game, the other joining later is no chord: the game gets
+it too, and the menus see only the first.
+
+**Menu laser.** While the recomp menu or its name entry has the controls, the pointing controller (the right one, or the
+left with the VR tab's Pointer Hand, `LARECOMP_VR_POINTER_HAND`) shows a beam and a dot where its aim ray meets the HUD
+panel (`xr_pointer.c`, two quad layers drawn once; `xr_input_pointer` moves them each refresh for that refresh's display
+time). A press of its trigger that began while the laser was shown belongs to the laser until it is let go: it clicks
+the menu if it began on the panel (`menu_xr_pointer`), and neither the game nor the menu's pad input sees it. The right
+stick scrolls while the dot is on the panel, and the controller ticks when the dot reaches a new control.
+
 The right stick turns or tilts, not both: the axis it was first pushed along wins until the other is 1.4 times bigger, and
 the other reads zero, so a thumb that wanders does not tilt a turn. Both stick clicks pressed together for 0.1 s are the
 rig's: the game gets neither until both are let go. A single click, or both for less than 0.1 s, goes to the game (as far as this port knows the
@@ -43,15 +57,16 @@ function in play that this port knows of (the tracker overlay uses ZR on the map
 the shield, so most buttons do nothing until the sword, the Boots and the items are found. Not confirmed in play yet.
 
 Face buttons: the Frame's A B X Y are taken to be laid out as an Xbox pad's (A bottom, B right, X left, Y top) and are matched to the
-Switch's diamond by position, like a Switch Pro controller in your hands (the Frame's B is the Switch's A). With the Controls tab's
+Switch's diamond by position, like a Switch Pro controller in your hands (the Frame's B is the Switch's A). With the Controls tab's (or the VR tab's)
 "Buttons match labels" on (`face_buttons_by_label = 1`) they match by letter instead (the Frame's A is the Switch's A). A rebind in
 the Controls tab applies on top of either; the prompts follow it. In the menus the right button (the Frame's B, by position)
 confirms, as on a Switch pad, unless the Controls tab's menu confirm is set to the controller's own convention.
 
 ## Comfort layout
 
-`LARECOMP_XR_LAYOUT=comfort` (the environment of the launch, e.g. in `session.env`) restores the first layout, built around
-the Frame's triggers rather than the Switch's: face buttons by letter, otherwise:
+The VR tab's Controller Layout (`LARECOMP_XR_LAYOUT=comfort` from the launch environment, e.g. `session.env`, also sets
+it) switches to a layout built around the Frame's triggers rather than the Switch's: face buttons by letter, otherwise.
+The change applies at once; a control held through it stays silent until let go (`xr_input_set_layout`):
 
 | Frame | Switch | Game |
 |---|---|---|
