@@ -162,7 +162,7 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
     XrFrameEndInfo ei = {.type = XR_TYPE_FRAME_END_INFO, .displayTime = fs->predictedDisplayTime,
                          .environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE, .layerCount = n, .layers = layers};
     vk_queue_lock();
-    XrResult r = p_xrEndFrame(g_xr.session, &ei);
+    XrResult r = XR_RT(p_xrEndFrame(g_xr.session, &ei));
     vk_queue_unlock();
     xr_ok_(r, "xrEndFrame");
 }
@@ -238,7 +238,7 @@ static void *xr_thread(void *arg) {
         XrFrameBeginInfo bi = {.type = XR_TYPE_FRAME_BEGIN_INFO};
         uint64_t t_begin = plat_now_ns();
         vk_queue_lock();
-        XrResult r = p_xrBeginFrame(g_xr.session, &bi);
+        XrResult r = XR_RT(p_xrBeginFrame(g_xr.session, &bi));
         vk_queue_unlock();
         if (XR_FAILED(r)) { xr_ok_(r, "xrBeginFrame"); continue; }
         xr_update_app_space(fs.predictedDisplayTime);

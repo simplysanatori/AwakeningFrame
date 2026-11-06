@@ -151,6 +151,14 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBi
         LOG("[vk] (validation, not ours: the OpenXR runtime / a layer changed the device's create info: %s)\n", d->pMessageIdName);
         return VK_FALSE;
     }
+#ifdef LARECOMP_HAVE_XR
+    if (xr_mode() && xr_in_runtime_call()) {  // (SteamVR's own objects on our device, made inside its OpenXR calls)
+        static atomic_uint nrt;
+        if (atomic_fetch_add_explicit(&nrt, 1, memory_order_relaxed) < 20)
+            LOG("[vk] (validation, not ours: inside an OpenXR call, the runtime's own: %s)\n", d->pMessageIdName ? d->pMessageIdName : "?");
+        return VK_FALSE;
+    }
+#endif
     bool stop = sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT && getenv("LARECOMP_VK_VALIDATION_STOP");
     if (sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT &&
         (stop || atomic_fetch_add_explicit(&n, 1, memory_order_relaxed) < 500)) LOG("[vk] %s\n", d->pMessage);
@@ -832,6 +840,9 @@ static void create_device(void) {
                                             .uniformAndStorageBuffer8BitAccess = have12.uniformAndStorageBuffer8BitAccess,
                                             .storageBuffer8BitAccess = have12.storageBuffer8BitAccess,
                                             .scalarBlockLayout = have12.scalarBlockLayout, .bufferDeviceAddress = g_vk.bda, .pNext = &f13};
+    // VR mode: SteamVR makes shader modules of its own on our device at xrCreateSession that declare
+    // ShaderViewportIndexLayerEXT (validation: VUID-VkShaderModuleCreateInfo-pCode-08740): their features, as supported
+    if (xr_mode()) f12.shaderOutputViewportIndex = have12.shaderOutputViewportIndex, f12.shaderOutputLayer = have12.shaderOutputLayer;
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
                                             .storageBuffer16BitAccess = VK_TRUE, .pNext = &f12};
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,

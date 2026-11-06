@@ -127,12 +127,16 @@ static XrSpace ref_space(XrReferenceSpaceType type, XrPosef pose) {
 }
 static const XrPosef identity = {.orientation = {0, 0, 0, 1}};
 
+__thread bool xr_rt_call;
+bool xr_in_runtime_call(void) { return xr_rt_call; }
+
 bool xr_session_create(void) {
     XrGraphicsBindingVulkan2KHR gb = {.type = XR_TYPE_GRAPHICS_BINDING_VULKAN2_KHR, .instance = g_xr.vinst,
                                       .physicalDevice = g_xr.vphys, .device = g_xr.vdev, .queueFamilyIndex = g_xr.qfam,
                                       .queueIndex = 0};
     XrSessionCreateInfo ci = {.type = XR_TYPE_SESSION_CREATE_INFO, .next = &gb, .systemId = g_xr.sys};
-    if (!XR_OK(p_xrCreateSession(g_xr.inst, &ci, &g_xr.session))) return false;
+    XrResult r = XR_RT(p_xrCreateSession(g_xr.inst, &ci, &g_xr.session));
+    if (!xr_ok_(r, "xrCreateSession")) return false;
     g_xr.local = ref_space(XR_REFERENCE_SPACE_TYPE_LOCAL, identity);
     g_xr.view = ref_space(XR_REFERENCE_SPACE_TYPE_VIEW, identity);
     g_xr.app = ref_space(XR_REFERENCE_SPACE_TYPE_LOCAL, identity);

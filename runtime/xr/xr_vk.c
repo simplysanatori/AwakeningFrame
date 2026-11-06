@@ -6,6 +6,59 @@
 #include "../rt.h"
 #include "xr_internal.h"
 
+// The Vulkan entry points the runtime gets (pfnGetInstanceProcAddr): its queue calls take the queue lock. SteamVR
+// submits to the app's queue from inside xrWaitFrame too (validation: THREADING ERROR with the recorder's
+// vkQueueSubmit2), which the OpenXR spec does not list among the calls that need the queue synchronised, and holding
+// the lock over xrWaitFrame's wait would stall the recorder for most of each refresh. So the runtime's own queue calls
+// are locked one by one, whatever OpenXR call they come from. (One device: the real entry points dispatch by handle.)
+static PFN_vkQueueSubmit r_QueueSubmit;
+static PFN_vkQueueSubmit2 r_QueueSubmit2;
+static PFN_vkQueueWaitIdle r_QueueWaitIdle;
+static PFN_vkQueueBindSparse r_QueueBindSparse;
+static PFN_vkQueuePresentKHR r_QueuePresentKHR;
+static PFN_vkDeviceWaitIdle r_DeviceWaitIdle;
+static PFN_vkGetDeviceProcAddr r_GetDeviceProcAddr;
+static VKAPI_ATTR VkResult VKAPI_CALL l_QueueSubmit(VkQueue q, uint32_t n, const VkSubmitInfo *s, VkFence f) {
+    vk_queue_lock(); VkResult r = r_QueueSubmit(q, n, s, f); vk_queue_unlock(); return r;
+}
+static VKAPI_ATTR VkResult VKAPI_CALL l_QueueSubmit2(VkQueue q, uint32_t n, const VkSubmitInfo2 *s, VkFence f) {
+    vk_queue_lock(); VkResult r = r_QueueSubmit2(q, n, s, f); vk_queue_unlock(); return r;
+}
+static VKAPI_ATTR VkResult VKAPI_CALL l_QueueWaitIdle(VkQueue q) {
+    vk_queue_lock(); VkResult r = r_QueueWaitIdle(q); vk_queue_unlock(); return r;
+}
+static VKAPI_ATTR VkResult VKAPI_CALL l_QueueBindSparse(VkQueue q, uint32_t n, const VkBindSparseInfo *b, VkFence f) {
+    vk_queue_lock(); VkResult r = r_QueueBindSparse(q, n, b, f); vk_queue_unlock(); return r;
+}
+static VKAPI_ATTR VkResult VKAPI_CALL l_QueuePresentKHR(VkQueue q, const VkPresentInfoKHR *p) {
+    vk_queue_lock(); VkResult r = r_QueuePresentKHR(q, p); vk_queue_unlock(); return r;
+}
+static VKAPI_ATTR VkResult VKAPI_CALL l_DeviceWaitIdle(VkDevice d) {
+    vk_queue_lock(); VkResult r = r_DeviceWaitIdle(d); vk_queue_unlock(); return r;
+}
+// name's locked stand-in (real: its real entry point, stored), or real itself
+static PFN_vkVoidFunction locked(const char *name, PFN_vkVoidFunction real) {
+    if (!real) return NULL;
+#define L(fn, ...) if (!strcmp(name, "vk" #fn) __VA_ARGS__) { r_##fn = (PFN_vk##fn)real; return (PFN_vkVoidFunction)l_##fn; }
+    L(QueueSubmit) L(QueueSubmit2) L(QueueSubmit2, || !strcmp(name, "vkQueueSubmit2KHR")) L(QueueWaitIdle) L(QueueBindSparse)
+    L(QueuePresentKHR) L(DeviceWaitIdle)
+#undef L
+    return real;
+}
+static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL l_GetDeviceProcAddr(VkDevice d, const char *name) {
+    if (!strcmp(name, "vkGetDeviceProcAddr")) return (PFN_vkVoidFunction)l_GetDeviceProcAddr;
+    return locked(name, r_GetDeviceProcAddr(d, name));
+}
+static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL l_GetInstanceProcAddr(VkInstance i, const char *name) {
+    PFN_vkVoidFunction f = vkGetInstanceProcAddr(i, name);
+    if (!strcmp(name, "vkGetInstanceProcAddr")) return (PFN_vkVoidFunction)l_GetInstanceProcAddr;
+    if (!strcmp(name, "vkGetDeviceProcAddr")) {
+        if (f) r_GetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)f;
+        return f ? (PFN_vkVoidFunction)l_GetDeviceProcAddr : NULL;
+    }
+    return locked(name, f);
+}
+
 VkResult xr_vk_create_instance(const VkInstanceCreateInfo *ci, VkInstance *out) {
     if (!xr_instance_create()) return VK_ERROR_INITIALIZATION_FAILED;
     XrGraphicsRequirementsVulkan2KHR req = {.type = XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN2_KHR};
@@ -16,7 +69,7 @@ VkResult xr_vk_create_instance(const VkInstanceCreateInfo *ci, VkInstance *out) 
         (unsigned)XR_VERSION_MINOR(req.minApiVersionSupported), (unsigned)XR_VERSION_MAJOR(req.maxApiVersionSupported),
         (unsigned)XR_VERSION_MINOR(req.maxApiVersionSupported), VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api));
     XrVulkanInstanceCreateInfoKHR xi = {.type = XR_TYPE_VULKAN_INSTANCE_CREATE_INFO_KHR, .systemId = g_xr.sys,
-                                        .pfnGetInstanceProcAddr = vkGetInstanceProcAddr, .vulkanCreateInfo = ci};
+                                        .pfnGetInstanceProcAddr = l_GetInstanceProcAddr, .vulkanCreateInfo = ci};
     VkResult vr = VK_ERROR_INITIALIZATION_FAILED;
     if (!XR_OK(p_xrCreateVulkanInstanceKHR(g_xr.inst, &xi, out, &vr))) return VK_ERROR_INITIALIZATION_FAILED;
     if (vr == VK_SUCCESS) g_xr.vinst = *out;
@@ -33,7 +86,7 @@ VkPhysicalDevice xr_vk_physical_device(VkInstance inst) {
 
 VkResult xr_vk_create_device(VkPhysicalDevice phys, const VkDeviceCreateInfo *ci, VkDevice *out) {
     XrVulkanDeviceCreateInfoKHR xi = {.type = XR_TYPE_VULKAN_DEVICE_CREATE_INFO_KHR, .systemId = g_xr.sys,
-                                      .pfnGetInstanceProcAddr = vkGetInstanceProcAddr, .vulkanPhysicalDevice = phys,
+                                      .pfnGetInstanceProcAddr = l_GetInstanceProcAddr, .vulkanPhysicalDevice = phys,
                                       .vulkanCreateInfo = ci};
     VkResult vr = VK_ERROR_INITIALIZATION_FAILED;
     if (!XR_OK(p_xrCreateVulkanDeviceKHR(g_xr.inst, &xi, out, &vr))) return VK_ERROR_INITIALIZATION_FAILED;
@@ -87,7 +140,7 @@ static bool chain_create(XrChain *c, const char *what, uint32_t w, uint32_t h) {
                                 .format = chain_fmt, .sampleCount = 1, .width = w, .height = h, .faceCount = 1,
                                 .arraySize = 1, .mipCount = 1};
     vk_queue_lock();  // (a runtime may use the queue to set the images up: the mock does)
-    XrResult cr = p_xrCreateSwapchain(g_xr.session, &ci, &c->sc);
+    XrResult cr = XR_RT(p_xrCreateSwapchain(g_xr.session, &ci, &c->sc));
     vk_queue_unlock();
     if (!xr_ok_(cr, "xrCreateSwapchain")) return false;
     c->fmt = chain_fmt, c->view_fmt = chain_view_fmt, c->w = w, c->h = h;
@@ -137,7 +190,7 @@ void xr_chains_destroy(void) {
     for (int k = 0; k < 6; k++) {
         XrChain *c = cs[k];
         for (uint32_t i = 0; i < c->count; i++) if (c->view[i]) vkDestroyImageView(g_xr.vdev, c->view[i], NULL);
-        if (c->sc) { vk_queue_lock(); p_xrDestroySwapchain(c->sc); vk_queue_unlock(); }
+        if (c->sc) { vk_queue_lock(); XR_RT(p_xrDestroySwapchain(c->sc)); vk_queue_unlock(); }
         memset(c, 0, sizeof *c);
     }
 }
@@ -146,12 +199,12 @@ void xr_chains_destroy(void) {
 bool xr_chain_acquire(XrChain *c, uint32_t *index) {
     XrSwapchainImageAcquireInfo ai = {.type = XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
     vk_queue_lock();
-    XrResult r = p_xrAcquireSwapchainImage(c->sc, &ai, index);
+    XrResult r = XR_RT(p_xrAcquireSwapchainImage(c->sc, &ai, index));
     vk_queue_unlock();
     if (!xr_ok_(r, "xrAcquireSwapchainImage")) return false;
     XrSwapchainImageWaitInfo wi = {.type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO, .timeout = 100000000};
     for (int tries = 0;; tries++) {
-        r = p_xrWaitSwapchainImage(c->sc, &wi);
+        r = XR_RT(p_xrWaitSwapchainImage(c->sc, &wi));
         if (r != XR_TIMEOUT_EXPIRED) break;
         if (tries == 10) LOG("[xr] still waiting for a swapchain image after 1 s\n");
     }
@@ -161,7 +214,7 @@ bool xr_chain_acquire(XrChain *c, uint32_t *index) {
 void xr_chain_release(XrChain *c) {
     XrSwapchainImageReleaseInfo ri = {.type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
     vk_queue_lock();
-    XrResult r = p_xrReleaseSwapchainImage(c->sc, &ri);
+    XrResult r = XR_RT(p_xrReleaseSwapchainImage(c->sc, &ri));
     vk_queue_unlock();
     xr_ok_(r, "xrReleaseSwapchainImage");
 }

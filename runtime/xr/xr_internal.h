@@ -33,6 +33,8 @@ extern PFN_xrGetDisplayRefreshRateFB p_xrGetDisplayRefreshRateFB;
 extern PFN_xrRequestDisplayRefreshRateFB p_xrRequestDisplayRefreshRateFB;
 extern PFN_xrConvertTimeToTimespecTimeKHR p_xrConvertTimeToTimespecTimeKHR;  // (XR_KHR_convert_timespec_time)
 
+extern __thread bool xr_rt_call;  // (xr_in_runtime_call)
+#define XR_RT(call) ({ xr_rt_call = true; XrResult r_ = (call); xr_rt_call = false; r_; })
 const char *xr_result_str(XrResult r);
 #define XR_OK(call) xr_ok_((call), #call)
 bool xr_ok_(XrResult r, const char *what);  // logs a failure; true when it succeeded

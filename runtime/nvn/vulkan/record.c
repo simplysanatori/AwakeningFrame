@@ -556,8 +556,18 @@ void rec_EndCommandBuffer(VkCommandBuffer cb) {
 // The queue's external synchronisation with the VR mode: the OpenXR runtime uses the queue inside xrBeginFrame,
 // xrEndFrame, xrAcquireSwapchainImage and xrReleaseSwapchainImage (runtime/xr), and those run on the XR and presenting
 // threads; every submission, present and wait for the queue here takes this lock. (Flat mode: never contended.)
-static pthread_mutex_t queue_mu = PTHREAD_MUTEX_INITIALIZER;
-void vk_queue_lock(void) { pthread_mutex_lock(&queue_mu); }
+// Recursive: SteamVR also submits to the queue from inside its own calls - xrWaitFrame among them - through the
+// locked entry points runtime/xr/xr_vk.c hands it, also within xrEndFrame and the others that hold the lock already.
+static pthread_mutex_t queue_mu;
+static pthread_once_t queue_once = PTHREAD_ONCE_INIT;
+static void queue_mu_init(void) {
+    pthread_mutexattr_t a;
+    pthread_mutexattr_init(&a);
+    pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&queue_mu, &a);
+    pthread_mutexattr_destroy(&a);
+}
+void vk_queue_lock(void) { pthread_once(&queue_once, queue_mu_init); pthread_mutex_lock(&queue_mu); }
 void vk_queue_unlock(void) { pthread_mutex_unlock(&queue_mu); }
 
 typedef struct {
