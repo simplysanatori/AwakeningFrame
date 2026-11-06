@@ -234,7 +234,7 @@ uint32_t xr_pointer_layers(XrCompositionLayerQuad out[2]) {
     out[0].pose = (XrPosef){basis_quat(x, d, cross(x, d)), {mid.x, mid.y, mid.z}};
     out[0].size = (XrExtent2Df){far_w, p->length};
     // the dot, facing the head, sized to stay readable with distance; it swells with p->swell (0..1)
-    float r = (0.006f + 0.0035f * p->length) * (1 + 0.5f * p->swell);
+    float r = (0.007f + 0.004f * p->length) * (1 + 0.5f * p->swell);
     V3 n = norm(sub(head, end));
     V3 u = norm(cross(fabsf(n.y) < 0.9f ? (V3){0, 1, 0} : (V3){1, 0, 0}, n));
     out[1] = base;
