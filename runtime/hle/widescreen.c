@@ -9,6 +9,7 @@
 #include "../hle.h"
 #include "../settings.h"
 #include "../nvn/cam_override.h"
+#include "../nvn/vr_cull.h"
 
 #define BACKDROP_HASHES 0x71fe31bbf03c3515ull
 
@@ -97,6 +98,7 @@ float rt_aspect_site(int site) {
 float rt_cull_aspect(float orig) {
     static float last = -1;
     if (orig != last && ENV("LARECOMP_LOG_CULL")) { LOG("[widescreen] culling aspect field %f\n", orig); last = orig; }
+    if (g_cam_cull) vr_cull_note_game(0, orig);  // (VR: the table fit needs the game's own frustum)
     float ca = cam_override_cull_aspect();  // (LARECOMP_FREECAM_CULL: a widened culling frustum for the free-camera probe)
     return (ca > 0 ? ca : rt_aspect_site(6)) * (orig > 0.1f && orig < 10.0f ? orig / (16.0f / 9.0f) : 1.0f);
 }
@@ -116,6 +118,7 @@ float rt_skysea_margin(void) {
 float rt_fovy(float orig) {
     static float last = -1;
     if (orig != last && ENV("LARECOMP_LOG_CULL")) { LOG("[widescreen] fovy field %f\n", orig); last = orig; }
+    if (g_cam_cull) vr_cull_note_game(orig, 0);
     float fscale = cam_override_fovy_scale();  // (LARECOMP_FREECAM_CULL's fovy scale: the angle, radians or degrees alike)
     if (fscale != 1.0f && orig > 0) {
         bool was_degrees = orig > 3.2f;

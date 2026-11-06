@@ -880,6 +880,28 @@ static VkSpan copy_dedupe(int slot, const void *data, uint64_t size, uint64_t al
 static struct { uint64_t addr, size, seq; VkSpan span; uint64_t scanned; } gcopy[GCOPY_TAB];  // (scanned: heap size then, 0 not)
 static uint64_t gcopy_gen;  // bumped to drop every shared copy (guest memory written mid-list)
 static void guest_copy_flush(void) { gcopy_gen++; }
+// cam_override_patch's substitute for a bound range, as a transient copy shared by the draws of one submission that bind
+// the same range in the same eye (guest memory is stable within a submission, as for guest_copy; the camera epoch
+// covers a new latch). LARECOMP_CAM_PATCH_NOSHARE=1: a fresh patch and copy per binding, as before.
+static bool cam_patched(uint64_t addr, uint64_t size, VkSpan *out) {
+    static struct { uint64_t addr, size, seq; uint32_t epoch; int8_t eye; bool hit; VkSpan span; } memo[2048];
+    static int noshare = -1;
+    if (noshare < 0) noshare = getenv("LARECOMP_CAM_PATCH_NOSHARE") != NULL;
+    uint64_t seq = vk_pending_seq() + (gcopy_gen << 40), h = (addr * 0x9E3779B97F4A7C15ull) ^ (size * 0xC2B2AE3D27D4EB4Full);
+    uint32_t epoch = cam_override_epoch(), slot = (uint32_t)(h ^ (h >> 32)) & 2047;
+    if (!noshare && memo[slot].seq == seq && memo[slot].addr == addr && memo[slot].size == size && memo[slot].epoch == epoch &&
+        memo[slot].eye == g_eye) {
+        if (memo[slot].hit) *out = memo[slot].span;
+        return memo[slot].hit;
+    }
+    uint8_t pb[4096];
+    bool hit = cam_override_patch((const void *)(uintptr_t)addr, size, pb);
+    if (hit) *out = vk_transient_copy(pb, size, 256);
+    memo[slot].addr = addr, memo[slot].size = size, memo[slot].seq = seq, memo[slot].epoch = epoch, memo[slot].eye = (int8_t)g_eye;
+    memo[slot].hit = hit, memo[slot].span = hit ? *out : (VkSpan){0};
+    return hit;
+}
+
 // scan: (lazy heap chunks, a uniform buffer of a shader with global memory) the range is also scanned for heap
 // pointers (gc_scan_pointers), once per shared copy: its contents can't change while the copy is shared (again if the
 // heap grew since: pointers past its end were passed over).
@@ -1029,6 +1051,26 @@ static struct {
     uint32_t restart_index;
     uint64_t copy_row_stride, copy_image_stride;
 } st;
+
+// The largest index of an index buffer (restart index excluded), for bounding the vertex copy. In stereo, eye 1 runs the
+// same list over the same memory (eye 0's writes are undone), so eye 0's results are reused (LARECOMP_STEREO_NO_IDX_MEMO=1: off).
+static struct { const void *src; uint32_t count, isz, restart, max, gen; } idx_memo[4096];
+static uint32_t idx_memo_gen = 1;
+static uint32_t index_max(const void *src, uint32_t count, uint32_t isz, uint32_t restart) {
+    static int off = -1;
+    if (off < 0) off = getenv("LARECOMP_STEREO_NO_IDX_MEMO") != NULL;
+    uint64_t a = (uint64_t)(uintptr_t)src;
+    unsigned h = (unsigned)((a >> 2) ^ (a >> 14) ^ count * 0x9E37u) & 4095;
+    if (g_eye == 1 && !off && idx_memo[h].gen == idx_memo_gen && idx_memo[h].src == src && idx_memo[h].count == count &&
+        idx_memo[h].isz == isz && idx_memo[h].restart == restart)
+        return idx_memo[h].max;
+    uint32_t m = 0;
+    if (isz == 2) { const uint16_t *q = src; for (uint32_t i = 0; i < count; i++) if (q[i] > m && q[i] != (uint16_t)restart) m = q[i]; }
+    else { const uint32_t *q = src; for (uint32_t i = 0; i < count; i++) if (q[i] > m && q[i] != restart) m = q[i]; }
+    if (g_eye == 0) idx_memo[h].src = src, idx_memo[h].count = count, idx_memo[h].isz = isz, idx_memo[h].restart = restart, idx_memo[h].max = m,
+                    idx_memo[h].gen = idx_memo_gen;
+    return m;
+}
 
 static bool eye1_skip_rt(void) {
     if (g_eye != 1) return false;
@@ -3686,8 +3728,8 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
         if (cam_override_ubo(stage, r.addr, r.size, cb)) return ubo_span(vk_transient_copy(cb, size, 256), size);
     }
     if (cam_override_active() && size <= 4096) {  // (the camera's matrices copied into the pass's other blocks: cam_override_patch)
-        uint8_t pb[4096];
-        if (cam_override_patch((const void *)(uintptr_t)r.addr, size, pb)) return ubo_span(vk_transient_copy(pb, size, 256), size);
+        VkSpan ps;
+        if (cam_patched(r.addr, size, &ps)) return ubo_span(ps, size);
     }
     // snapshot: later CPU writes must not leak in. Shared by the draws of one submission binding the same range:
     // within a command list nothing writes guest memory (no inline UpdateUniformBuffer: that writes through below
@@ -7152,6 +7194,8 @@ static void draw_(CmdRec *r, bool indexed) {
         uint8_t cam_cb[4096];  // (free-camera probe: the substituted camera buffer, as cbuf_info binds it; promoted words come from here too)
         int cam_tried = -1;
         bool cam_hit = false;
+        const uint8_t *cam_src = NULL;
+        VkSpan cam_ps;
         for (int i = 0; i < si->npush; i++) {
             Range r = st.ubuf[sg][si->push_cb[i] - 3];
             uint32_t o = si->push_off[i];
@@ -7162,9 +7206,12 @@ static void draw_(CmdRec *r, bool indexed) {
                 if (psz > sizeof cam_cb) psz = sizeof cam_cb;
                 if (cam_tried != idx) {
                     cam_tried = idx;
-                    cam_hit = (r.size == 320 && cam_override_ubo(sg, r.addr, r.size, cam_cb)) || cam_override_patch((const void *)(uintptr_t)r.addr, psz, cam_cb);
+                    cam_src = NULL;
+                    if (r.size == 320 && cam_override_ubo(sg, r.addr, r.size, cam_cb)) cam_src = cam_cb;
+                    else if (cam_patched(r.addr, psz, &cam_ps)) cam_src = cam_ps.ptr;
+                    cam_hit = cam_src != NULL;
                 }
-                if (cam_hit && o + 4 <= psz) memcpy(&pw[i], cam_cb + o, 4);
+                if (cam_hit && o + 4 <= psz) memcpy(&pw[i], cam_src + o, 4);
             }
         }
         rec_CmdPushConstants(cb, pr->layout, sg ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT, si->push_base,
@@ -7210,8 +7257,7 @@ static void draw_(CmdRec *r, bool indexed) {
                 scan_src = src; scan_isz = isz; scan_restart = restart;  // max_index only if a stream gets copied
             } else {
                 ib = vk_transient_copy(src, (uint64_t)count * isz + 4, 4);
-                if (isz == 2) { const uint16_t *s = src; for (uint32_t i = 0; i < count; i++) if (s[i] > max_index && s[i] != (uint16_t)restart) max_index = s[i]; }
-                else { const uint32_t *s = src; for (uint32_t i = 0; i < count; i++) if (s[i] > max_index && s[i] != restart) max_index = s[i]; }
+                max_index = index_max(src, count, isz, restart);
             }
         } else if (native) {  // 8-bit indices: widen to 16
             ib = vk_transient((uint64_t)count * 2 + 4, 4);
@@ -7254,8 +7300,7 @@ static void draw_(CmdRec *r, bool indexed) {
                 continue;
             }
             if (scan_src) {  // copying after all: the index scan bounds the copy
-                if (scan_isz == 2) { const uint16_t *q = scan_src; for (uint32_t i = 0; i < icount; i++) if (q[i] > max_index && q[i] != (uint16_t)scan_restart) max_index = q[i]; }
-                else { const uint32_t *q = scan_src; for (uint32_t i = 0; i < icount; i++) if (q[i] > max_index && q[i] != scan_restart) max_index = q[i]; }
+                max_index = index_max(scan_src, icount, scan_isz, scan_restart);
                 max_index += 1;
                 if (base_vertex > 0) max_index += (uint32_t)base_vertex;
                 scan_src = NULL;
@@ -8693,19 +8738,36 @@ static void st_ts_resolve(void) {  // (the present) finished frames' sums
     }
 }
 
+// render-thread time of each eye's run of the lists, per game frame, every 2 s (what sharing eye 1's work could save)
+static void stereo_note_cpu(uint64_t ns0, uint64_t ns1) {
+    static uint64_t frame = ~0ull, s0, s1, t_last;
+    static unsigned nf;
+    uint64_t f = renderer_exec_frame(), now = plat_now_ns();
+    if (f != frame) frame = f, nf++;
+    s0 += ns0, s1 += ns1;
+    if (!t_last) t_last = now;
+    if (now - t_last >= 2000000000ull && nf) {
+        LOG("[stereo] render CPU per game frame: eye 0 %.2f ms, eye 1 %.2f ms over %u frames\n", s0 / 1e6 / nf, s1 / 1e6 / nf, nf);
+        s0 = s1 = 0, nf = 0, t_last = now;
+    }
+}
+
 static void stereo_execute(uint64_t handle) {
     static bool cams;
     if (!cams) { cams = true; stereo_cameras_init(); }
     __typeof__(st) start = st;
     vk_end_pass();
     gw_n = 0, gw_used = 0;
+    idx_memo_gen++;
     g_eye = 0;
     cam_override_set_eye(0);
+    uint64_t t0 = plat_now_ns();
     uint32_t q = st_ts_begin();
     exec_list(handle, 0);
     vk_end_pass();
     st_ts_end(q, 0);
     gw_restore();
+    uint64_t t1 = plat_now_ns();
     st = start;
     st.rt_dirty = true;
     g_eye = 1;
@@ -8716,6 +8778,7 @@ static void stereo_execute(uint64_t handle) {
     vk_end_pass();
     st_ts_end(q, 1);
     vk_stereo_swap(false);
+    stereo_note_cpu(t1 - t0, plat_now_ns() - t1);
     g_eye = -1;
     cam_override_set_eye(0);
     st.rt_dirty = true;

@@ -150,6 +150,7 @@ static bool eye_fn(const CamLatch *l, const float pivot_in[3], float V[2][16], f
     if (!cfg.init) cfg_init();
     float pivot_raw[3] = {pivot_in[0], pivot_in[1], pivot_in[2]}, pivot[3];
     anchor_update(pivot_raw, pivot);
+    cam_override_table_anchor(pivot);  // (perf lane: the culling fit centres the table here)
     if (!cfg.have_table) {
         if (!cfg.have_pitch) {
             float p = asinf(fminf(fmaxf(-l->ref.fwd[1], -1.0f), 1.0f)) * (float)(180.0 / M_PI);
@@ -247,8 +248,16 @@ bool stereo_eye_matrices(int eye, float V[16], float P[16]) {
 
 int stereo_set_views(void) {
 #ifdef LARECOMP_HAVE_XR
-    static uint64_t n, bad, split, gone;
+    static uint64_t n, bad, split, gone, repeats, prev_id, t_log;
     uint64_t id[2] = {g_out[0].id, g_out[1].id};
+    if (id[0] && id[0] == prev_id) repeats++;  // (an older output again: the poses go with it)
+    prev_id = id[0];
+    uint64_t now = plat_now_ns();
+    if (now - t_log > 10000000000ull) {
+        if (t_log) LOG("[stereo] poses: %llu sets in 10 s, %llu showed an older eye output again (with its own poses)\n",
+                       (unsigned long long)n, (unsigned long long)repeats);
+        t_log = now, n = repeats = 0;
+    }
     XrEyeView ev[2] = {g_out[0].ev, g_out[1].ev};
     int r = id[0] && id[1] ? xr_set_views(id, ev) : -1;
     n++;

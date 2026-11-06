@@ -41,6 +41,9 @@ bool cam_override_ubo(int stage, uint64_t addr, uint64_t size, void *out320);
 // Any other bound buffer (48..4096 bytes): a copy with the camera's matrices (and eye position) found in it replaced by the
 // substitute camera's; false (nothing written) when nothing matched or the probe is off / identity / passthrough.
 bool cam_override_patch(const void *guest, uint64_t size, void *out);
+// Changes whenever the substitutes may change (a new latch, a new configuration): a substitute made for a buffer stays
+// right while this, the eye and the buffer's bytes stay the same.
+uint32_t cam_override_epoch(void);
 
 // Per-draw probe info (LARECOMP_FREECAM_LOG): filled by exec.c on every draw while logging.
 typedef struct {
@@ -60,6 +63,8 @@ void cam_override_draw(const CamDrawInfo *d);
 // Turns the probe's hooks on; widened culling (3.2:1.5) unless LARECOMP_FREECAM_CULL says otherwise.
 typedef bool (*CamEyeFn)(const struct CamLatch *l, const float pivot[3], float V[2][16], float P[2][16]);
 void cam_override_stereo(CamEyeFn fn, bool identity);
+// (stereo.c, once per latch) where the table's centre sits in the world (the followed anchor, not the raw pivot)
+void cam_override_table_anchor(const float a[3]);
 void cam_override_set_eye(int eye);         // the eye being executed (0 / 1)
 bool cam_override_eye_ready(void);          // the latched frame has eye cameras (substitution is on for it)
 // Per eye the 320 bytes get floats 0-47 (view, projection, view-projection), 48-63 (the rotation-only block: rows
