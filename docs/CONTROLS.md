@@ -25,6 +25,11 @@ gamepad keeps working alongside the Frame controllers.
 | Left D-pad | D-pad | D-pad items, when the D-pad is set to items |
 | A single stick click | Stick click | Reaches the game; it has no use in play |
 
+**Menu and View.** A press of Menu or View is held back for 120 ms, or until you let go if that is sooner, to see
+whether the other one joins it. If it does, that is the game's menu, and neither press reaches the game, so the pause
+menu and the map don't open under it. If not, the press goes to the game as a press (a quick tap is held for at least
+60 ms), so Menu alone still pauses and View alone still shows the map, a moment late.
+
 At the start of the game Link has only the shield, so most buttons do
 nothing until the sword, the Boots and the items are found.
 
@@ -68,7 +73,8 @@ a warp, a camera cut) blink to black and back. There is no sound.
 
 **Buttons Match Labels** (VR tab or Controls tab, off by default): A, B, X
 and Y work as printed on the Frame controllers instead of by position. The
-Frame's A is then the Switch's A.
+Frame's A is then the Switch's A. This and the layout apply at once; a button
+held through the change stays silent until you let go of it.
 
 **Comfort** (VR tab, *Controller Layout*): built around the Frame's
 triggers instead of the Switch's layout, with the face buttons by label.
@@ -92,6 +98,16 @@ it back, and B goes back to the tab bar. Rows set by a variable in
 
 In menus the right face button (the Frame's B, by position) confirms, as on a
 Switch, unless the Controls tab sets the controller's own convention.
+
+**Pointer.** While this menu is open, the pointing controller (the right one
+by default) casts a green laser with a gold dot where it meets the panel. Point
+at a row and pull its trigger to click. Hold it to drag a slider. Push the
+right stick up or down to scroll, whichever hand points. The controller ticks
+when the dot reaches a new control (off with the Controls tab's Rumble). That
+trigger never reaches the game while the menu is open, so a click on the close
+button doesn't swing the sword. *Pointer Hand* on the VR tab moves the laser to
+the left controller. The game's own menus (pause, inventory) still use the
+buttons.
 
 ## Rumble
 

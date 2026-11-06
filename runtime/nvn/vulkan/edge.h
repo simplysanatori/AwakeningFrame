@@ -1,4 +1,4 @@
-// Edge treatment of the VR diorama (AwakeningFrame lane "edge"; docs/af/EDGE.md).
+// Edge treatment of the VR diorama (docs/af/EDGE.md).
 //
 // The loaded world ends at the zone edge and beyond it the eye output is cleared black. This pass runs on each eye
 // output on its way into the XR eye image: it reads the eye output's colour and the scene depth once, and writes

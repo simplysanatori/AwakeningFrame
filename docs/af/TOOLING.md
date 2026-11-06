@@ -75,7 +75,7 @@ of the default checks. `test_client --bad-layout` must produce `VUID-vkCmdClearC
 (proves the layer is on); a clean run under gamescope shows two instance/device extension VUIDs
 from the WSI layer, which `VVL_NO_WSI=1` removes.
 
-## Log format for the app (what lane 3 should emit)
+## Log format for `xr_timing.log`
 
 One line per displayed frame, from the frame loop, in the app's log or a log of its own
 (`xr_timing.log`, in the data folder, previous session as `xr_timing.log.prev`). Times are

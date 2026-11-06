@@ -204,7 +204,7 @@ i=0; : > "$OUT/spots.tsv"
 for s in "${SPOTS[@]}"; do IFS='|' read -r n l c <<< "$s"; printf '%d\t%s\t%s\t%s\n' $i "$n" "$l" "$c" >> "$OUT/spots.tsv"; i=$((i + 1)); done
 : > "$OUT/sessions.tsv"
 
-# the login of the smoke tests: L+R at the title, A through the file menu (the perf lane's bench)
+# the login of the smoke tests: L+R at the title, A through the file menu (as the benchmark scripts do)
 LOGIN=$(for f in $(seq 300 60 780); do printf '%d:L:12,%d:R:12,%d:A:6,' $f $f $((f + 30)); done)
 
 run_session() {   # <kind> <hz> <dwell s>

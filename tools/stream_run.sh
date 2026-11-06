@@ -1,5 +1,5 @@
 #!/bin/bash
-# Streaming lane test session (docs/af/STREAM.md): one headless game run from a scratch copy of the test save, with the
+# Streaming test session (docs/af/STREAM.md): one headless game run from a scratch copy of the test save, with the
 # given extra environment; the log goes to <out>/game.log. Research artefacts stay outside the repo.
 #   tools/stream_run.sh <out dir> <last frame> [VAR=value ...]
 # Defaults: LARECOMP_WARP_ON_LOAD=Field:Field_11C (override in the arguments), hearts cheat, title input of the smoketest.
@@ -9,9 +9,9 @@ set -uo pipefail
 REPO=${STREAM_BIN:-$(cd "$(dirname "$0")/.." && pwd)}
 O=$1 LAST=$2; shift 2
 SAVE=${LARECOMP_SMOKE_SAVE:-$HOME/.local/share/lasrecomp-smoketest/save}
-# wait (poll every 2 min, up to an hour) while the headset is in use, the perf lane benchmarks (~/.cache/af-bench-lock)
+# wait (poll every 2 min, up to an hour) while the headset is in use, other benchmarks (~/.cache/af-bench-lock)
 # or another lasrecomp runs
-# (a lock reading "reserved:stream" is this lane's slot, held for it by the overseer)
+# (a lock reading "reserved:stream" is this script's slot, reserved for it)
 busy() { [ -e "$HOME/.cache/headset-in-use" ] || pgrep -x lasrecomp >/dev/null ||
          { [ -e "$HOME/.cache/af-bench-lock" ] && [ "$(cat "$HOME/.cache/af-bench-lock" 2>/dev/null)" != reserved:stream ]; }; }
 for i in $(seq 1 ${STREAM_WAIT_POLLS:-30}); do busy || break; echo "stream_run: headset in use / bench lock / another lasrecomp: waiting" >&2; sleep ${STREAM_POLL:-120}; done

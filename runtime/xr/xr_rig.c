@@ -16,7 +16,7 @@
 #define SCREEN_X 15.0f    // one screen cell, game units (triforce.c)
 #define SCREEN_Z 12.0f
 #define CUT_JUMP 12.0f    // the game camera's focus moving this far in one frame: a camera cut (a warp, a door)
-#define CUT_FAR 24.0f     // the anchor this far from where it should be: snap (as the comfort lane's follow)
+#define CUT_FAR 24.0f     // the anchor this far from where it should be: snap (as the Follow Mode's follow)
 #define SIDE_THIN 6.0f    // a zone thinner than this in z is a side view (as cam_pivot / widescreen.c)
 #define SIDE_PITCH 12.0f  // degrees below the horizon: a side view is a wall at about eye height
 #define MIN_ELEV 20.0f    // degrees: the head never looks along the table flatter than this (a tilt away is limited by it)
@@ -313,7 +313,7 @@ void xr_rig_update(const XrRigIn *in, XrRigPose *out) {
     bool cut = false;
     float jump2 = 0;
     for (int i = 0; i < 3; i++) jump2 += (in->raw[i] - R.last_raw[i]) * (in->raw[i] - R.last_raw[i]);
-    if (in->explicit_follow) {  // the comfort lane's follow as it is; jumps still blink
+    if (in->explicit_follow) {  // the Follow Mode's follow as it is; jumps still blink
         kind = classify(in);
         memcpy(target, in->followed, sizeof target);
         float d2 = 0;

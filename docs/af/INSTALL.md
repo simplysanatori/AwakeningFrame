@@ -1,7 +1,9 @@
-# Installing AwakeningFrame on the Steam Frame (demo install)
+# Installing AwakeningFrame on the Steam Frame
 
-Local install from a source tree; a release archive with prebuilt binaries comes later (its top-level `install.sh`
-is this one, which is what Frametanium's installer mode runs).
+`install.sh` installs from a source tree, or from an unpacked release archive with the prebuilt program (the same script
+is the release's top-level `install.sh`, which Frametanium's installer mode and FrameDrop run). The README has the
+steps for players. From a release it copies the program as it is and builds the game code from the player's own files
+(`steam-frame/setup-game.sh`). A release never replaces a source install unless `--replace-source` is given.
 
 ## Layout
 | What | Where |
@@ -35,7 +37,7 @@ screen) when the game code and files are there, `LARECOMP_DATA_ROOT` set, `~/.ca
 runs and removed on exit or when Steam stops it.
 
 Options: `awakeningframe.sh --flat` (no VR, no SteamVR keys, no marker: debugging), `--launcher` (start screen).
-Settings in `session.env`: `AF_REFRESH_HZ` (72, 90, 120; default 90, or the VR tab's choice), `AF_FPS=60` (a test: 60 fps at 90 Hz), `AF_VRTIMING=0`, `AF_KEEP`, and any `LARECOMP_*` variable
+Settings in `session.env`: `AF_REFRESH_HZ` (72, 90, 120; default the VR tab's choice, else 120), `AF_FPS=60` (a test: 60 fps at 90 Hz), `AF_VRTIMING=0`, `AF_KEEP`, and any `LARECOMP_*` variable
 (`LARECOMP_XR_EYE_SCALE`, `LARECOMP_XR_QUAD`).
 
 ## Uninstall
@@ -46,5 +48,5 @@ logs and the data folder (game files, saves).
 - `steam-frame/test-install.sh`: install, update, refusals, wrapper (flags, environment, TERM) and uninstall against a
   scratch folder, scratch Steam folder, a stand-in for Steam's debugging port and a stand-in `vrcmd`. Touches nothing real.
 - `steam-frame/privacy-check.sh`: personal data in what this branch added (see its header; `AF_PRIVACY_PATTERNS`).
-- `steam-frame/art/gen-art.py` regenerates the placeholder art (original shapes and the name only).
+- `steam-frame/art/*.png` is the library art (see `SOURCES.md` there); `gen-art.py` regenerates the old placeholder set.
 - `steam-frame/art/SOURCES.md` lists the SteamGridDB art of the library entry, and `make-art.py` builds its Frame version from it (the art itself is not committed).

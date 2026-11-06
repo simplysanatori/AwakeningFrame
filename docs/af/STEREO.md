@@ -1,11 +1,15 @@
-# Stereo executor (AwakeningFrame lane 4)
+# Stereo executor
 
 VR mode (`LARECOMP_XR=1`) draws the real game into both eye swapchains with a camera per eye. The HUD goes on the quad
-layer. Design: `~/.claude/plans/awakeningframe-vr-design.md` sections 2-6. Code: `runtime/nvn/vulkan/stereo.c/.h`
-(switches, v1 diorama cameras), `exec.c` (the executor), `textures.c` (eye twins), `runtime/nvn/cam_override.c`
-(per-eye substitution), and small hooks in `device.c` and `runtime/xr`.
+layer. Code: `runtime/nvn/vulkan/stereo.c/.h` (switches, v1 diorama cameras), `exec.c` (the executor), `textures.c`
+(eye twins), `runtime/nvn/cam_override.c` (per-eye substitution), and small hooks in `device.c` and `runtime/xr`.
 
-## How it works
+Stereo is multiview: a list runs once and each pass draws both eyes (see "Multiview" below). `LARECOMP_MV` switches it
+(1 on, 0 off). Without multiview the executor runs each list once
+per eye, which is what the first section describes; multiview keeps the same camera, twin, HUD and pose machinery and
+falls back to it for the lists it can't do in one run.
+
+## Per-eye execution (the first version, and the fallback)
 
 - **Each list runs once per eye** (`exec.c stereo_execute`). Before eye 1, the bound state is restored. The game's
   memory writes from eye 0 (uniform updates, buffer-to-buffer copies) are undone, and eye 1 then redoes them.
@@ -68,7 +72,7 @@ layer. Design: `~/.claude/plans/awakeningframe-vr-design.md` sections 2-6. Code:
 
 ## Foveation (eye-tracked; `runtime/nvn/vulkan/foveation.c`)
 
-`LARECOMP_VR_FOVEATION=off|low|medium|high` (default medium in VR; flat mode is unchanged). Foveation is eye-tracked
+`LARECOMP_VR_FOVEATION=off|low|medium|high` (the code's default is medium in VR; the VR tab always sets it, default High; flat mode is unchanged). Foveation is eye-tracked
 only. Each eye pass whose attachments are all twinned and scalable, and at least `LARECOMP_VR_FOVEATION_MIN` (0.75) of
 the eye size, gets a per-eye shading-rate attachment (VK_KHR_fragment_shading_rate, 8 px texels). Away from the focus,
 pixels are shaded at a coarser rate (2x1 up to 4x4). Rasterisation, depth and geometry edges stay at full resolution,
@@ -93,14 +97,14 @@ and it works in both of Turnip's modes (sysmem and GMEM).
   whole bins black in a checkerboard whenever one map holds more than one density. A uniform map is fine, and hw
   binning, bin merging and concurrent binning are not the cause. It is kept for later drivers. Turnip reads density maps
   on the CPU when the pass is recorded, one density per bin, and forces those passes into GMEM.
-- **VR tab:** `fov_set_level` changes the level live. If foveation was off when the game started, the extension is
-  not enabled, so turning it on needs a restart.
+- **VR tab:** `fov_set_level` changes the level live, from Off too. Only `LARECOMP_VR_FOVEATION=off` in the launch
+  environment leaves the extension out, and then there is nothing to turn on.
 - **Log:** `[fov] eye gaze in N of M game frames ... ; X of Y eye passes foveated` every 10 s.
   `LARECOMP_VR_FOVEATION_LOG=1` logs each pass decision (the first 400).
 
 ## Diorama placement
 
-The rig (`runtime/xr/xr_rig.c`, docs/af/RIG.md) now places the table: per-area anchoring, the player's snap turn,
+The rig (`runtime/xr/xr_rig.c`, docs/af/RIG.md) places the table: per-area anchoring, the player's turn,
 tilt, height, size and recentre, and the blink. What follows is the v1 placement it grew from; the switches below
 still apply (`LARECOMP_VR_FOLLOW` set: the comfort follow instead of the rig's per-area anchoring).
 
@@ -118,7 +122,7 @@ still apply (`LARECOMP_VR_FOLLOW` set: the comfort follow instead of the rig's p
 - **s:** `LARECOMP_VR_SCALE` (0.067 m per unit). `LARECOMP_VR_YAW` sets the yaw.
 - **Depth:** the eye projections keep the game's depth terms. `LARECOMP_VR_NEAR=<units>` overrides them.
 
-## Multiview (`LARECOMP_MV=1`; off by default)
+## Multiview (on where the device has multiview; `LARECOMP_MV=0`: off)
 
 One run of a list draws both eyes (VK_KHR_multiview, `viewMask` 3) instead of running the list once per eye.
 
@@ -156,9 +160,28 @@ One run of a list draws both eyes (VK_KHR_multiview, `viewMask` 3) instead of ru
 - **Foveation:** Turnip has no layered shading-rate attachments (`layeredShadingRateAttachments` false). A multiview
   pass gets one map (`fov_pass` eye 2): each texel takes the finer rate of the two eyes' foci. The density-map mode
   (`LARECOMP_VR_FOVEATION_MODE=fdm`) gives multiview passes no map.
+- **Camera check:** the `[mv] 5 s` line counts the per-eye camera bindings ([eye 0 | eye 1] copies) and the camera
+  blocks bound alike to both views of a multiview pass ("with eye 0's in both views", logged). Those would give eye 1
+  eye 0's camera, so the count should be 0. The double-execution check (`[stereo] camera check`) runs only for lists
+  that still have an eye-1 run.
+- **Measured** (xrmock 1728², 90 Hz unless noted, foveation medium, gaze mock 0,0, dynres off; v1 → MV):
+  - **GPU, both eyes:** Mabe 19.5-20.0 → 18.1-18.4 ms, forest 18.7 → 17.3, beach 20.5 → 18.2, Tail Cave 04B
+    9.0 → 8.1, house 7.8-8.0 → 7.6-7.7.
+  - **Render CPU:** Mabe 12.9-13.2 → 8.0-8.6 ms, forest 11.3 → 7.3. Every list is one run.
+  - **At 120 Hz:** Mabe 53 → 60.0 fps, forest 30 → 59.9 fps. MV's GPU is 15.2 ms there.
+  - **Eye dumps:** within v1's run-to-run noise at Mabe, the forest, the house, Tail Cave 04B and Field_09B (worst
+    2.1% of pixels over 24/255; two v1 runs differ by up to 2.8%).
+  - **Pose:** 0 pose mismatches, 0 sets with eyes of two frames.
 - **Debugging:** `LARECOMP_DEBUG_FRAME` pass dumps are named by eye (`_e0` / `_e1`, `m`: a multiview pass, one PNG
   per layer). `LARECOMP_MV_PASSES=0` keeps the layered storage and runs each list per eye (stage 1: the storage
   checked against v1 alone).
+- **Limits:**
+  - Twins other than single-sample 2D images with one layer stay shared under MV (logged "[mv] candidate ... has no
+    eye-1 layer", or "twin add ... refused"); v1 could twin any image.
+  - A camera block in cbuf 11-17 can't be per eye (logged; none seen).
+  - Turnip applies the shading-rate map to both views alike, so a multiview pass is foveated by the union of the two
+    foci.
+  - Turnip's multipos (`TU_DEBUG=nomultipos` changes nothing), so the vertex work is still done per view.
 
 ## Switches and tests
 
@@ -178,7 +201,7 @@ One run of a list draws both eyes (VK_KHR_multiview, `viewMask` 3) instead of ru
 | `LARECOMP_VR_DYNRES=1`, `_MIN` / `_MAX` / `_MS` | dynamic eye resolution (off by default; docs/af/PASSES.md) |
 | `LARECOMP_GPU_OVERLAP=0\|1` | the CPU / GPU overlap (VR default on, flat off on Turnip; docs/af/PASSES.md) |
 | `LARECOMP_VR_FOVEATION=off\|low\|medium\|high` | eye-tracked foveation of the eye passes (above) |
-| `LARECOMP_MV=1` | multiview stereo: twins as layer 1, one run per list (above) |
+| `LARECOMP_MV=0\|1` | multiview stereo (default: on where the device has multiview): twins as layer 1, one run per list (above); 0: stereo v1; 1: the layered twins even without multiview |
 | `LARECOMP_MV_PASSES=0` | with `LARECOMP_MV=1`: the layered twins, but each list still runs once per eye |
 
 Mock run: `XR_RUNTIME_JSON=build/xrmock/runtime.json LARECOMP_XR=1 MOCK_XR_EYE_SIZE=1728x1728
@@ -187,9 +210,9 @@ at the table.
 
 ## Known limits
 
-- Cost: double execution is draw-bound. At Mabe with widened culling, both eyes take about 29-31 ms of GPU at both
-  1728² and 1400². The pixel count barely matters.
+- Cost: per-eye execution is draw-bound. At Mabe with widened culling, both eyes take about 29-31 ms of GPU at both
+  1728² and 1400². The pixel count barely matters. Multiview exists to cut that.
 - Fades go to the HUD quad only. Frames with no scene (menus) keep the last eye images.
 - A dispatch that writes a shared target from a twin gives eye 1 eye 0's result. Copies are twinned (above).
 - Second perspective cameras (reflection, shadow, light) are not substituted.
-- The loaded world ends at the zone edge (black void). There is no edge fade yet (lane 6).
+- The loaded world ends at the zone edge (black void) unless the Table Edge is on (docs/af/EDGE.md).

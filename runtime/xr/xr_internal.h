@@ -142,6 +142,7 @@ void xr_session_destroy(void);
 void xr_drain_gpu(const char *before);
 bool xr_chains_create(uint32_t hud_w, uint32_t hud_h);
 void xr_chains_destroy(void);
+bool xr_chain_create(XrChain *c, const char *what, uint32_t w, uint32_t h);  // (sRGB viewed as UNORM, one mip)
 bool xr_chain_acquire(XrChain *c, uint32_t *index);
 void xr_chain_release(XrChain *c);
 // xr_loop.c

@@ -2,7 +2,7 @@
 
 The AwakeningFrame library entry uses community artwork from [SteamGridDB](https://www.steamgriddb.com) for
 "The Legend of Zelda: Link's Awakening", the 2019 Nintendo Switch remake (SteamGridDB game id 5253316; not the
-Game Boy / DX entries). The images are NOT committed here (they are Nintendo artwork); this file records which
+Game Boy / DX entries). The Frame versions of these images are committed here as `*.png`; this file records which
 assets were used so the set can be fetched again. All are static, SFW and official or official-style.
 
 | File | Kind | SGDB asset id | Author | Size | URL |
@@ -17,9 +17,9 @@ assets were used so the set can be fetched again. All are static, SFW and offici
 
 `make-art.py SRC OUT` turns the originals into the Frame set: a small "FRAME" pill on the portrait and the wide
 capsule, and a letterspaced FRAME line under the logo (the same place other ports' logos carry PRIME, LEGEND or
-COMBAT EVOLVED). The hero is used as is, and the icon is the full-square Link portrait resized to 512 x 512.
+COMBAT EVOLVED). The hero is downscaled to 1920 x 620, and the icon is the full-square Link portrait resized to 512 x 512.
 
-To install them: download the URLs above into a folder under the names in the first column, run
-`python3 make-art.py THAT_FOLDER steam-frame/art/`, then `install.sh`, or apply them to a running Steam with
-`set-art.py --appid ID --art OUT --live`. Without them, `install.sh` uses the placeholder `*.png` in this folder
-(original shapes and the app name only).
+`install.sh` applies the `*.png` in this folder. To rebuild them: download the URLs above into a folder under the
+names in the first column, run `python3 make-art.py THAT_FOLDER steam-frame/art/`, then `install.sh`, or apply them
+to a running Steam with `set-art.py --appid ID --art OUT --live`. `gen-art.py` and the `*.svg` are the older
+placeholder set (original shapes and the app name only), kept as a fallback.
