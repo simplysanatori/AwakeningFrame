@@ -94,12 +94,12 @@ extern "C" void vr_tab_draw(float scale) {
 
     opt_section("Performance");
     grey(VRO_FOVEATION);
-    if (opt_choice("Foveation", &v.foveation, g_vr_fov_names, VRS_N_FOV, VRS_FOV_DEFAULT,
-                   desc(VRO_FOVEATION, "Draws the edges of your view at a lower resolution. Higher levels save more GPU time, "
-                                       "Fixed keeps the sharp area in the middle.")))
+    if (opt_choice("Foveation", &v.foveation, g_vr_fov_names, VRS_N_FOV, VRS_FOV_MEDIUM,
+                   desc(VRO_FOVEATION, "Follows your eyes and draws what you aren't looking at in less detail. Higher levels save "
+                                       "more GPU time. Without eye tracking it draws everything in full detail.")))
         changed(VRO_FOVEATION);
     grey(VRO_DYNRES);
-    if (opt_toggle("Dynamic Resolution", &v.dynres, true,
+    if (opt_toggle("Dynamic Resolution", &v.dynres, false,
                    desc(VRO_DYNRES, "Lowers the resolution when the GPU can't keep up and raises it again when it can.")))
         changed(VRO_DYNRES);
     grey(VRO_CULL);
