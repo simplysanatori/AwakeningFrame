@@ -100,6 +100,15 @@ typedef struct {
     float fov[4];          // angleLeft, angleRight, angleUp, angleDown (radians; left / down negative)
 } XrEyeView;
 bool xr_latch_views(XrEyeView out[2]);
+// (lane 4, the stereo executor) The same, for the game frame being executed before its set exists (the render thread
+// translates a frame's command lists before its present opens the set): located now, for the latest vsync's display
+// time, and kept for the next set - xr_set_begin hands them to it, so the layer carries the poses the eyes were
+// rendered with. A later call before that set replaces them (the newest frame's). false: no session / no valid pose.
+bool xr_latch_views_early(XrEyeView out[2]);
+// The eye swapchains' size (false before xr_start).
+bool xr_eye_size(uint32_t *w, uint32_t *h);
+// (lane 4) GPU ms of eye 0 and eye 1 of the latest finished game frame: xr_timing.log's gpu0 / gpu1 (-1: unknown).
+void xr_note_eye_gpu(float ms0, float ms1);
 // The predicted display time (XrTime, ns) of the latest vsync's game frame, and the display's refresh (Hz).
 int64_t xr_target_display_time(void);
 float xr_display_hz(void);

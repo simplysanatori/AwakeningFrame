@@ -256,6 +256,9 @@ void qol_tick(void) {
     setting_at_tick();
     static int env = -1;  // LARECOMP_BLUR_REMOVAL=0/1: test override
     if (env < 0) { const char *e = getenv("LARECOMP_BLUR_REMOVAL"); env = e ? atoi(e) != 0 : 2; }
+    static int xr = -1;  // (VR mode: the tilt-shift blur is a flat-screen effect, always removed; lane 4)
+    if (xr < 0) { const char *e = getenv("LARECOMP_XR"); xr = e && atoi(e) != 0; }
+    if (xr && env == 2) env = 1;
     int want = env == 2 ? g_settings.blur_removal : env;
     if (want != g_tilt_applied && apply_tilt(want)) {
         LOG("[qol] blur removal %s\n", want ? "on" : "off");

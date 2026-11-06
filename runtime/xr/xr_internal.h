@@ -93,6 +93,9 @@ typedef struct {
     pthread_mutex_t mu;
     pthread_cond_t cv;
     XrSet building;         // the presenting thread's, between xr_set_begin and xr_set_submit (no lock: its own)
+    XrView early_views[2];  // xr_latch_views_early: for the next set (render thread, as the presenting thread in game)
+    XrSpace early_space;
+    bool early_ok;
     bool in_set;
     XrSet pending;          // submitted, not yet released (XR thread releases it)
     XrSet shown;            // the latest released: the layers name it

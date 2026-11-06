@@ -8,6 +8,7 @@
 
 #include "../hle.h"
 #include "../settings.h"
+#include "../nvn/cam_override.h"
 
 #define BACKDROP_HASHES 0x71fe31bbf03c3515ull
 
@@ -70,7 +71,9 @@ static int g_indoor_streak, g_outdoor_streak;
 
 RT_ON_RESET(widescreen_reset) { g_indoor = false; g_indoor_streak = g_outdoor_streak = 0; }
 
+static void freecam_tick(uint64_t frame);
 void widescreen_frame_end(uint64_t frame) {
+    if (cam_override_active()) freecam_tick(frame);
     bool saw = g_site0_frame == frame;
     if (saw) { g_outdoor_streak++; g_indoor_streak = 0; }
     else { g_indoor_streak++; g_outdoor_streak = 0; }
@@ -94,14 +97,18 @@ float rt_aspect_site(int site) {
 float rt_cull_aspect(float orig) {
     static float last = -1;
     if (orig != last && ENV("LARECOMP_LOG_CULL")) { LOG("[widescreen] culling aspect field %f\n", orig); last = orig; }
-    return rt_aspect_site(6) * (orig > 0.1f && orig < 10.0f ? orig / (16.0f / 9.0f) : 1.0f);
+    float ca = cam_override_cull_aspect();  // (LARECOMP_FREECAM_CULL: a widened culling frustum for the free-camera probe)
+    return (ca > 0 ? ca : rt_aspect_site(6)) * (orig > 0.1f && orig < 10.0f ? orig / (16.0f / 9.0f) : 1.0f);
 }
 
 // Sky and sea pieces past the north edge (tools/patches.py SKYSEA_BOX_SITES): a piece shows while Link is within
 // its reach plus half a 16:9 view (7.5). A wider view reaches further: half its extra width, doubled for the far
 // (top) edge of the perspective view, where the sky is.
 float rt_skysea_margin(void) {
-    return g_wide > 1.0f ? 15.0f * (g_wide - 1.0f) : 0.0f;
+    float w = g_wide, ca = cam_override_cull_aspect(), fs = cam_override_fovy_scale();  // (probe: as wide as the culling frustum [guess])
+    if (ca > 0 && ca / (16.0f / 9.0f) > w) w = ca / (16.0f / 9.0f);
+    if (fs > 1.0f) w *= fs;
+    return w > 1.0f ? 15.0f * (w - 1.0f) : 0.0f;
 }
 
 // Vertical field of view: unchanged for wide outputs; for tall ones (factor < 1) widened so the
@@ -109,6 +116,12 @@ float rt_skysea_margin(void) {
 float rt_fovy(float orig) {
     static float last = -1;
     if (orig != last && ENV("LARECOMP_LOG_CULL")) { LOG("[widescreen] fovy field %f\n", orig); last = orig; }
+    float fscale = cam_override_fovy_scale();  // (LARECOMP_FREECAM_CULL's fovy scale: the angle, radians or degrees alike)
+    if (fscale != 1.0f && orig > 0) {
+        bool was_degrees = orig > 3.2f;
+        orig *= fscale;
+        if (!was_degrees && orig > 3.1f) orig = 3.1f;  // (a radians value stays one)
+    }
     if (g_wide >= 1.0f || !(orig > 0)) return orig;
     bool degrees = orig > 3.2f;  // radians otherwise
     float half = (degrees ? orig * (float)M_PI / 180.0f : orig) * 0.5f;
@@ -215,6 +228,20 @@ static bool current_zone(float lo[3], float hi[3], uint32_t *id) {
     }
     *id = *(const uint32_t *)(uintptr_t)z;
     return true;
+}
+
+// Free-camera probe (runtime/nvn/cam_override.c): once per presented frame, the schedule, Link's position (his actor's
+// PlayerCollision, as doorjump.c finds it - read here without its search, the present thread must not run that) and the
+// camera zone's box (a side-view room's pivot plane).
+static void freecam_tick(uint64_t frame) {
+    cam_override_frame(frame);
+    extern int game_in_play(void);
+    float lo[3], hi[3];
+    uint32_t id;
+    cam_override_set_zone(game_in_play() && current_zone(lo, hi, &id) ? lo : NULL, hi);
+    uint64_t gm = game_in_play() ? LD64(GA(GAME_MGR)) : 0, actor = gm ? LD64(gm + 0x4b8) : 0, pc = actor ? LD64(actor + 0x80) : 0;
+    if (heap_ptr(pc) && LD64(pc) == GA(PLAYER_COLLISION_VT) && LD64(pc + 8) == pc) cam_override_set_link((const float *)(uintptr_t)(pc + 0x80));
+    else cam_override_set_link(NULL);
 }
 
 // The current camera zone record (a dungeon room, an interior), 0 when there is none (overworld, title, loading).
