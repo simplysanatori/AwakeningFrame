@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#101c33"/><stop offset="1" stop-color="#1f4a52"/></linearGradient><radialGradient id="glow" cx="0.5" cy="0.6" r="0.6"><stop offset="0" stop-color="#4fd1b5" stop-opacity="0.35"/><stop offset="1" stop-color="#4fd1b5" stop-opacity="0"/></radialGradient></defs><rect width="512" height="512" fill="url(#g)"/><rect width="512" height="512" fill="url(#glow)"/><polygon points="56.0,300.0 256.0,400.0 256.0,448.0 56.0,348.0" fill="#14352f"/>
+<polygon points="456.0,300.0 256.0,400.0 256.0,448.0 456.0,348.0" fill="#0d2420"/>
+<polygon points="56.0,300.0 256.0,200.0 456.0,300.0 256.0,400.0" fill="#3fae7a"/>
+<polygon points="138.0,295.0 182.0,317.0 182.0,277.0 138.0,255.0" fill="#c9b77f"/>
+<polygon points="182.0,317.0 226.0,295.0 226.0,255.0 182.0,277.0" fill="#a8975f"/>
+<polygon points="182.0,233.0 226.0,255.0 182.0,277.0 138.0,255.0" fill="#e8d9a8"/>
+<polygon points="300.0,302.0 336.0,320.0 336.0,296.0 300.0,278.0" fill="#aebcc8"/>
+<polygon points="336.0,320.0 372.0,302.0 372.0,278.0 336.0,296.0" fill="#8fa0ae"/>
+<polygon points="336.0,260.0 372.0,278.0 336.0,296.0 300.0,278.0" fill="#d9e3ea"/>
+<rect x="247.2" y="282.0" width="9.6" height="40.0" fill="#6b4a2b"/>
+<circle cx="252.0" cy="262.0" r="34.0" fill="#1f7a4d"/>
+<circle cx="244.0" cy="254.0" r="24.0" fill="#2b9a62"/><text x="256" y="118" font-family="DejaVu Sans, Helvetica, Arial, sans-serif" font-weight="bold" font-size="56" text-anchor="middle" fill="#f4f7fa">Awakening<tspan fill="#6fe3c1">Frame</tspan></text></svg>
