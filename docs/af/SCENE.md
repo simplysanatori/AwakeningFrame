@@ -34,6 +34,13 @@ Low and Full (and Backdrop's capture frames):
 - once the box reaches behind the game camera its frustum lets through every resident room in front of it, so ring
   draws whose box misses the culling box are left out everywhere (class 3, "beyond", in `vr_ring_class`);
 - the round fade (Table Edge: Fade) ends at the box's nearer side instead of 25 units out.
+- the fitted widening is held: it grows at once and shrinks only after `LARECOMP_VR_CULL_HOLD` frames (60) without
+  growing, 3% a frame. Without it a box corner dipping behind the game camera as the head moves took the tangent from
+  about 2 to 20 for single frames, and objects at the edge of the game's frustum (the cuccos below the table) came and
+  went: flicker;
+- only room geometry is left out past the box (class 3); characters, props and sprites still draw. Draw boxes are
+  memoised by buffer address and checked against three of their vertices each time: buffers rewritten in place
+  (sprites, effects) used to get another draw's box, about two draws a frame, and so vanished for a frame.
 
 Low Quality's coarse shading needs the device's pipeline shading rates (the foveation's setup: off at startup means
 none); without them Low Quality is Full. The rate combines with the foveation map (MAX) where the driver offers it.

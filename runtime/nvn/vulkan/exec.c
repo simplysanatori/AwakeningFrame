@@ -7094,7 +7094,22 @@ static float ring_half(uint16_t h) {
     return f;
 }
 // the object-space box of the vertices the draw uses (vertex attribute 0: float3/4 or half4), memoised by geometry
-// (index buffer, count, vertex buffer, base vertex: static meshes keep theirs); false: unknown layout
+// (index buffer, count, vertex buffer, base vertex: static meshes keep theirs). A memo is checked against three of the
+// draw's vertices (first, middle, last) as they are now: buffers rewritten in place (sprites, effects, streamed
+// geometry at a reused address) get a new box instead of another draw's. false: unknown layout
+static bool ring_vertex(bool indexed, uint64_t ia, uint32_t isz, int64_t base, uint64_t vb, uint64_t vbs, uint32_t stride, uint32_t off,
+                        uint32_t fmt, uint32_t i, float q[3]) {
+    int64_t v = !indexed ? base + i : (int64_t)(isz == 2 ? ((const uint16_t *)(uintptr_t)ia)[i] : isz == 4 ? ((const uint32_t *)(uintptr_t)ia)[i]
+                                                               : ((const uint8_t *)(uintptr_t)ia)[i]);
+    if (indexed) v += base;
+    uint32_t vsz = fmt == 0x29 ? 6 : 12;
+    if (v < 0 || (uint64_t)v * stride + off + vsz > vbs) { q[0] = q[1] = q[2] = 0; return false; }
+    const uint8_t *p = (const uint8_t *)(uintptr_t)(vb + (uint64_t)v * stride + off);
+    if (fmt == 0x29) for (int c = 0; c < 3; c++) { uint16_t hv; memcpy(&hv, p + c * 2, 2); q[c] = ring_half(hv); }
+    else memcpy(q, p, 12);
+    return true;
+}
+static uint64_t ring_memo_stale;  // (LARECOMP_VR_RING_LOG) memos whose vertices had changed
 static bool ring_bounds(CmdRec *r, bool indexed, float lo[3], float hi[3]) {
     if (st.nattrib < 1) return false;
     uint32_t a = st.attrib[0], fmt = a & 0xFF, sm = (a >> 8) & 0x1F, off = a >> 13;
@@ -7106,17 +7121,24 @@ static bool ring_bounds(CmdRec *r, bool indexed, float lo[3], float hi[3]) {
     uint64_t ia = indexed ? r->x[3] : 0;
     int64_t base = indexed ? (int32_t)r->x[4] : (int64_t)r->x[1];
     enum { BC = 8192 };
-    static struct { uint64_t vb, ia, key; float lo[3], hi[3]; bool ok; } bc[BC];
+    static struct { uint64_t vb, ia, key; float lo[3], hi[3], smp[3][3]; bool ok; } bc[BC];
     uint64_t key = ((uint64_t)count << 32 | (uint32_t)base) ^ (uint64_t)fmt << 56 ^ (uint64_t)stride << 48 ^ off;
     uint64_t h = (vb * 0x9E3779B97F4A7C15ull) ^ (ia * 0xBF58476D1CE4E5B9ull) ^ key;
     uint32_t k = (uint32_t)(h ^ h >> 31) & (BC - 1);
+    if (!count) return false;
+    uint32_t isz = itype == 1 ? 2 : itype == 2 ? 4 : 1, restart = st.prim_restart ? st.restart_index : 0xFFFFFFFFu;
+    float smp[3][3];
+    const uint32_t si[3] = {0, count / 2, count ? count - 1 : 0};
+    for (int j = 0; j < 3; j++) ring_vertex(indexed, ia, isz, base, vb, vbs, stride, off, fmt, si[j], smp[j]);
     if (bc[k].vb == vb && bc[k].ia == ia && bc[k].key == key) {
-        if (bc[k].ok) memcpy(lo, bc[k].lo, 12), memcpy(hi, bc[k].hi, 12);
-        return bc[k].ok;
+        if (!memcmp(bc[k].smp, smp, sizeof smp)) {
+            if (bc[k].ok) memcpy(lo, bc[k].lo, 12), memcpy(hi, bc[k].hi, 12);
+            return bc[k].ok;
+        }
+        ring_memo_stale++;
     }
     ring_boxes++;
     float l[3] = {1e30f, 1e30f, 1e30f}, u[3] = {-1e30f, -1e30f, -1e30f};
-    uint32_t isz = itype == 1 ? 2 : itype == 2 ? 4 : 1, restart = st.prim_restart ? st.restart_index : 0xFFFFFFFFu;
     int nin = 0;
     for (uint32_t i = 0; i < count; i++) {
         int64_t v = !indexed ? base + i : (int64_t)(isz == 2 ? ((const uint16_t *)(uintptr_t)ia)[i] : isz == 4 ? ((const uint32_t *)(uintptr_t)ia)[i]
@@ -7134,6 +7156,7 @@ static bool ring_bounds(CmdRec *r, bool indexed, float lo[3], float hi[3]) {
     }
     bool ok = nin > 0;
     bc[k].vb = vb, bc[k].ia = ia, bc[k].key = key, bc[k].ok = ok;
+    memcpy(bc[k].smp, smp, sizeof smp);
     memcpy(bc[k].lo, l, 12), memcpy(bc[k].hi, u, 12);
     if (ok) memcpy(lo, l, 12), memcpy(hi, u, 12);
     return ok;
@@ -7141,9 +7164,10 @@ static bool ring_bounds(CmdRec *r, bool indexed, float lo[3], float hi[3]) {
 // the draw's world box (x, z; y too): its vertex box through its model matrix. Level draws (vertex block 4 of 912 / 928
 // bytes) carry the model matrix in block 2 (3x4 rows, the room's offset); characters and props (1056 / 1072) a zero
 // translation there and, as u32 12, the index of their matrix in block 3 (the world-space bone palette)
-static bool ring_world_box(CmdRec *r, bool indexed, float wlo[3], float whi[3]) {
+static bool ring_world_box(CmdRec *r, bool indexed, float wlo[3], float whi[3], bool *level) {
     uint64_t s4 = st.ubuf[0][4].addr ? st.ubuf[0][4].size : 0;
     if (!(s4 == 912 || s4 == 928 || s4 == 1056 || s4 == 1072) || !st.ubuf[0][2].addr || st.ubuf[0][2].size < 64) return false;
+    if (level) *level = s4 == 912 || s4 == 928;
     const float *m2 = (const float *)(uintptr_t)st.ubuf[0][2].addr, *m = NULL;
     float pos[3], sc;
     if (!ring_matrix_at(m2, pos, &sc)) return false;
@@ -7176,7 +7200,9 @@ static int ring_class(CmdRec *r, bool indexed, int kind) {  // 0 core, 1 ring, 2
     uint32_t k = (uint32_t)(key ^ key >> 29) & (RC - 1);
     if (rc[k].key == key && rc[k].frame == frame) return rc[k].c;
     float lo[3], hi[3];
-    int c = ring_world_box(r, indexed, lo, hi) ? vr_ring_class(lo, hi, frame) : 0;
+    bool level = false;
+    int c = ring_world_box(r, indexed, lo, hi, &level) ? vr_ring_class(lo, hi, frame) : 0;
+    if (c == 3 && !level) c = 1;  // (lane scene: only room geometry is left out past the box; characters, props and sprites still draw)
     rc[k].key = key, rc[k].frame = frame, rc[k].c = (int8_t)c;
     return c;
 }
@@ -7200,7 +7226,7 @@ static void ring_dump(CmdRec *r, bool indexed, int kind, int c) {  // (LARECOMP_
     float lo[3], hi[3];
     if (ring_bounds(r, indexed, lo, hi) && l < (int)sizeof b - 96)
         l += snprintf(b + l, sizeof b - l, " | local %.1f,%.1f,%.1f..%.1f,%.1f,%.1f", lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
-    if (ring_world_box(r, indexed, lo, hi) && l < (int)sizeof b - 64)
+    if (ring_world_box(r, indexed, lo, hi, NULL) && l < (int)sizeof b - 64)
         l += snprintf(b + l, sizeof b - l, " world x %.1f..%.1f z %.1f..%.1f", lo[0], hi[0], lo[2], hi[2]);
     LOG("%s\n", b);
 }
@@ -7236,8 +7262,9 @@ static bool ring_route_(CmdRec *r, bool indexed, int log) {
         if (f != hframe) {
             if (hframe % 300 == 0) {
                 LOG("[ring] frame %llu: classification %.3f + %.3f ms (eye 0 + 1), %llu vertex boxes made, %llu skipped early "
-                    "(not in the counts below); (kind: class core/ring/cast/beyond, drawn+skipped):", (unsigned long long)hframe,
-                    ring_ns[0] / 1e6, ring_ns[1] / 1e6, (unsigned long long)ring_boxes, (unsigned long long)ring_early_n);
+                    "(not in the counts below), %llu stale memos so far; (kind: class core/ring/cast/beyond, drawn+skipped):", (unsigned long long)hframe,
+                    ring_ns[0] / 1e6, ring_ns[1] / 1e6, (unsigned long long)ring_boxes, (unsigned long long)ring_early_n,
+                    (unsigned long long)ring_memo_stale);
                 static const char *kn[3] = {"shared", "eye depth-only", "eye colour"};
                 for (int e = 0; e < 2; e++)
                     for (int kk = 0; kk < 3; kk++)
