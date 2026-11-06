@@ -35,7 +35,7 @@ if [ -z "${AF_NO_BUILD:-}" ]; then
 fi
 grep -aq LARECOMP_XR_HZ build/lasrecomp || { echo "build/lasrecomp has no VR mode" >&2; exit 1; }
 grep -aqF -- --build-game-code build/lasrecomp || { echo "build/lasrecomp has no --build-game-code" >&2; exit 1; }
-if nm build/lasrecomp | grep -q ' f_70'; then echo "build/lasrecomp has game code linked in" >&2; exit 1; fi
+if [ "$(nm build/lasrecomp | grep -c ' f_70' || true)" != 0 ]; then echo "build/lasrecomp has game code linked in" >&2; exit 1; fi
 
 # ---- the game code generator (PyInstaller, its own venv) and the compiler (zig, pinned)
 V=$PKG/gen-venv
@@ -110,13 +110,14 @@ while IFS= read -r -d '' f; do
     esac
 done < <(find "$S" -mindepth 1 -print0)
 for b in "$S/lasrecomp" "$S/hactool"; do
-    readelf -d "$b" | grep -qE 'RPATH|RUNPATH' && bad "$(basename "$b") has an rpath"
+    readelf -d "$b" | grep -E 'RPATH|RUNPATH' > /dev/null && bad "$(basename "$b") has an rpath"
 done
-readelf -d "$S/lasrecomp" | grep -q "NEEDED.*libSDL3" || bad "lasrecomp's library list was damaged"
+readelf -d "$S/lasrecomp" | grep "NEEDED" | grep "libSDL3" > /dev/null || bad "lasrecomp's library list was damaged"
 # (only a program that knows the flag, else it would start the game; in an empty scratch data root, from an empty folder)
 if grep -aqF -- --game-code-status "$S/lasrecomp"; then
     E=$(mktemp -d)
-    (cd "$E" && LARECOMP_DATA_ROOT=$E timeout 20 "$S/lasrecomp" --game-code-status > /dev/null 2>&1); rc=$?
+    rc=0
+    (cd "$E" && LARECOMP_DATA_ROOT=$E timeout 20 "$S/lasrecomp" --game-code-status > /dev/null 2>&1) || rc=$?
     rm -rf "$E"
     [ "$rc" -le 1 ] || bad "the staged lasrecomp does not run (exit $rc)"
 else
