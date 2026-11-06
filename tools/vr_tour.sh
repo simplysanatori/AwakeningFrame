@@ -17,22 +17,23 @@
 #   --compare OLD   after the run, compare with the report directory OLD (fps drops over 10 %, big image changes, a
 #                   swapped eye order, a missing HUD); exit status 1 when something is flagged
 #   --diff OLD NEW  compare two existing report directories (no run)
-#   --dwell S       seconds per spot in the timing sessions (12; --quick 8)     --shot-dwell S  screenshot session (9; 8)
+#   --dwell S       seconds per spot in the timing sessions (12; --quick 10)    --shot-dwell S  screenshot session (10)
 #   --eye WxH       the mock's eye size (1680x1760, the Frame's default at 120 Hz)
 #   --wait          wait while ~/.cache/headset-in-use exists (default: refuse, exit 75)
 #   --wait-max S    give up waiting for the bench lock / another lasrecomp after S seconds (3600, exit 75)
 #   --plan          print the spots and sessions and exit        --keep-raw   keep the full-size mock PNGs
+#   --no-walk       no scripted walk (a walk that reaches a door starts a level change, which delays the next warp)
 # Waits for ~/.cache/af-bench-lock and for any other lasrecomp, takes the lock while it runs (released on exit), uses nice.
-# Environment: VR_TOUR_PYTHON=<python with PIL>, VR_TOUR_SAVE=<test save folder holding save_0/>, XRMOCK_JSON=<runtime.json>.
+# Environment: AF_HEADSET_FLAG / AF_BENCH_LOCK (other paths for the two flags, for tests), VR_TOUR_PYTHON=<python with PIL>, VR_TOUR_SAVE=<test save folder holding save_0/>, XRMOCK_JSON=<runtime.json>.
 set -uo pipefail
 SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 HELP=$SELF/vr_tour
 TREE=$(cd "$SELF/.." && pwd)
 SAVE=${VR_TOUR_SAVE:-$HOME/.local/share/lasrecomp-smoketest/save}
-HEADSET=$HOME/.cache/headset-in-use
-LOCK=$HOME/.cache/af-bench-lock
+HEADSET=${AF_HEADSET_FLAG:-$HOME/.cache/headset-in-use}
+LOCK=${AF_BENCH_LOCK:-$HOME/.cache/af-bench-lock}
 
-QUICK=0 ONLY= VVL=0 COMPARE= HZS= DWELL= SHOT_DWELL= EYE=1680x1760 WAIT_HEADSET=0 WAIT_MAX=3600 PLAN=0 KEEP_RAW=0 DIFF_OLD= DIFF_NEW=
+NOWALK=0 QUICK=0 ONLY= VVL=0 COMPARE= HZS= DWELL= SHOT_DWELL= EYE=1680x1760 WAIT_HEADSET=0 WAIT_MAX=3600 PLAN=0 KEEP_RAW=0 DIFF_OLD= DIFF_NEW=
 while [ $# -gt 0 ]; do
     case $1 in
         --quick) QUICK=1 ;;
@@ -47,6 +48,7 @@ while [ $# -gt 0 ]; do
         --eye) shift; EYE=${1:?} ;;
         --wait) WAIT_HEADSET=1 ;;
         --wait-max) shift; WAIT_MAX=${1:?} ;;
+        --no-walk) NOWALK=1 ;;
         --plan) PLAN=1 ;;
         --keep-raw) KEEP_RAW=1 ;;
         -h|--help) sed -n '2,/^set -uo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
@@ -69,9 +71,9 @@ SPOTS=(
 )
 if [ $QUICK = 1 ]; then
     SPOTS=("${SPOTS[0]}" "${SPOTS[3]}" "${SPOTS[5]}")
-    : "${HZS:=90}" "${DWELL:=8}" "${SHOT_DWELL:=8}"
+    : "${HZS:=90}" "${DWELL:=10}" "${SHOT_DWELL:=10}"
 fi
-: "${HZS:=90 120}" "${DWELL:=12}" "${SHOT_DWELL:=9}"
+: "${HZS:=90 120}" "${DWELL:=12}" "${SHOT_DWELL:=10}"
 if [ -n "$ONLY" ]; then
     SEL=()
     for s in "${SPOTS[@]}"; do [ -n "$(echo "${s%%|*}" | grep -i -F -- "$ONLY")" ] && SEL+=("$s"); done
@@ -95,7 +97,7 @@ SESSIONS=()   # kind:hz:dwell
 SESSIONS+=("shots:${HZL[0]}:$SHOT_DWELL")
 for hz in "${HZL[@]}"; do SESSIONS+=("timing:$hz:$DWELL"); done
 [ $VVL = 1 ] && SESSIONS+=("vvl:${HZL[0]}:6")
-START=1500
+START=900
 gamefps() { [ "$1" -lt 100 ] && echo 30 || echo 60; }
 
 if [ $PLAN = 1 ]; then
@@ -104,7 +106,7 @@ if [ $PLAN = 1 ]; then
     for se in "${SESSIONS[@]}"; do
         IFS=: read -r k hz d <<< "$se"
         printf '  session %-6s %3d Hz: %ss a spot = %d game frames at %d fps, ~%ds + boot%s\n' "$k" "$hz" "$d" $((d * $(gamefps "$hz"))) "$(gamefps "$hz")" $((d * ${#SPOTS[@]})) \
-            "$([ "$k" = shots ] && echo ', MOCK_XR_SHOT every 3 s')"
+            "$([ "$k" = shots ] && echo ', MOCK_XR_SHOT every 4 s')"
     done
     exit 0
 fi
@@ -138,12 +140,6 @@ TS=$(date +%Y%m%d-%H%M%S)
 BASE=$TREE/build/vr_tour
 OUT=$BASE/$TS
 ROOT=$BASE/root          # the scratch data root: extracted/ -> the tree's, cache/ kept between tours, a fresh save copy per session
-mkdir -p "$OUT/raw" "$OUT/spots" "$ROOT/build"
-ln -sfn "$(readlink -f "$TREE/extracted")" "$ROOT/extracted"
-if [ ! -d "$ROOT/cache" ]; then   # the first tour would compile every pipeline from scratch: start from the tree's own cache
-    if [ -d "$TREE/cache" ]; then cp -R "$TREE/cache" "$ROOT/cache"; else mkdir -p "$ROOT/cache"; fi
-fi
-printf 'aspect = unlocked\nfullscreen = 0\nshow_fps = 0\nresolution = match\naspect_asked = 1\nmenu_tip_seen = 1\n' > "$ROOT/settings.ini"
 
 # ---- the machine: wait for it, take the bench lock
 CHILD=0
@@ -172,6 +168,13 @@ until ( set -o noclobber; echo "vr_tour $$" > "$LOCK" ) 2>/dev/null; do wait_for
 wait_for "another lasrecomp to end" other_lasrecomp
 T_LOCK=$(date +%s)
 
+mkdir -p "$OUT/raw" "$OUT/spots" "$ROOT/build"
+ln -sfn "$(readlink -f "$TREE/extracted")" "$ROOT/extracted"
+if [ ! -d "$ROOT/cache" ]; then   # the first tour would compile every pipeline from scratch: start from the tree's own cache
+    if [ -d "$TREE/cache" ]; then cp -R "$TREE/cache" "$ROOT/cache"; else mkdir -p "$ROOT/cache"; fi
+fi
+printf 'aspect = unlocked\nfullscreen = 0\nshow_fps = 0\nresolution = match\naspect_asked = 1\nmenu_tip_seen = 1\n' > "$ROOT/settings.ini"
+
 # ---- git facts and the table the analysis reads
 {
     printf 'tree\t%s\n' "$TREE"
@@ -190,7 +193,7 @@ for s in "${SPOTS[@]}"; do IFS='|' read -r n l c <<< "$s"; printf '%d\t%s\t%s\t%
 : > "$OUT/sessions.tsv"
 
 # the login of the smoke tests: L+R at the title, A through the file menu (the perf lane's bench)
-LOGIN=$(for f in $(seq 300 60 1400); do printf '%d:L:12,%d:R:12,%d:A:6,' $f $f $((f + 30)); done)
+LOGIN=$(for f in $(seq 300 60 780); do printf '%d:L:12,%d:R:12,%d:A:6,' $f $f $((f + 30)); done)
 
 run_session() {   # <kind> <hz> <dwell s>
     local kind=$1 hz=$2 dwell=$3
@@ -198,17 +201,23 @@ run_session() {   # <kind> <hz> <dwell s>
     S=$OUT/raw/$name; mkdir -p "$S/shots"
     fps=$(gamefps "$hz"); step=$((dwell * fps))
     rm -rf "$ROOT/save" "$ROOT/build/frames" && cp -R "$SAVE" "$ROOT/save"
-    # warps: the first spot on load, the rest at START + k * step; a walk (up, right, down, left) in the second half
-    local warps= walk= base q=$((step / 10)) first=
+    # warps at START + k * step (the save is loaded by frame ~700); a walk in the middle of each spot's time: right and back, left and back
+    # (sideways only and short: the warp points are at doors, and a door of Link's own starts a level change the next warp waits for)
+    local warps= walk= base q=$((fps * 4 / 10)) first=
     for i in $(seq 0 $((n - 1))); do
         IFS='|' read -r s lev loc <<< "${SPOTS[$i]}"
-        if [ $i = 0 ]; then first="$lev:$loc"; base=$START; else base=$((START + i * step)); warps+="$base:$lev:$loc,"; fi
-        local w=$((base + step * 45 / 100))
-        walk+="$w:STICK_UP:$q,$((w + q)):STICK_RIGHT:$q,$((w + 2 * q)):STICK_DOWN:$q,$((w + 3 * q)):STICK_LEFT:$q,"
+        base=$((START + i * step)); warps+="$base:$lev:$loc,"
+        if [ $NOWALK = 0 ] && [ "$kind" != shots ]; then   # (the screenshot session stands still: a walking camera glides, and a dump then shows it in two states)
+            local w=$((base + step * 50 / 100))
+            walk+="$w:STICK_RIGHT:$q,$((w + q)):STICK_LEFT:$q,$((w + 2 * q)):STICK_LEFT:$q,$((w + 3 * q)):STICK_RIGHT:$q,"
+        fi
     done
     local last=$((START + n * step))
-    local mockenv=(MOCK_XR_HZ="$hz" MOCK_XR_EYE_SIZE="$EYE" MOCK_XR_POSE=sway MOCK_XR_SECONDS=0 MOCK_XR_TIMING="$S/timing.csv" MOCK_XR_TRACE="$S/trace.txt")
-    [ "$kind" = shots ] && mockenv+=(MOCK_XR_SHOT="every:$((hz * 3))" MOCK_XR_SHOT_DIR="$S/shots")
+    # the head: 1.6 m up, looking 35 degrees down (the table is 45 down from the start pose), a sway of +-15 degrees yaw (0.4 Hz) and 4 cm sideways (0.25 Hz)
+    awk 'BEGIN { pi = 3.14159265; for (i = 0; i <= 12000; i++) { t = i * 0.1;
+        printf "%.1f %.3f 1.6 0 %.2f %.2f 0\n", t, 0.04 * sin(2 * pi * 0.25 * t), 15 * sin(2 * pi * 0.4 * t), -35 + 3 * sin(2 * pi * 0.2 * t) } }' > "$S/pose.txt"
+    local mockenv=(MOCK_XR_HZ="$hz" MOCK_XR_EYE_SIZE="$EYE" MOCK_XR_POSE="file:$S/pose.txt" MOCK_XR_SECONDS=0 MOCK_XR_TIMING="$S/timing.csv" MOCK_XR_TRACE="$S/trace.txt")
+    [ "$kind" = shots ] && mockenv+=(MOCK_XR_SHOT="every:$((hz * 4))" MOCK_XR_SHOT_DIR="$S/shots")
     local runner=()
     if [ "$kind" = vvl ]; then
         runner=("$TREE/tools/vvl/vvl.sh"); mockenv+=(VVL_NO_WSI=1)   # (the layer's messages go to stderr: into the stamped log)
@@ -224,7 +233,7 @@ run_session() {   # <kind> <hz> <dwell s>
         env -u LARECOMP_XR_QUAD -u LARECOMP_XR_EYE_SCALE -u LARECOMP_XR_YAW -u LARECOMP_XR_PREDICT -u LARECOMP_STEREO -u LARECOMP_XR_LAYOUT \
             ENABLE_GAMESCOPE_WSI=0 SDL_VIDEODRIVER=offscreen LARECOMP_NO_LAUNCHER=1 LARECOMP_NO_AUDIO=1 LARECOMP_NO_UPDATE_CHECK=1 \
             LARECOMP_SETTINGS="$ROOT/settings.ini" LARECOMP_SAVE_DIR="$ROOT/save" LARECOMP_BLUR_REMOVAL=1 LARECOMP_CHEATS=hearts \
-            LARECOMP_INPUT="${LOGIN}${walk%,}" LARECOMP_WARP_ON_LOAD="$first" LARECOMP_WARP_AT="${warps%,}" \
+            LARECOMP_INPUT="${LOGIN}${walk%,}" LARECOMP_WARP_AT="${warps%,}" \
             LARECOMP_LOG_PACE=1 LARECOMP_FPS_INTERVAL=2 LARECOMP_WINDOW_SHOT=$last LARECOMP_SHOT_PATH="$ROOT/window_last.png" LARECOMP_EXIT_AFTER_SHOT=1 \
             XR_RUNTIME_JSON="$MOCK_JSON" LARECOMP_XR=1 LARECOMP_XR_HZ="$hz" "${mockenv[@]}" \
             timeout "$tmo" nice -n 5 "${runner[@]}" "$TREE/build/lasrecomp" extracted 2>&1 | python3 -I "$HELP/stamp.py" "$S/run.log"

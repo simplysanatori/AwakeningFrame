@@ -20,23 +20,25 @@ import sys
 from PIL import Image, ImageChops, ImageDraw, ImageStat
 
 # ---- thresholds (docs/af/TOUR.md explains each)
-SETTLE_S = 3.0           # seconds after a warp before the timing window starts (loading, the fade)
-SHOT_SETTLE_S = 3.5      # a screenshot must be taken at least this long after the warp
+SETTLE_S = 4.0           # seconds after a warp the timing window starts at the latest (else 1 s after the level's request object: loaded)
+SETTLE_LOADED_S = 1.0
+SHOT_SETTLE_S = 5.0      # a screenshot must be taken at least this long after the warp
 SLOW_FPS = 0.92          # game fps below this share of nominal (the game runs at 30 fps below 100 Hz, else 60)
 SLOW_SETS = 0.90         # sets shown per second below this share of the nominal game fps
 SLOW_MISSED = 2.0        # percent of refreshes missed
 SLOW_HITCHES = 3         # game frames over 1.5x nominal in a window
 SLOW_GPU = 0.90          # both eyes' GPU time above this share of the game frame period
-BLACK_LUMA = 4.0         # mean luma below this: a black eye
+BLACK_LUMA = 1.0         # mean luma below this: a black eye
 BLACK_FRAC = 0.985       # or this share of pixels under luma 8
-HUD_MIN = 0.002          # a HUD quad with a smaller share of drawn pixels is missing
+HUD_MIN = 0.0003         # a HUD quad with a smaller share of drawn pixels is missing (three hearts are 0.17%)
+EYE_RES_MAX = 0.6        # the two eyes disagree: difference at the best shift over the image's brightness (good pairs 0.2-0.3)
 DISP_MIN_CONF = 1.25     # eye disparity: the best shift must beat the zero shift by this ratio to count
 FPS_DROP = 0.10          # --compare: fps / sets per second drop
-CMP_COLOUR = 45.0        # --compare: distance of the mean colour (0..255 per channel, euclidean)
-CMP_HIST = 0.45          # --compare: histogram distance 0..1
-CMP_MAD = 70.0           # --compare: mean absolute difference of the 48 px thumbnails
-CMP_BLACK = 0.25         # --compare: change of the black share
-CMP_HUD = (0.5, 2.0)     # --compare: ratio of the HUD's drawn share
+CMP_COLOUR = 60.0        # --compare: distance of the mean colour (0..255 per channel, euclidean)
+CMP_HIST = 0.55          # --compare: histogram distance 0..1
+CMP_MAD = 80.0           # --compare: mean absolute difference of the 48 px thumbnails
+CMP_BLACK = 0.35         # --compare: change of the black share
+CMP_HUD = 0.5            # --compare: the HUD's drawn share fell under this share of before (a banner can add to it, so only a loss counts)
 
 STAMP = re.compile(r'^(\d+\.\d+)\t(.*)$')
 
@@ -171,9 +173,12 @@ def analyse_session(row, spots):
     # windows
     order = sorted(jumps.items(), key=lambda kv: kv[1])
     S['windows'] = {}
+    reqs = [t for t, l in log if l.startswith('[warp] level-jump request object')]
     for k, (i, t) in enumerate(order):
         end = order[k + 1][1] if k + 1 < len(order) else t_end
-        S['windows'][i] = (t, t + SETTLE_S, end)
+        loaded = [r for r in reqs if t <= r < t + 12.0]
+        a = min(t + SETTLE_S, loaded[0] + SETTLE_LOADED_S) if loaded else t + SETTLE_S
+        S['windows'][i] = (t, max(a, t + 1.5), end)
     S['t_end'] = t_end
     S['log'] = log
     return S
@@ -311,7 +316,8 @@ def disparity(left, right):
         if best is None or v < best:
             best, bs = v, s
     conf = (d0 + 0.25) / (best + 0.25)
-    return bs / sc, conf, d0
+    res = best / (ImageStat.Stat(ref).mean[0] + 0.5)
+    return bs / sc, conf, d0, res
 
 
 def hud_share(im):
@@ -331,41 +337,50 @@ def on_bg(im, bg=(34, 36, 44)):
     return Image.alpha_composite(base, im).convert('RGB')
 
 
-def pick_shot(S, i):
-    """The latest screenshot (a frame with both eyes) taken inside spot i's window."""
+SHOT_END_MARGIN_S = 1.5  # dumps this close to the next warp (or the end of the session) are mid-transition: not used
+MAX_CANDIDATES = 4
+
+
+def pick_shots(S, i):
+    """The screenshots (frames with both eyes) taken inside spot i's window, latest last, at most MAX_CANDIDATES."""
     if i not in S['windows']:
-        return None
+        return []
     t_warp, _, end = S['windows'][i]
     frames = {}
     for p in glob.glob(os.path.join(S['dir'], 'shots', 'f*_proj*_eye[01].png')):
         m = re.match(r'f(\d+)_proj(\d+)_eye([01])\.png$', os.path.basename(p))
         if m:
             frames.setdefault((int(m.group(1)), int(m.group(2))), {})[int(m.group(3))] = p
-    best = None
+    out = []
     for (f, layer), eyes in sorted(frames.items()):
         if 0 not in eyes or 1 not in eyes:
             continue
         mt = max(os.path.getmtime(eyes[0]), os.path.getmtime(eyes[1]))
-        if mt < t_warp + SHOT_SETTLE_S or mt >= end + 0.5:
+        if mt < t_warp + SHOT_SETTLE_S or mt >= end - SHOT_END_MARGIN_S:
             continue
-        best = (f, layer, eyes, mt)
-    if not best:
-        return None
-    f, layer, eyes, mt = best
-    quads = sorted(glob.glob(os.path.join(S['dir'], 'shots', 'f%04d_quad*.png' % f)))
-    return {'frame': f, 'e0': eyes[0], 'e1': eyes[1], 'hud': quads[-1] if quads else None, 'mtime': mt}
+        quads = sorted(glob.glob(os.path.join(S['dir'], 'shots', 'f%04d_quad*.png' % f)))
+        out.append({'frame': f, 'e0': eyes[0], 'e1': eyes[1], 'hud': quads[-1] if quads else None, 'mtime': mt})
+    return out[-MAX_CANDIDATES:]
 
 
-def analyse_shot(shot, spot_idx, spot_name, out):
+def stats_shot(shot):
     r = {'frame': shot['frame']}
     e0, e1 = Image.open(shot['e0']), Image.open(shot['e1'])
     r['size'] = [e0.width, e0.height]
-    s0, s1 = thumb_stats(e0), thumb_stats(e1)
-    r['eye0'], r['eye1'] = s0, s1
-    d, conf, d0 = disparity(e0, e1)
-    r['disparity_px'], r['disparity_conf'], r['eye_diff0'] = round(d, 1), round(conf, 2), round(d0, 2)
-    # downscaled pair for the sheet and --compare: each eye 480 wide
-    w = 480
+    r['eye0'], r['eye1'] = thumb_stats(e0), thumb_stats(e1)
+    d, conf, d0, res = disparity(e0, e1)
+    r['disparity_px'], r['disparity_conf'], r['eye_diff0'], r['eye_res'] = round(d, 1), round(conf, 2), round(d0, 2), round(res, 3)
+    if shot['hud']:
+        hu = Image.open(shot['hud'])
+        r['hud_share'] = round(hud_share(hu), 5)
+        r['hud_size'] = [hu.width, hu.height]
+        r['hud_stats'] = thumb_stats(on_bg(hu))
+    return r
+
+
+def save_shot(shot, r, spot_idx, spot_name, out):
+    e0, e1 = Image.open(shot['e0']), Image.open(shot['e1'])
+    w = 480   # each eye 480 wide: the sheet and --compare read these
     h = round(w * e0.height / e0.width)
     pair = Image.new('RGB', (2 * w, h))
     pair.paste(e0.convert('RGB').resize((w, h), Image.LANCZOS), (0, 0))
@@ -375,12 +390,31 @@ def analyse_shot(shot, spot_idx, spot_name, out):
     r['eyes_png'] = 'spots/%s_eyes.png' % base
     if shot['hud']:
         hu = Image.open(shot['hud'])
-        r['hud_share'] = round(hud_share(hu), 5)
-        r['hud_size'] = [hu.width, hu.height]
-        hs = on_bg(hu).resize((640, max(1, round(640 * hu.height / hu.width))), Image.LANCZOS)
-        hs.save(os.path.join(out, 'spots', base + '_hud.png'), optimize=True)
+        on_bg(hu).resize((640, max(1, round(640 * hu.height / hu.width))), Image.LANCZOS).save(os.path.join(out, 'spots', base + '_hud.png'), optimize=True)
         r['hud_png'] = 'spots/%s_hud.png' % base
-        r['hud_stats'] = thumb_stats(on_bg(hu))
+
+
+def is_black(e):
+    return e['luma'] < BLACK_LUMA or e['black'] > BLACK_FRAC
+
+
+def analyse_spot_shots(S, i, spot_name, out):
+    """All candidate screenshots of the spot; the one shown is the brightest with both eyes drawn.  'black_eyes' lists the
+    eyes black in every candidate (then it is a verdict), 'flicker' the eyes black in some."""
+    cands = pick_shots(S, i)
+    if not cands:
+        return None
+    rs = [stats_shot(c) for c in cands]
+    ok = [k for k, r in enumerate(rs) if not is_black(r['eye0']) and not is_black(r['eye1'])]
+    # (the one shown: the pair whose eyes agree best; the game camera glides after a warp or a walk and a pair then shows
+    # two latches of it, which is what the other candidates are for)
+    best = min(ok, key=lambda k: rs[k]['eye_res']) if ok else max(range(len(rs)), key=lambda k: rs[k]['eye0']['luma'] + rs[k]['eye1']['luma'])
+    r = rs[best]
+    r['candidates'] = len(rs)
+    r['eyes_disagree'] = bool(ok) and all(rs[k]['eye_res'] > EYE_RES_MAX for k in ok)
+    r['black_eyes'] = [nm for nm, key in (('left', 'eye0'), ('right', 'eye1')) if all(is_black(x[key]) for x in rs)]
+    r['flicker'] = [nm for nm, key in (('left', 'eye0'), ('right', 'eye1')) if any(is_black(x[key]) for x in rs) and nm not in r['black_eyes']]
+    save_shot(cands[best], r, i, spot_name, out)
     return r
 
 
@@ -392,13 +426,17 @@ def verdict_for(spot, S_all, nominal_of):
         broken.append('no screenshot' + (' (the session crashed)' if any(S['crash'] for S in S_all if S['kind'] == 'shots') else ''))
     else:
         l0, l1 = img['eye0'], img['eye1']
-        for nm, e in (('left', l0), ('right', l1)):
-            if e['luma'] < BLACK_LUMA or e['black'] > BLACK_FRAC:
-                broken.append('%s eye black (luma %.1f, %.0f%% black)' % (nm, e['luma'], 100 * e['black']))
-        if (l0['luma'] > 12 or l1['luma'] > 12) and abs(l0['luma'] - l1['luma']) > 0.6 * max(l0['luma'], l1['luma']):
-            if not any('eye black' in b for b in broken):
-                broken.append('the eyes differ a lot in brightness (%.0f vs %.0f)' % (l0['luma'], l1['luma']))
-        if img['disparity_conf'] >= DISP_MIN_CONF:
+        for nm in img.get('black_eyes', []):
+            e = l0 if nm == 'left' else l1
+            broken.append('%s eye black%s (luma %.1f, %.0f%% black)' % (nm, ' in all %d screenshots' % img['candidates'] if img['candidates'] > 1 else '', e['luma'], 100 * e['black']))
+        for nm in img.get('flicker', []):
+            notes.append('%s eye black in one of %d screenshots (a transition?)' % (nm, img['candidates']))
+        if not img.get('black_eyes') and (l0['luma'] > 12 or l1['luma'] > 12) and abs(l0['luma'] - l1['luma']) > 0.6 * max(l0['luma'], l1['luma']):
+            broken.append('the eyes differ a lot in brightness (%.0f vs %.0f)' % (l0['luma'], l1['luma']))
+        if img.get('eyes_disagree'):
+            msg = 'the eyes show different views in %s (residual %.2f after the best shift)' % ('every screenshot' if img['candidates'] > 1 else 'the screenshot', img['eye_res'])
+            (broken if img['candidates'] > 1 else notes).append(msg)
+        elif img['disparity_conf'] >= DISP_MIN_CONF:
             if img['disparity_px'] < -1.5:
                 broken.append('eyes swapped? disparity %+.0f px (should be positive)' % img['disparity_px'])
             elif abs(img['disparity_px']) < 1.0 and img['eye_diff0'] < 0.8:
@@ -439,6 +477,8 @@ def verdict_for(spot, S_all, nominal_of):
             broken.append('%s Hz: %d xrmock ERROR lines' % (hz, m['mock_errors']))
         if m.get('vuids'):
             broken.append('%s Hz: %d validation messages' % (hz, m['vuids']))
+        if m.get('level') and m['level'] not in ('-', spot['level']):
+            notes.append('%s Hz: ended in level %s, not %s (the walk left the spot, or a warp was late)' % (hz, m['level'], spot['level']))
         if m.get('xr_partial'):
             notes.append('%s Hz: XR summary only partly in the window' % hz)
         if m.get('compile'):
@@ -474,9 +514,9 @@ def build_report(out, keep_raw=False):
                                                                                  and S['windows'].get(i) and S['windows'][i][0] <= t < S['windows'][i][2]})}
         spot['img'] = None
         for S in shot_S:
-            sh = pick_shot(S, i)
-            if sh:
-                spot['img'] = analyse_shot(sh, i, spot['name'], out)
+            r = analyse_spot_shots(S, i, spot['name'], out)
+            if r:
+                spot['img'] = r
         spot['verdict'], spot['broken'], spot['slow'], spot['notes'] = verdict_for(spot, sess if not vvl_S else [S for S in sess if S['kind'] != 'vvl'], nominal_of)
         if spot['vvl'] and spot['vvl']['vuids']:
             spot['broken'].append('validation: %d messages (%s)' % (spot['vvl']['vuids'], ', '.join(spot['vvl']['unique'][:3])))
@@ -505,7 +545,7 @@ def sheet(out, spots):
     cells = []
     for s in spots:
         img = s.get('img')
-        cell = Image.new('RGB', (1080, th_ + 22), (18, 18, 22))
+        cell = Image.new('RGB', (1080, th_ * 2 + 22), (18, 18, 22))
         d = ImageDraw.Draw(cell)
         col = {'OK': (110, 230, 120), 'SLOW': (255, 200, 70), 'BROKEN': (255, 90, 90)}[s['verdict']]
         fps = ' '.join('%sHz %s' % (h, f1((m or {}).get('sets_per_s') if (m or {}).get('sets_per_s') is not None else (m or {}).get('fps'))) for h, m in s['hz'].items())
@@ -513,8 +553,7 @@ def sheet(out, spots):
         if img:
             e = Image.open(os.path.join(out, img['eyes_png']))
             e = e.resize((2 * tw, round(2 * tw * e.height / e.width)))
-            e = e.crop((0, 0, 2 * tw, th_ * 2)) if e.height > th_ * 2 else e
-            cell.paste(e.resize((2 * tw, min(e.height, th_ * 2))), (0, 20))
+            cell.paste(e.crop((0, 0, 2 * tw, th_ * 2)), (0, 20))
             if img.get('hud_png'):
                 h = Image.open(os.path.join(out, img['hud_png'])).resize((tw, round(tw * 9 / 16)))
                 cell.paste(h, (2 * tw, 20))
@@ -537,7 +576,7 @@ def write_md(out, meta, spots, sess, hzs, nominal_of):
     cnt = {v: sum(1 for s in spots if s['verdict'] == v) for v in ('OK', 'SLOW', 'BROKEN')}
     L.append('# VR tour: %s' % worst)
     L.append('')
-    L.append('%s @ %s%s, binary of %s, %s. %d spots: %d OK, %d SLOW, %d BROKEN. Eye %s, mock pose sway, hearts cheat.' % (
+    L.append('%s @ %s%s, binary of %s, %s. %d spots: %d OK, %d SLOW, %d BROKEN. Eye %s, mock head pose 35 degrees down with a yaw sway, hearts cheat.' % (
         meta.get('rev', '?'), meta.get('branch', '?'), ' (+%s modified files)' % meta['dirty'] if meta.get('dirty', '0') != '0' else '', meta.get('binary', '?'),
         meta.get('date', '?')[:19], len(spots), cnt['OK'], cnt['SLOW'], cnt['BROKEN'], meta.get('eye', '?')))
     L.append('')
@@ -607,8 +646,8 @@ def write_md(out, meta, spots, sess, hzs, nominal_of):
                     f1(m.get('gpu_wait'), 2), f1(m.get('queue_wait'), 2), f1(m.get('latch_ms')), ex))
         if s.get('img'):
             i = s['img']
-            L.append('- eyes: luma %.0f / %.0f, black %.0f%% / %.0f%%, disparity %+.1f px (confidence %.2f); HUD %s' % (
-                i['eye0']['luma'], i['eye1']['luma'], 100 * i['eye0']['black'], 100 * i['eye1']['black'], i['disparity_px'], i['disparity_conf'],
+            L.append('- eyes: luma %.0f / %.0f, black %.0f%% / %.0f%%, disparity %+.1f px (confidence %.2f), eye residual %.2f; HUD %s' % (
+                i['eye0']['luma'], i['eye1']['luma'], 100 * i['eye0']['black'], 100 * i['eye1']['black'], i['disparity_px'], i['disparity_conf'], i['eye_res'],
                 '%.2f%% drawn' % (100 * i['hud_share']) if 'hud_share' in i else 'missing'))
         L.append('')
     L.append('![sheet](sheet.png)')
@@ -680,7 +719,7 @@ def compare(old, new):
                     f.append('HUD quad gone')
                 elif oi['hud_share'] > HUD_MIN:
                     r = ni['hud_share'] / oi['hud_share']
-                    if r < CMP_HUD[0] or r > CMP_HUD[1]:
+                    if r < CMP_HUD:
                         f.append('HUD drawn share %.2f%% -> %.2f%%' % (100 * oi['hud_share'], 100 * ni['hud_share']))
         elif oi and not ni:
             f.append('screenshot missing now')
