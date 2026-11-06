@@ -587,24 +587,38 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
         free(keep);
     }
     FILE **files = calloc((size_t)idx_nfiles + 1, sizeof *files);
-    int done = 0, prepared = 0, missing = 0, failed = 0, prepared_seen = 0;
-    for (int own = 0; own < 2; own++)  // the shipped list, then the player's own
-    for (char *line = own ? seen : list, *next; line && *line && !(cancel && *cancel); line = next) {
-        next = strchr(line, '\n');
-        if (next) *next++ = 0;
-        else next = line + strlen(line);
-        ShaderRec r;
-        if (!shader_rec_parse(line, &r)) continue;
-        if (own && !getenv("LARECOMP_SHADER_LIST") && shader_seen_shipped(line)) continue;  // (prepared already)
-        const IdxEnt *ev = idx_find(r.vs), *ef = r.kind == 'G' ? idx_find(r.fs) : NULL;
-        ShaderBlob bv = {0}, bf = {0};
-        uint8_t *dv = ev ? blob_read(ev, &bv, files) : NULL, *df = ef ? blob_read(ef, &bf, files) : NULL;
-        if (!dv || (r.kind == 'G' && !df)) missing++;
-        else if (renderer_prepare(&r, &bv, &bf)) *(own ? &prepared_seen : &prepared) += 1;
-        else failed++;
-        free(dv);
-        free(df);
-        if (progress && (++done & 7) == 0) progress(done - renderer_prepare_pending(), total + 1);
+    int done = 0, prepared = 0, missing = 0, failed = 0, prepared_seen = 0, mv_prepared = 0, mv_skipped = 0;
+    // Multiview records (SR_MV / SR_MVP: the VR eye passes' pipelines and programs with LARECOMP_MV, vulkan/exec.c):
+    // with multiview on they go first, from both lists - in such a run they are what the eye passes draw, and the
+    // time budget (shader_prep_boot) may end the run before the player's own list; with it off they are left out
+    // (the renderer couldn't build them: no "failed" counts for them), and stay in the file.
+    const char *mve = getenv("LARECOMP_MV");
+    bool mv_on = mve && atoi(mve) > 0;
+    for (int pass = 0; pass < 4; pass++) {  // (multiview: the shipped list's, the player's), the shipped list, the player's
+        bool own = pass & 1, mv_pass = pass < 2;
+        if (mv_pass && !mv_on) continue;
+        for (const char *line = own ? seen : list, *next; line && *line && !(cancel && *cancel); line = next) {
+            next = strchr(line, '\n');
+            size_t l = next ? (size_t)(next - line) : strlen(line);
+            next = next ? next + 1 : line + l;
+            char one[2048];
+            if (l >= sizeof one) continue;
+            memcpy(one, line, l), one[l] = 0;
+            ShaderRec r;
+            if (!shader_rec_parse(one, &r)) continue;
+            bool mv = r.kind == 'G' && (r.flags & (SR_MV | SR_MVP));
+            if (mv != mv_pass) { mv_skipped += mv && !mv_on; continue; }
+            if (own && !getenv("LARECOMP_SHADER_LIST") && shader_seen_shipped(one)) continue;  // (prepared already)
+            const IdxEnt *ev = idx_find(r.vs), *ef = r.kind == 'G' ? idx_find(r.fs) : NULL;
+            ShaderBlob bv = {0}, bf = {0};
+            uint8_t *dv = ev ? blob_read(ev, &bv, files) : NULL, *df = ef ? blob_read(ef, &bf, files) : NULL;
+            if (!dv || (r.kind == 'G' && !df)) missing++;
+            else if (renderer_prepare(&r, &bv, &bf)) *(own ? &prepared_seen : &prepared) += 1, mv_prepared += mv;
+            else failed++;
+            free(dv);
+            free(df);
+            if (progress && (++done & 7) == 0) progress(done - renderer_prepare_pending(), total + 1);
+        }
     }
     while (!(cancel && *cancel) && renderer_prepare_pending()) {  // (the last builds)
         if (progress) progress(done - renderer_prepare_pending(), total + 1);
@@ -620,6 +634,8 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
     if (!(cancel && *cancel)) prep_done_once = true;
     LOG("[shader] prepared %d + %d seen before, not found %d%s%s (%d failed; index %zu shaders in %.0f ms, total %.0f ms)\n",
         prepared, prepared_seen, missing, cancel && *cancel ? ", " : "", cancel && *cancel ? "skipped" : "", failed, idx_n, t_idx, ms_now() - t0);
+    if (mv_prepared || mv_skipped)
+        LOG("[shader] multiview records: %d prepared first, %d left out (multiview off)\n", mv_prepared, mv_skipped);
     return true;
 }
 

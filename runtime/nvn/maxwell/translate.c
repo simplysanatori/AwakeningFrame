@@ -196,7 +196,7 @@ static const char *cbuf_ref(Ctx *c, int idx, int64_t off, const char *dyn, char 
     if (off + 16 > (int64_t)c->info->cbuf_size[idx]) c->info->cbuf_size[idx] = (uint32_t)((off + 16 + 255) & ~255);
     if (dyn) c->info->cbuf_dynamic |= 1u << idx;
     if (!dyn && idx < 18 && off >= 0 && (uint32_t)(off >> 4) + 1 > c->cbuf_need[idx]) c->cbuf_need[idx] = (uint32_t)(off >> 4) + 1;
-    if (c->glsl && c->key && c->key->mv && idx >= 3) {  // (multiview: eye 1's copy VO<k> rows on, when bit k is set)
+    if (c->glsl && c->key && c->key->mv && idx >= 3 && (c->stage == STAGE_VERTEX || c->stage == STAGE_FRAGMENT)) {  // (multiview: eye 1's copy VO<k> rows on, when bit k is set; glsl_finish defines VO / VB for these stages)
         if (dyn) sprintf(buf, "cbr(cb%d, (%s) + %lldu + VB%d)", idx, dyn, (long long)off, idx);
         else sprintf(buf, "cb%d[%lldu + VO%d][%lld]", idx, (long long)(off >> 4), idx, (long long)((off >> 2) & 3));
         return buf;
