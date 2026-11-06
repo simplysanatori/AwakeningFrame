@@ -100,6 +100,7 @@ void menu_tabs_focus(bool first_tab);
 static void set_open(bool open) {
     if (open == g_open.load()) return;
     g_open.store(open);
+    LOG("[menu] %s\n", open ? "open" : "closed");
     menu_sfx_play(open ? MENU_SFX_OPEN : MENU_SFX_CLOSE);
     input_reset();  // nothing held while the menu had focus leaks into the game
     bind_capture_cancel();

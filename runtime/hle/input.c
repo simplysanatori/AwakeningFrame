@@ -271,19 +271,23 @@ static void note_press(uint64_t down, uint64_t up) {
 
 // Events a test pushes (LARECOMP_HOST_INPUT type: / sdlkey: / sdlpad: / sdlaxis: / mouse:) carry this device id: they go the whole way, menu first.
 #define TEST_DEVICE 0x7E57u
+#define XR_EVENT_MARK 0x58  // (input_xr_set2's events: padding1)
 #ifdef LARECOMP_HAVE_XR
 // The Frame controllers (runtime/xr/xr_input.c, the XR thread, once per display refresh): the SDL gamepad buttons held
 // (host bits; bits PADB_LTRIGGER / PADB_RTRIGGER the triggers as ZL / ZR) and the left stick. The buttons go through the
 // player's controller bindings like a gamepad's (positionally: no label swap, the Frame's A is the east button as a
 // Switch pad's). Menus (the overlay, the start screen) take SDL gamepad events from the pad, so each change is also
 // pushed as one, from the test device's id (it goes the whole way, menu first, and is let through in a scripted run).
-void input_xr_set(uint32_t host, int32_t lx, int32_t ly) {
+// host_game: what the game gets; host: what the menus' events say (the View + Menu chord goes to the menus only:
+// xr_input.c). The events are marked (XR_EVENT_MARK): the game has the buttons from xr_buttons already, so an event the
+// menus pass on is not a press for it too (a chord's first half reached the game as a tap that way).
+void input_xr_set2(uint32_t host_game, uint32_t host, int32_t lx, int32_t ly) {
     static uint32_t last_host;
     static int32_t last_ax[2];
     uint64_t b = 0;
     for (int i = 0; i < BIND_PAD_COUNT; i++) {
         int h = g_bind_pad[i];
-        if ((unsigned)h < PADB_HOST_COUNT && (host >> h & 1)) b |= 1ull << i;
+        if ((unsigned)h < PADB_HOST_COUNT && (host_game >> h & 1)) b |= 1ull << i;
     }
     uint64_t old = atomic_exchange(&xr_buttons, b);
     note_press(b & ~old, old & ~b);
@@ -294,6 +298,7 @@ void input_xr_set(uint32_t host, int32_t lx, int32_t ly) {
         SDL_Event e = {0};
         e.type = (host >> h & 1) ? SDL_EVENT_GAMEPAD_BUTTON_DOWN : SDL_EVENT_GAMEPAD_BUTTON_UP;
         e.gbutton.which = TEST_DEVICE, e.gbutton.button = (Uint8)h, e.gbutton.down = (host >> h & 1) != 0;
+        e.gbutton.padding1 = XR_EVENT_MARK;
         SDL_PushEvent(&e);
     }
     last_host = host;
@@ -307,6 +312,7 @@ void input_xr_set(uint32_t host, int32_t lx, int32_t ly) {
         last_ax[a] = ax[a];
     }
 }
+void input_xr_set(uint32_t host, int32_t lx, int32_t ly) { input_xr_set2(host, host, lx, ly); }
 #endif
 
 // Forget held keys (the menu took focus); the gamepad is re-read on its next event.
@@ -530,7 +536,8 @@ void input_handle_event(const SDL_Event *e) {
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
         if (e->gbutton.down && e->gbutton.which != TEST_DEVICE && !host_test) use_pad(e->gbutton.which, " (switched)");
         if (pad && e->gbutton.which != TEST_DEVICE && e->gbutton.which != SDL_GetGamepadID(pad)) break;  // (another pad)
-        if (!host_test || e->gbutton.which == TEST_DEVICE) {  // (the press as the event has it, before reading the pad)
+        if ((!host_test || e->gbutton.which == TEST_DEVICE) && !(e->gbutton.which == TEST_DEVICE && e->gbutton.padding1 == XR_EVENT_MARK)) {
+            // (the press as the event has it, before reading the pad; not the Frame controllers' events: xr_buttons)
             uint64_t b = pad_bits(e->gbutton.button);
             note_press(e->gbutton.down ? b : 0, e->gbutton.down ? 0 : b);
         }
@@ -868,6 +875,18 @@ static void fill_state(Cpu *c) {
         static uint64_t until;
         if (g_inject_plus > 0) { until = renderer_present_count() + 10; g_inject_plus = 0; }
         if (renderer_present_count() < until) b |= 1ull << BTN_PLUS;
+    }
+    {   // (LARECOMP_XR_INPUT_LOG: Plus and Minus as the game reads them: the View + Menu chord's test)
+        static int on = -1;
+        static uint64_t last;
+        if (on < 0) on = getenv("LARECOMP_XR_INPUT_LOG") != NULL;
+        uint64_t pm = b & (1ull << BTN_PLUS | 1ull << BTN_MINUS);
+        if (on && pm != last) {
+            extern uint64_t renderer_present_count(void);
+            LOG("[input] the game reads Plus %d Minus %d (frame %llu)\n", (int)(pm >> BTN_PLUS & 1), (int)(pm >> BTN_MINUS & 1),
+                (unsigned long long)renderer_present_count());
+        }
+        last = pm;
     }
     int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx + xr_lx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly + xr_ly) + script_ly);
     int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry) + script_ry);
