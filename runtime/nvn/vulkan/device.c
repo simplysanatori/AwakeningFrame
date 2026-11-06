@@ -1779,7 +1779,14 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                 os.sx = os.ax = sx = (double)ew / t->width;
                 os.sy = os.ay = sy = (double)eh / t->height;
                 double u = fmin(sx, sy);
-                crop[2] = (float)(u / sx), crop[3] = (float)(u / sy);
+                {   // (LARECOMP_VR_DYNRES=1) drawn at a factor of the eye size, scaled up into the eye images
+                    // (output_scale.c); budget: 14.5 ms at 60 fps (120 Hz), 87% of 33.3 at 30 (90 Hz)
+                    static double b60 = -1;
+                    if (b60 < 0) b60 = getenv("LARECOMP_VR_DYNRES_MS") ? atof(getenv("LARECOMP_VR_DYNRES_MS")) : 14.5;
+                    double f = output_scale_vr_factor(SDL_GetTicksNS() / 1e9, game_ms, xr_display_hz() < 100 ? 29.0 : b60, ew);
+                    os.sx = sx = os.ax * f, os.sy = sy = os.ay * f;
+                }
+                crop[2] = (float)(u / os.ax), crop[3] = (float)(u / os.ay);  // (of the allocation: the present takes the drawn part)
                 crop[0] = (1 - crop[2]) * 0.5f, crop[1] = (1 - crop[3]) * 0.5f;
                 vx = vy = 0, vw = dw, vh = dh, shape = 16.0 / 9.0;
                 static uint32_t lw, lh;

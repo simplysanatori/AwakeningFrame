@@ -30,3 +30,10 @@ void output_scale_note_split(const DynSplit *s);
 // (Metal) the frame's command buffers' GPU spans summed, overlaps and all (what dynamic resolution went by before it
 // counted their union): shown in LARECOMP_LOG_DYNRES's [dynres] line
 void output_scale_note_sum(double ms);
+
+// VR mode's eye resolution (LARECOMP_VR_DYNRES=1; off by default: the eyes are drawn at the eye images' size): the
+// factor (<= 1) the eyes are drawn at inside eye images `eye_w` pixels wide, from the game's GPU time per game frame
+// (game_ms, < 0: unknown) against budget_ms. Called once per game frame (between frames: no frame mixes two factors).
+double output_scale_vr_factor(double now, double game_ms, double budget_ms, unsigned eye_w);
+// (the VR tab's Dynamic Resolution row, runtime/vr_settings.c) on / off while the game runs
+void diet_set_dynres(int on);
