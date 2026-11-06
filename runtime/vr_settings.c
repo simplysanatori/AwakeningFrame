@@ -14,14 +14,14 @@
 const char *const g_vr_refresh_names[VRS_N_REFRESH] = {"120 Hz (60 FPS)", "90 Hz (30 FPS)"};
 const char *const g_vr_layout_names[VRS_N_LAYOUT] = {"Switch", "Comfort"};
 const char *const g_vr_follow_names[VRS_N_FOLLOW] = {"Smooth", "Room", "Fixed"};
-const char *const g_vr_edge_names[VRS_N_EDGE] = {"Fog", "Gradient", "Black", "Passthrough"};
+const char *const g_vr_edge_names[VRS_N_EDGE] = {"Off", "Haze", "Sky Only", "Passthrough"};
 const char *const g_vr_fov_names[VRS_N_FOV] = {"Off", "Low", "Medium", "High"};
 const char *const g_vr_cull_names[VRS_N_CULL] = {"Fit", "Wide", "Stock"};
 
 // larecomp.ini words; the environment variables take the same ones (LARECOMP_VR_EDGE=fog, ...)
 static const char *const k_layout[] = {"switch", "comfort"};
 static const char *const k_follow[] = {"smooth", "room", "fixed"};
-static const char *const k_edge[] = {"fog", "gradient", "black", "passthrough"};
+static const char *const k_edge[] = {"black", "fog", "gradient", "passthrough"};
 static const char *const k_fov[] = {"off", "low", "medium", "high"};
 static const char *const k_cull[] = {"fit", "wide", "stock"};
 
@@ -66,7 +66,7 @@ bool vr_settings_parse(const char *key, const char *val) {
     else if (!strcmp(key, "follow")) VR.follow = pick(k_follow, VRS_N_FOLLOW, val, VRS_FOLLOW_SMOOTH);
     else if (!strcmp(key, "table_height") || !strcmp(key, "table_size") || !strcmp(key, "table_tilt"))
         ;  // old keys: the rig keeps these now (vr_rig.ini); read and dropped
-    else if (!strcmp(key, "edge")) VR.edge = pick(k_edge, VRS_N_EDGE, val, VRS_EDGE_FOG);
+    else if (!strcmp(key, "edge_mode")) VR.edge = pick(k_edge, VRS_N_EDGE, val, VRS_EDGE_OFF);  // (the old "vr_edge" key is ignored)
     else if (!strcmp(key, "foveation")) VR.foveation = pick(k_fov, VRS_N_FOV, val, VRS_FOV_MEDIUM);
     else if (!strcmp(key, "dynamic_resolution")) VR.dynres = atoi(val) != 0;
     else if (!strcmp(key, "culling")) VR.cull = pick(k_cull, VRS_N_CULL, val, VRS_CULL_FIT);
@@ -80,7 +80,7 @@ void vr_settings_save(FILE *f) {
     fprintf(f, "vr_refresh = %d\n", VR.refresh == VRS_REFRESH_90 ? 90 : 120);
     fprintf(f, "vr_layout = %s\n", k_layout[VR.layout]);
     fprintf(f, "vr_follow = %s\n", k_follow[VR.follow]);
-    fprintf(f, "vr_edge = %s\n", k_edge[VR.edge]);
+    fprintf(f, "vr_edge_mode = %s\n", k_edge[VR.edge]);
     fprintf(f, "vr_foveation = %s\n", k_fov[VR.foveation]);
     fprintf(f, "vr_dynamic_resolution = %d\n", VR.dynres);
     fprintf(f, "vr_culling = %s\n", k_cull[VR.cull]);
@@ -127,7 +127,7 @@ void vr_settings_apply_env(void) {
     if (!g_given[VRO_REFRESH] && VR.refresh == VRS_REFRESH_90) put("LARECOMP_XR_HZ", "90");
     if (!g_given[VRO_LAYOUT] && VR.layout != VRS_LAYOUT_SWITCH) put("LARECOMP_XR_LAYOUT", k_layout[VR.layout]);
     if (!g_given[VRO_FOLLOW] && VR.follow != VRS_FOLLOW_SMOOTH) put("LARECOMP_VR_FOLLOW", k_follow[VR.follow]);
-    if (!g_given[VRO_EDGE] && VR.edge != VRS_EDGE_FOG) put("LARECOMP_VR_EDGE", k_edge[VR.edge]);
+    if (!g_given[VRO_EDGE] && VR.edge != VRS_EDGE_OFF) put("LARECOMP_VR_EDGE", k_edge[VR.edge]);
     if (!g_given[VRO_FOVEATION] && VR.foveation != VRS_FOV_MEDIUM) put("LARECOMP_VR_FOVEATION", k_fov[VR.foveation]);
     if (!g_given[VRO_DYNRES] && VR.dynres) put("LARECOMP_VR_DYNRES", "1");  // off by default (owner), so only On is passed on
     if (!g_given[VRO_CULL] && VR.cull != VRS_CULL_FIT) put("LARECOMP_VR_CULL", k_cull[VR.cull]);

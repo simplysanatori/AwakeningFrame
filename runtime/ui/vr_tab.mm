@@ -88,9 +88,9 @@ extern "C" void vr_tab_draw(float scale) {
 
     opt_section("Edge");
     grey(VRO_EDGE);
-    if (opt_choice("Table Edge", &v.edge, g_vr_edge_names, VRS_N_EDGE, VRS_EDGE_FOG,
-                   desc(VRO_EDGE, "What surrounds the table. Fog fades the world into the distance, Gradient fills the empty "
-                                  "space with a soft backdrop, Black leaves it empty, Passthrough shows the room.")))
+    if (opt_choice("Table Edge", &v.edge, g_vr_edge_names, VRS_N_EDGE, VRS_EDGE_OFF,
+                   desc(VRO_EDGE, "What fills the empty space past the world outdoors. Haze fades it into the sky, Sky Only "
+                                  "fills the space without touching the world, Passthrough shows the room.")))
         changed(VRO_EDGE);
 
     opt_section("Performance");
