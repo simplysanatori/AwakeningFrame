@@ -27,7 +27,10 @@ bool vr_cull_get(float *aspect, float *fovy_scale);
 // (lane ring) the table fit's footprint as a world-axis box (y unbounded), before LARECOMP_VR_CULL_EXTENT; false: none
 bool vr_cull_core_box(float lo[3], float hi[3]);
 bool vr_ring_on(void);  // LARECOMP_VR_RING set
-// a draw with this world box: 0 core, 1 ring, 2 ring that still casts (LARECOMP_VR_RING_CAST); against the footprint
+// (lane scene) LARECOMP_VR_SCENE=<rooms> / LARECOMP_VR_CULL_EXTENT: the drawn box's smaller half-extent (units), 0 = off
+float vr_cull_scene_reach(void);
+// a draw with this world box: 0 core, 1 ring, 2 ring that still casts (LARECOMP_VR_RING_CAST), 3 past the EXTENT box
+// (lane scene: drawn nowhere but shared colour passes); against the footprint
 // as it was at the first call of this frame (the executor's renderer_exec_frame)
 int vr_ring_class(const float lo[3], const float hi[3], uint64_t frame);
 // (edge pass, render thread) the latest fit's floor quadrilateral in world (x, z), counter-clockwise from above, the floor

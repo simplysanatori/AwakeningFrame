@@ -95,6 +95,9 @@ static void cfg_init(void) {
     cfg.radius = (e = getenv("LARECOMP_VR_EDGE_RADIUS")) && atof(e) > 0 ? (float)atof(e) : FADE_RADIUS;
     cfg.width = (e = getenv("LARECOMP_VR_EDGE_WIDTH")) && atof(e) > 0 ? (float)atof(e) : FADE_WIDTH;
     cfg.room_margin = FADE_ROOM_MARGIN;
+    // (lane scene) with the overworld drawn further out (LARECOMP_VR_SCENE / _CULL_EXTENT), the fade ends at the drawn box's
+    // nearer side instead of 25 units out, unless LARECOMP_VR_EDGE_RADIUS says otherwise
+    if (!getenv("LARECOMP_VR_EDGE_RADIUS") && vr_cull_scene_reach() - cfg.width > cfg.radius) cfg.radius = vr_cull_scene_reach() - cfg.width;
     float s = (e = getenv("LARECOMP_VR_SCALE")) && atof(e) > 0 ? (float)atof(e) : 0.067f;
     float d = (e = getenv("LARECOMP_VR_DIST")) && atof(e) > 0 ? (float)atof(e) : 1.0f;
     cfg.pivot_default = d / s;

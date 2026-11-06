@@ -53,6 +53,24 @@ static void init(void) {
     if ((e = getenv("LARECOMP_VR_RING_CAST"))) C.ring_cast = (float)atof(e);
     if (!(C.ring > 0)) C.ring = 0;
     if (!(C.ring_cast > 0)) C.ring_cast = 0;
+    // (lane scene, research) LARECOMP_VR_SCENE=<rooms>: draw the overworld this many rooms out from the table centre on each
+    // side (1-3; the game keeps 3 resident around Link's room, so nothing more is loaded): the EXTENT box of (rooms + 0.5)
+    // rooms (15 x 12 units each), the widest culling tangent raised to 20 (the box reaches under and behind the game camera,
+    // whose frustum can't go past 90 degrees: tan 4 left the south rows out) and ring draws (margin 4) so the extra rooms
+    // stay out of the shadow and depth pre-passes. Explicit EXTENT / TMAX / RING values win. Wherever the table fit runs (side
+    // views keep the fixed widening): in a dungeon it shows whatever neighbouring rooms the game has loaded.
+    if ((e = getenv("LARECOMP_VR_SCENE")) && atof(e) > 0) {
+        float r = fminf((float)atof(e), 3.0f);
+        if (!getenv("LARECOMP_VR_CULL_EXTENT")) C.ex = 15.0f * (r + 0.5f), C.ez = 12.0f * (r + 0.5f);
+        if (!getenv("LARECOMP_VR_CULL_TMAX")) C.tmax = 20.0f;
+        if (!getenv("LARECOMP_VR_RING")) C.ring = 4.0f;
+    }
+}
+
+// (lane scene) the EXTENT box's smaller half-extent in game units, 0 when off (the edge fade's clear radius follows it)
+float vr_cull_scene_reach(void) {
+    if (!C.init) init();
+    return C.ex > 0 && C.ez > 0 ? fminf(C.ex, C.ez) : 0.0f;
 }
 
 // the table fit's footprint as a world-axis box (x, z), before the EXTENT override: written by vr_cull_fit (the render
@@ -60,8 +78,12 @@ static void init(void) {
 static _Atomic unsigned g_core_seq;
 static _Atomic float g_core[4];  // lo x, lo z, hi x, hi z
 static _Atomic int g_core_ok;
-static void core_set(const float corner[4][3], bool ok) {
+static _Atomic float g_ext[4];  // (lane scene) the EXTENT box about the anchor (lo x, lo z, hi x, hi z); unset when EXTENT is off
+static void core_set(const float corner[4][3], bool ok, const float anchor[3]) {
     atomic_fetch_add(&g_core_seq, 1);
+    if (ok && anchor && C.ex > 0 && C.ez > 0)
+        atomic_store(&g_ext[0], anchor[0] - C.ex), atomic_store(&g_ext[1], anchor[2] - C.ez),
+        atomic_store(&g_ext[2], anchor[0] + C.ex), atomic_store(&g_ext[3], anchor[2] + C.ez);
     if (ok) {
         float lx = corner[0][0], hx = lx, lz = corner[0][2], hz = lz;
         for (int c = 1; c < 4; c++)
@@ -72,20 +94,22 @@ static void core_set(const float corner[4][3], bool ok) {
     atomic_fetch_add(&g_core_seq, 1);
 }
 
-bool vr_cull_core_box(float lo[3], float hi[3]) {
+static bool core_box(float lo[3], float hi[3], float elo[2], float ehi[2]) {
     for (int tries = 0; tries < 8; tries++) {
         unsigned s0 = atomic_load(&g_core_seq);
         if (s0 & 1) continue;
         int ok = atomic_load(&g_core_ok);
-        float b[4];
-        for (int i = 0; i < 4; i++) b[i] = atomic_load(&g_core[i]);
+        float b[4], x[4];
+        for (int i = 0; i < 4; i++) b[i] = atomic_load(&g_core[i]), x[i] = atomic_load(&g_ext[i]);
         if (atomic_load(&g_core_seq) != s0) continue;
         if (!ok) return false;
         lo[0] = b[0], lo[1] = -1e30f, lo[2] = b[1], hi[0] = b[2], hi[1] = 1e30f, hi[2] = b[3];
+        if (elo) elo[0] = x[0], elo[1] = x[1], ehi[0] = x[2], ehi[1] = x[3];
         return true;
     }
     return false;
 }
+bool vr_cull_core_box(float lo[3], float hi[3]) { return core_box(lo, hi, NULL, NULL); }
 
 bool vr_ring_on(void) {
     if (!C.init) init();
@@ -96,14 +120,17 @@ int vr_ring_class(const float blo[3], const float bhi[3], uint64_t frame) {
     if (!C.init) init();
     // one footprint per frame (the executor's thread only): a refit between a frame's depth pre-pass and its colour
     // pass must not turn a draw the pre-pass left out into one that tests EQUAL against it
-    static float lo[3], hi[3];
+    static float lo[3], hi[3], elo[2], ehi[2];
     static bool ok;
     static uint64_t at = ~0ull;
-    if (frame != at) at = frame, ok = vr_cull_core_box(lo, hi);
+    if (frame != at) at = frame, ok = core_box(lo, hi, elo, ehi);
     if (!(C.ring > 0) || !ok) return 0;
     float m = C.ring, c = C.ring_cast;  // (the draw's box against the footprint grown by the margin, in x and z)
     if (bhi[0] >= lo[0] - m && blo[0] <= hi[0] + m && bhi[2] >= lo[2] - m && blo[2] <= hi[2] + m) return 0;
     if (c > 0 && bhi[0] >= lo[0] - c && blo[0] <= hi[0] + c && bhi[2] >= lo[2] - c && blo[2] <= hi[2] + c) return 2;
+    // (lane scene) the game culls with a frustum from its own camera, so a box that reaches behind that camera opens the
+    // frustum to tan 20 and every resident room in front of it comes through: past the EXTENT box, draw nothing
+    if (C.ex > 0 && C.ez > 0 && !(bhi[0] >= elo[0] && blo[0] <= ehi[0] && bhi[2] >= elo[1] && blo[2] <= ehi[1])) return 3;
     return 1;
 }
 
@@ -177,7 +204,7 @@ void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3],
     float wide_a = 3.2f, wide_fs = 1.5f;
     if (fabsf(g->fwd[1]) < 0.26f) {  // side view (or a level look): no floor rectangle; the old fixed widening
         atomic_store(&g_aspect, wide_a), atomic_store(&g_fs, wide_fs);
-        core_set(NULL, false);  // (no footprint: every draw is core)
+        core_set(NULL, false, NULL);  // (no footprint: every draw is core)
         g_rect.have = false;
         return;
     }
@@ -200,7 +227,7 @@ void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3],
         rx *= C.kx, rz *= C.kz;
         corner[c][0] = anchor[0] + rx * hr[0] + rz * hf[0], corner[c][1] = anchor[1], corner[c][2] = anchor[2] + rx * hr[2] + rz * hf[2];
     }
-    core_set(corner, true);  // (lane ring: the table fit's footprint, before the EXTENT box replaces it)
+    core_set(corner, true, anchor);  // (lane ring: the table fit's footprint, before the EXTENT box replaces it)
     for (int c = 0; c < 4 && C.ex > 0 && C.ez > 0; c++)  // (the world box)
         corner[c][0] = anchor[0] + (c & 1 ? 1.0f : -1.0f) * C.ex, corner[c][2] = anchor[2] + (c & 2 ? 1.0f : -1.0f) * C.ez;
     {   // the floor quadrilateral, counter-clockwise seen from above in (x, z) (the edge pass fades to it)

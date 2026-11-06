@@ -7162,7 +7162,7 @@ static bool ring_world_box(CmdRec *r, bool indexed, float wlo[3], float whi[3]) 
     }
     return true;
 }
-static int ring_class(CmdRec *r, bool indexed, int kind) {  // 0 core, 1 ring, 2 ring that casts
+static int ring_class(CmdRec *r, bool indexed, int kind) {  // 0 core, 1 ring, 2 ring that casts, 3 past the EXTENT box
     extern int vr_ring_class(const float lo[3], const float hi[3], uint64_t frame);
     uint64_t inst = indexed ? r->x[6] : r->x[4];
     if (inst > 1 || !st.ubuf[0][2].addr) return 0;  // (instanced: grass and the like stay core)
@@ -7222,26 +7222,27 @@ static bool ring_route_(CmdRec *r, bool indexed, int log) {
     if (st.rt.depth) tw |= vk_tex_twinned(st.rt.depth);
     int kind = !tw ? 0 : !nc ? 1 : 2;  // shared / an eye's depth-only pass / an eye's colour pass
     int c = ring_class(r, indexed, kind);
-    bool skip = (kind == 0 && !nc && c == 1) || (kind == 1 && c >= 1);  // (shared: depth-only ones, the casters)
+    bool skip = (kind == 0 && !nc && (c == 1 || c == 3)) || (kind == 1 && c >= 1) || (kind == 2 && c == 3);  // (shared: depth-only ones, the casters)
     static int lowres = -1;  // LARECOMP_VR_RING_LOWRES=0: ring draws stay out of the eyes' smaller colour passes too
     if (lowres < 0) lowres = !getenv("LARECOMP_VR_RING_LOWRES") || atoi(getenv("LARECOMP_VR_RING_LOWRES")) != 0;
     if (!lowres && kind == 2 && c >= 1 && wx_scene_w && st.rt.color[0] && st.rt.color[0]->width * 4 < wx_scene_w * 3) skip = true;
     g_ring_leq = kind == 2 && c >= 1;
     ring_dump(r, indexed, kind, c);
     if (log) {
-        static uint64_t hist[2][3][3][2], hframe;
+        static uint64_t hist[2][3][4][2], hframe;
         uint64_t f = renderer_exec_frame();
         if (f != hframe) {
             if (hframe % 300 == 0) {
                 LOG("[ring] frame %llu: classification %.3f + %.3f ms (eye 0 + 1), %llu vertex boxes made, %llu skipped early "
-                    "(not in the counts below); (kind: class core/ring/cast, drawn+skipped):", (unsigned long long)hframe,
+                    "(not in the counts below); (kind: class core/ring/cast/beyond, drawn+skipped):", (unsigned long long)hframe,
                     ring_ns[0] / 1e6, ring_ns[1] / 1e6, (unsigned long long)ring_boxes, (unsigned long long)ring_early_n);
                 static const char *kn[3] = {"shared", "eye depth-only", "eye colour"};
                 for (int e = 0; e < 2; e++)
                     for (int kk = 0; kk < 3; kk++)
-                        LOG(" | e%d %s %llu/%llu+%llu/%llu+%llu", e, kn[kk], (unsigned long long)hist[e][kk][0][0],
+                        LOG(" | e%d %s %llu/%llu+%llu/%llu+%llu/%llu+%llu", e, kn[kk], (unsigned long long)hist[e][kk][0][0],
                             (unsigned long long)hist[e][kk][1][0], (unsigned long long)hist[e][kk][1][1],
-                            (unsigned long long)hist[e][kk][2][0], (unsigned long long)hist[e][kk][2][1]);
+                            (unsigned long long)hist[e][kk][2][0], (unsigned long long)hist[e][kk][2][1],
+                            (unsigned long long)hist[e][kk][3][0], (unsigned long long)hist[e][kk][3][1]);
                 LOG("\n");
             }
             memset(hist, 0, sizeof hist), hframe = f, ring_ns[0] = ring_ns[1] = ring_boxes = ring_early_n = 0;
@@ -7300,7 +7301,7 @@ static bool ring_early(CmdRec *r, bool indexed) {
     uint64_t t0 = log ? SDL_GetTicksNS() : 0;
     bool tw = vk_tex_twinned(st.rt.depth);
     int c = ring_class(r, indexed, tw ? 1 : 0);
-    bool skip = tw ? c >= 1 : c == 1;
+    bool skip = tw ? c >= 1 : (c == 1 || c == 3);
     if (skip) {
         if (tw) st_last_depth = st.rt.depth, memcpy(st_last_zr, st.depth_range[0], sizeof st_last_zr);
         if (g_eye == 1) eye1_skip_rt();  // (its counters)
