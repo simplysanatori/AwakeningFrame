@@ -107,6 +107,30 @@ float xr_display_hz(void);
 // blue, right red, to check which image each eye sees).
 void xr_stub_eye_colour(int eye, float rgba[4]);
 
+// ---- controllers (lane 5: runtime/xr/xr_input.c; any thread)
+// Link walks with the left stick, rotated by the diorama's yaw so that "up" walks him away from the player. The rig
+// calls this whenever its yaw changes (default 0; LARECOMP_XR_YAW=<degrees> sets the first value, for tests): the
+// rotation of the table about the vertical axis, counter-clockwise seen from above (T_table's Rot_y), taking the game's
+// x to the table's x and the game's "up" on screen to the table's -z; at 0 up is up, and with the table turned 90
+// degrees counter-clockwise (its "up" now points to the player's left) the stick has to be pushed left to walk up.
+void xr_input_set_yaw(float yaw_radians);
+// What the rig reads from the controllers (the game gets everything else; none of these reach the game):
+//   right stick left / right    xr_input_take_snap(): -1 left, +1 right, 0 none. One per flick past 0.7, re-armed once
+//                               the stick is back under 0.35. Consumed by the call (only the latest flick is kept).
+//   right stick up / down       XrRigInput.tilt: +1 up .. -1 down, dead zone and all (continuous: the rig integrates)
+//   left grip held (modifier)   XrRigInput.modifier; with it the left D-pad is the rig's, not the game's:
+//                               up / down -> height +1 / -1, right / left -> size +1 / -1 (held: continuous)
+//                               and a click of the right stick -> xr_input_take_recentre() (put the table in front of
+//                               the player again), consumed by the call.
+typedef struct {
+    float tilt;
+    float height, size;
+    bool modifier;
+} XrRigInput;
+void xr_input_rig(XrRigInput *out);
+int xr_input_take_snap(void);
+bool xr_input_take_recentre(void);
+
 #ifdef __cplusplus
 }
 #endif

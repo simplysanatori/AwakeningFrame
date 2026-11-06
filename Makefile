@@ -97,6 +97,7 @@ XR_HDR   := $(if $(DEPS),$(wildcard $(DEPS)/include/openxr/openxr.h))
 ifneq ($(XR_HDR),)
 BACKEND_SRC += $(wildcard runtime/xr/*.c)
 $(B)/rt/nvn/vulkan/device.o: RTFLAGS += -DLARECOMP_HAVE_XR
+$(B)/rt/hle/input.o: RTFLAGS += -DLARECOMP_HAVE_XR
 RT_HDRS  += $(wildcard runtime/xr/*.h)
 endif
 BACKEND_OBJ := $(patsubst runtime/%.cpp,$(B)/rt/%.o,$(patsubst runtime/%.c,$(B)/rt/%.o,$(BACKEND_SRC)))
