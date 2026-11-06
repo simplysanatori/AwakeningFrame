@@ -119,6 +119,9 @@ extern int maxwell_frag_subgroups;
 // 0: one buffer.
 extern uint32_t maxwell_gmem_chunk_shift;
 extern bool maxwell_gmem_lazy;
+// Lazy mode with every chunk there from the start (vulkan/exec.c gmem_driver_chunks: the heap as driver memory, Turnip):
+// no miss counting and no storage buffer chunks as push constants (GDirect), only the table.
+extern bool maxwell_gmem_whole;
 // Lazy mode, fragment: a shader without discard / depth output / stores declares early fragment tests (its GMiss
 // atomics would turn them off); one with discard / depth output (no stores) counts no misses - the
 // runtime imports the bound storage buffers' chunks before the draw. true (LARECOMP_VK_GMEM_FS_MISS=1): every shader
