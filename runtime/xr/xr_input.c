@@ -6,15 +6,17 @@
 // at once when the rumble ends, so a runtime that ignores a pulse's duration can't leave a controller running).
 // Reference: GalaxyFrame's platform/src/xr/xr_app.cpp (initActions, suggestFrame, updateInput).
 //
-// The layout is in docs/af/CONTROLS.md (with the game's meaning of each Switch button) and in k_map below.
+// The layout is in docs/af/CONTROLS.md (with the game's meaning of each Switch button) and in k_map_switch / k_map_comfort below (LARECOMP_XR_LAYOUT=comfort picks the second).
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include <SDL3/SDL.h>
 
 #include "../input_bind.h"
 #include "../rt.h"
+#include "../settings.h"
 #include "xr_input.h"
 
 // ---- the layout: which Frame control is which gamepad button (SDL names, Switch positions: the east button is A)
@@ -22,7 +24,24 @@
 enum { PADB_ZL = PADB_LTRIGGER, PADB_ZR = PADB_RTRIGGER };
 typedef enum { C_A, C_B, C_X, C_Y, C_MENU, C_VIEW, C_DUP, C_DDOWN, C_DLEFT, C_DRIGHT, C_BUMP_L, C_BUMP_R, C_CLICK_L, C_CLICK_R,
                C_TRIG_L, C_TRIG_R, C_GRIP_L, C_GRIP_R, C_COUNT } Ctl;
-static const struct { Ctl ctl; int host; } k_map[] = {
+typedef struct { Ctl ctl; int host; } MapEnt;
+// The default ("switch"): a Switch Pro controller, control for control, so the game's own prompts (L, R, ZL, ZR, A...) name the
+// Frame control that does it: bumpers = L / R, triggers = ZL / ZR, Menu = Plus, View = Minus, the grips: right = A, left = the
+// rig's modifier (not a game button). The face buttons are the four buttons of the Switch's diamond *by position* (the Frame's
+// bottom button = the Switch's bottom one, B) unless the player's "Buttons match labels" is on (then the Frame's A is A:
+// face_host below); the Frame's A B X Y are taken to be laid out as an Xbox pad's (A bottom, B right, X left, Y top).
+static const MapEnt k_map_switch[] = {
+    {C_MENU, SDL_GAMEPAD_BUTTON_START}, {C_VIEW, SDL_GAMEPAD_BUTTON_BACK},
+    {C_DUP, SDL_GAMEPAD_BUTTON_DPAD_UP},     {C_DDOWN, SDL_GAMEPAD_BUTTON_DPAD_DOWN},
+    {C_DLEFT, SDL_GAMEPAD_BUTTON_DPAD_LEFT}, {C_DRIGHT, SDL_GAMEPAD_BUTTON_DPAD_RIGHT},
+    {C_BUMP_L, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER}, {C_BUMP_R, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER},
+    {C_TRIG_L, PADB_ZL}, {C_TRIG_R, PADB_ZR},
+    {C_GRIP_R, SDL_GAMEPAD_BUTTON_EAST},
+    {C_CLICK_L, SDL_GAMEPAD_BUTTON_LEFT_STICK}, {C_CLICK_R, SDL_GAMEPAD_BUTTON_RIGHT_STICK},
+};
+// LARECOMP_XR_LAYOUT=comfort: the sword on the right trigger, the shield on the left, the Pegasus Boots on the right bumper,
+// the face buttons by letter (the Frame's A is the Switch's A), the left bumper ZL (as before the Switch layout was the default).
+static const MapEnt k_map_comfort[] = {
     {C_A, SDL_GAMEPAD_BUTTON_EAST},   {C_B, SDL_GAMEPAD_BUTTON_SOUTH},        {C_X, SDL_GAMEPAD_BUTTON_NORTH},
     {C_Y, SDL_GAMEPAD_BUTTON_WEST},   {C_MENU, SDL_GAMEPAD_BUTTON_START},      {C_VIEW, SDL_GAMEPAD_BUTTON_BACK},
     {C_DUP, SDL_GAMEPAD_BUTTON_DPAD_UP},     {C_DDOWN, SDL_GAMEPAD_BUTTON_DPAD_DOWN},
@@ -32,6 +51,15 @@ static const struct { Ctl ctl; int host; } k_map[] = {
     {C_GRIP_R, SDL_GAMEPAD_BUTTON_EAST},
     {C_CLICK_L, SDL_GAMEPAD_BUTTON_LEFT_STICK}, {C_CLICK_R, SDL_GAMEPAD_BUTTON_RIGHT_STICK},
 };
+// The face buttons of the switch layout: by position (default) or by label (g_settings.face_by_label)
+static int face_host(Ctl c, bool by_label) {
+    switch (c) {
+    case C_A: return by_label ? SDL_GAMEPAD_BUTTON_EAST : SDL_GAMEPAD_BUTTON_SOUTH;
+    case C_B: return by_label ? SDL_GAMEPAD_BUTTON_SOUTH : SDL_GAMEPAD_BUTTON_EAST;
+    case C_X: return by_label ? SDL_GAMEPAD_BUTTON_NORTH : SDL_GAMEPAD_BUTTON_WEST;
+    default: return by_label ? SDL_GAMEPAD_BUTTON_WEST : SDL_GAMEPAD_BUTTON_NORTH;  // C_Y
+    }
+}
 
 // ---- the actions
 typedef enum { T_BOOL, T_FLOAT, T_VEC2, T_HAPTIC } Kind;
@@ -77,7 +105,7 @@ XRIN_FUNCS(XRIN_DECL)
 #undef XRIN_DECL
 
 static struct {
-    bool ready, attached, valve, log;
+    bool ready, attached, valve, log, comfort;
     XrActionSet set;
     XrAction act[A_COUNT];
     XrPath hand[2];
@@ -138,6 +166,9 @@ void xr_input_init(PFN_xrGetInstanceProcAddr gipa, bool valve) {
     S.snap_armed = true;
     S.valve = valve;
     S.log = getenv("LARECOMP_XR_INPUT_LOG") != NULL;
+    const char *lay = getenv("LARECOMP_XR_LAYOUT");
+    S.comfort = lay && !strcasecmp(lay, "comfort");
+    LOG("[xr] controller layout: %s\n", S.comfort ? "comfort (sword on the right trigger, shield on the left)" : "switch (a Switch Pro controller, control for control)");
     const char *y = getenv("LARECOMP_XR_YAW");
     if (y) atomic_store(&g_yaw, (float)atof(y) * 0.01745329252f);
 #define XRIN_GET(nm) if (XR_FAILED(gipa(g_xr.inst, #nm, (PFN_xrVoidFunction *)&p_##nm)) || !p_##nm) { LOG("[xr] controllers: the runtime lacks %s\n", #nm); return; }
@@ -293,13 +324,26 @@ void xr_input_frame(void) {
 
     // the game's: buttons through the layout table, the left stick turned by the table's yaw
     uint32_t host = 0;
-    for (size_t i = 0; i < sizeof k_map / sizeof *k_map; i++)
-        if (S.down[k_map[i].ctl] && !rig_ctl[k_map[i].ctl] && k_map[i].host >= 0 && k_map[i].host < 32) host |= 1u << k_map[i].host;
+    const MapEnt *map = S.comfort ? k_map_comfort : k_map_switch;
+    size_t nmap = S.comfort ? sizeof k_map_comfort / sizeof *k_map_comfort : sizeof k_map_switch / sizeof *k_map_switch;
+    for (size_t i = 0; i < nmap; i++)
+        if (S.down[map[i].ctl] && !rig_ctl[map[i].ctl] && map[i].host >= 0 && map[i].host < 32) host |= 1u << map[i].host;
+    if (!S.comfort)
+        for (Ctl c = C_A; c <= C_Y; c++)
+            if (S.down[c]) host |= 1u << face_host(c, g_settings.face_by_label);
     float yaw = atomic_load(&g_yaw), c = cosf(yaw), s = sinf(yaw);
     // (app space: x right, y ahead; the table's frame is the app's turned by -yaw, the game's up is the table's -z)
     int32_t lx = to_axis(sl[0] * c + sl[1] * s), ly = to_axis(-sl[0] * s + sl[1] * c);
-    if (S.log && (host != S.last_host || lx != S.last_lx || ly != S.last_ly))
-        LOG("[xr] input: buttons %#x left stick (%.2f, %.2f) yaw %.0f deg -> game stick %d,%d\n", host, sl[0], sl[1], yaw * 57.29578f, lx, ly);
+    if (S.log && (host != S.last_host || lx != S.last_lx || ly != S.last_ly)) {
+        // (the Switch inputs those host buttons are now bound to: input.c input_xr_set's own lookup, for the log)
+        static const char *const sw[BIND_PAD_COUNT] = {"A", "B", "X", "Y", "LStick", "RStick", "L", "R", "ZL", "ZR", "Plus", "Minus",
+                                                       "Left", "Up", "Right", "Down"};
+        char names[96] = "";
+        for (int i = 0; i < BIND_PAD_COUNT; i++)
+            if ((unsigned)g_bind_pad[i] < 32 && (host >> g_bind_pad[i] & 1)) snprintf(names + strlen(names), sizeof names - strlen(names), " %s", sw[i]);
+        LOG("[xr] input: buttons %#x = Switch [%s ] left stick (%.2f, %.2f) yaw %.0f deg -> game stick %d,%d\n", host, names, sl[0], sl[1],
+            yaw * 57.29578f, lx, ly);
+    }
     S.last_host = host, S.last_lx = lx, S.last_ly = ly;
     input_xr_set(host, lx, ly);
     haptics();
