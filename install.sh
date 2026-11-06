@@ -114,6 +114,11 @@ for f in lasrecomp lasgame.so lasgame.so.id; do
   cp "$FROM/$f" "$DEST/$f.new" && mv "$DEST/$f.new" "$DEST/$f"
 done
 chmod +x "$DEST/lasrecomp"
+# The bundled fonts, next to the program (the game looks for them by name there; without DejaVuSans.ttf it stops with
+# "no font for the game's text"). From a release: top-level *.ttf; from a source tree: third_party/fonts/*/.
+for f in "$FROM"/*.ttf "$FROM"/../third_party/fonts/*/*.ttf "$SRC"/third_party/fonts/*/*.ttf; do
+  [ -f "$f" ] && cp -n "$f" "$DEST/" 2> /dev/null
+done
 cp "$TOOLS/awakeningframe.sh" "$DEST/awakeningframe.sh"
 chmod +x "$DEST/awakeningframe.sh"
 cp "$TOOLS/steam-cef.py" "$TOOLS/set-art.py" "$DEST/"
