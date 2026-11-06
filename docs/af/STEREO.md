@@ -126,10 +126,14 @@ One run of a list draws both eyes (VK_KHR_multiview, `viewMask` 3) instead of ru
 - **Per-eye camera** (`mv_program`, `cbuf_info`, `cam_pair`):
   - A multiview pass's draw uses the base program unless a vertex or fragment constant buffer (k >= 3) is a camera
     block (the 320-byte main camera, or a block `cam_override_patch` rewrites) or it samples a layered texture.
-  - Otherwise it uses the variant with `ShaderKey.mv`. The translator doubles that buffer's declared rows and reads
-    row `r + VO(k)`, where `VO(k) = gl_ViewIndex * ((mvm[stage] >> k) & 1) * rows`. `mvm` (8 bytes of push
-    constants) holds the per-stage mask of the buffers bound as [eye 0 | eye 1] copies, eye 1 `rows` x 16 bytes after
-    eye 0.
+  - Otherwise it uses the variant whose `ShaderKey.mv` is the stage's mask of those buffers (bit i: cbuf i + 3, cbufs
+    3-10). Each masked buffer is bound as an [eye 0 | eye 1] copy, with eye 1 `cbuf_mv_rows[k]` rows (16 bytes each)
+    after eye 0. The translator declares it with twice the rows and reads `gl_ViewIndex == 0 ? cb[r] : cb[r + rows]`.
+    Both indices stay constant, so the driver can still keep the block in constant registers. Other buffers are read as
+    in the base program.
+  - The first version took the masks from a push constant and offset every buffer's row by
+    `gl_ViewIndex * bit * rows`. With every index non-constant, Turnip's GPU time went up by about 2.8 ms a frame at
+    Mabe.
   - Sampled layered textures are bound as 2D arrays and read at layer `gl_ViewIndex` (`ShaderKey.tex_amask`).
   - The shader prep records carry `SR_MV` / `SR_MVP` / `v=`, so these variants are prepared before the game starts.
 - **Copies and clears** into a layered image are done for both layers by eye 0's run. Feedback snapshots of a layered
