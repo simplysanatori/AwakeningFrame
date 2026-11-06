@@ -1,5 +1,8 @@
 // Free-camera probe: see cam_override.h and docs/af/FREECAM.md.
 #include "cam_override.h"
+#ifndef CAM_STANDALONE
+#include "vr_cull.h"
+#endif
 
 #include <math.h>
 #include <stdatomic.h>
@@ -215,8 +218,21 @@ void cam_override_frame(uint64_t frame) {
     }
 }
 
-float cam_override_cull_aspect(void) { return g_cam_cull ? cfg_now()->cull_aspect : 0.0f; }
-float cam_override_fovy_scale(void) { return g_cam_cull ? cfg_now()->cull_fovy : 1.0f; }
+static volatile int g_cull_fit;  // (stereo) the culling frustum is fitted to the table (vr_cull.c), not the fixed values
+float cam_override_cull_aspect(void) {
+#ifndef CAM_STANDALONE
+    float a, f;
+    if (g_cull_fit && vr_cull_get(&a, &f)) return a;
+#endif
+    return g_cam_cull ? cfg_now()->cull_aspect : 0.0f;
+}
+float cam_override_fovy_scale(void) {
+#ifndef CAM_STANDALONE
+    float a, f;
+    if (g_cull_fit && vr_cull_get(&a, &f)) return f;
+#endif
+    return g_cam_cull ? cfg_now()->cull_fovy : 1.0f;
+}
 
 // ---------------------------------------------------------------- published game state
 static float g_link[3], g_zlo[3], g_zhi[3];
@@ -426,7 +442,14 @@ void cam_override_stereo(CamEyeFn fn, bool identity) {
     g_eye_fn = fn, g_eye_identity = identity;
     CamCfg c = *cfg_now();
     c.kind = CAM_STEREO;
-    if (!getenv("LARECOMP_FREECAM_CULL") && !identity) c.cull_aspect = 3.2f, c.cull_fovy = 1.5f;
+    if (!getenv("LARECOMP_FREECAM_CULL") && !identity) {
+        c.cull_aspect = 3.2f, c.cull_fovy = 1.5f;  // (fixed widening: LARECOMP_VR_CULL=wide; also the fit's fallback until its first fit)
+#ifndef CAM_STANDALONE
+        int m = vr_cull_mode();
+        if (m == VR_CULL_STOCK) c.cull_aspect = 0, c.cull_fovy = 1;
+        g_cull_fit = m == VR_CULL_FIT;
+#endif
+    }
     g_base = c;
     cfg_set(&c);
     g_cam_on = 1;
@@ -454,6 +477,9 @@ static bool eye_cams(void) {  // the latched frame's eye cameras (made once per 
             cam_derive(&g_eye_ref[e], g_eye_V[e], g_eye_P[e], vp);
             g_eye_ok = g_eye_ref[e].ok;
         }
+#ifndef CAM_STANDALONE
+        if (g_eye_ok && g_cull_fit) vr_cull_fit(&g_latch, pv, &g_eye_ref[0], &g_eye_ref[1]);
+#endif
     }
     return g_eye_ok;
 }
