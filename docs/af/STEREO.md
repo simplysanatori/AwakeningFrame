@@ -102,6 +102,23 @@ and it works in both of Turnip's modes (sysmem and GMEM).
 - **Log:** `[fov] eye gaze in N of M game frames ... ; X of Y eye passes foveated` every 10 s.
   `LARECOMP_VR_FOVEATION_LOG=1` logs each pass decision (the first 400).
 
+## Tiled lights (interiors and caves)
+
+Rooms are lit through the game's tile lists: a compute program (once per frame, eye 0 only) lists, for each 64-pixel
+tile of the 1920x1080 image, the lights whose spheres reach the tile's frustum, and the lit draws read the list of the
+tile their pixel falls in. The game builds the tiles' frustums from its own vertical fov and aspect (plain numbers in
+the scene block, which the camera substitution leaves alone) around eye 0's view; the eyes look their tiles up through
+their own projections, much wider and off-centre on the headset. So a pixel got the lights of another part of the view,
+and a light ended along a tile row or column: a translucent dark box with straight edges in every room as soon as the
+table was turned (Tail Cave 04B at a 40-degree turn: a step along tile row 13, eye row 1320 of 1728; at the game's own
+angle the same row lies in the void below the room).
+
+In the VR mode the program gives every tile one frustum, 70 degrees each way around eye 0's view (wider than any eye's
+field), keeping the game's sphere / plane and near / far tests (`translate.c light_tiles_fix`, signature-checked; the
+flag `maxwell_vr_light_tiles` is set in `vk_exec_init`). Every tile then lists every light that can reach either eye,
+so what a pixel is lit by no longer depends on its tile. The lists keep the game's limit of 16 lights; a room has a
+few. `LARECOMP_VR_LIGHT_TILES=0`: the game's tiles (the boxes come back).
+
 ## Diorama placement
 
 The rig (`runtime/xr/xr_rig.c`, docs/af/RIG.md) places the table: per-area anchoring, the player's turn,
@@ -183,6 +200,26 @@ One run of a list draws both eyes (VK_KHR_multiview, `viewMask` 3) instead of ru
     foci.
   - Turnip's multipos (`TU_DEBUG=nomultipos` changes nothing), so the vertex work is still done per view.
 
+## Frame end
+
+The doubling seen while turning the head in the first headset session (120 Hz, 60 fps, 2026-11-06) is not a pose or
+content error. With xrmock's image probe (`MOCK_XR_SHIFT`, docs/af/TOOLING.md), after 5-degree head steps each eye
+image matches the pose of its own layer to 0.001 degrees rms, from the first set after the step, in v1 and in multiview.
+The cause is the compositor's frame end. SteamVR's `xrEndFrame` waits behind the app's GPU work on the one Turnip
+queue. When the game's GPU time per frame nears the 16.7 ms frame, the wait reaches up to 17 ms. The frame misses its
+vsync, and SteamVR shows the previous one again (reused) and the late one off its time (mispresented): the doubled
+image. In the session, the slow frame ends per second track SteamVR's reused + mispresented count (r = 0.89, against
+0.63 for GPU time alone).
+
+The fix is headroom. `LARECOMP_VR_HEADROOM` (default on; `=0` for the old values) sets the dynamic resolution budget
+to 10 ms (from 14.5) and its floor to 1152 px (from 1536). On SteamVR at 120 Hz in the Field, reused + mispresented
+falls from 85 a second to 5. That only applies with Dynamic Resolution on: with it off, the eyes stay full size and
+the Field doubles as before. 90 Hz does not help there: the Field holds 30 fps.
+
+`xr_loop.c` logs the frame end every 5 s: `xrEndFrame avg / max`, the frame ends over 2 ms and those that waited over
+1 ms for the queue lock. `LARECOMP_XR_INFLIGHT=<n>` (stereo, off by default) waits after each submission until at
+most n older ones are on the GPU. It also stops the doubling, but at 30 fps, so it stays an experiment.
+
 ## Switches and tests
 
 | Variable | Meaning |
@@ -199,8 +236,11 @@ One run of a list draws both eyes (VK_KHR_multiview, `viewMask` 3) instead of ru
 | `LARECOMP_XR_PREDICT=measured\|vsync` | the display time the eye poses are located for |
 | `LARECOMP_VR_DIET=0\|dof,merge,smaa` | the VR pass diet (default all; docs/af/PASSES.md) |
 | `LARECOMP_VR_DYNRES=1`, `_MIN` / `_MAX` / `_MS` | dynamic eye resolution (off by default; docs/af/PASSES.md) |
+| `LARECOMP_VR_HEADROOM=0` | the dynamic resolution budget and floor from before the frame end fix (14.5 ms, 1536 px; above) |
+| `LARECOMP_XR_INFLIGHT=<n>` | cap the submissions on the GPU behind the newest (off; above) |
 | `LARECOMP_GPU_OVERLAP=0\|1` | the CPU / GPU overlap (VR default on, flat off on Turnip; docs/af/PASSES.md) |
 | `LARECOMP_VR_FOVEATION=off\|low\|medium\|high` | eye-tracked foveation of the eye passes (above) |
+| `LARECOMP_VR_LIGHT_TILES=0` | the game's own light tiles in the VR mode (default: one wide frustum per tile; above) |
 | `LARECOMP_MV=0\|1` | multiview stereo (default: on where the device has multiview): twins as layer 1, one run per list (above); 0: stereo v1; 1: the layered twins even without multiview |
 | `LARECOMP_MV_PASSES=0` | with `LARECOMP_MV=1`: the layered twins, but each list still runs once per eye |
 

@@ -35,5 +35,6 @@ void output_scale_note_sum(double ms);
 // factor (<= 1) the eyes are drawn at inside eye images `eye_w` pixels wide, from the game's GPU time per game frame
 // (game_ms, < 0: unknown) against budget_ms. Called once per game frame (between frames: no frame mixes two factors).
 double output_scale_vr_factor(double now, double game_ms, double budget_ms, unsigned eye_w);
+bool vr_headroom(void);  // (doubling lane) the VR dynres budget leaves the compositor headroom: LARECOMP_VR_HEADROOM
 // (the VR tab's Dynamic Resolution row, runtime/vr_settings.c) on / off while the game runs
 void diet_set_dynres(int on);

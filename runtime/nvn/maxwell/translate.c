@@ -29,6 +29,7 @@ bool maxwell_gmem_lazy;
 bool maxwell_gmem_whole;
 bool maxwell_gmem_fs_miss;
 bool maxwell_glsl_stack_vars = true;
+bool maxwell_vr_light_tiles;
 bool maxwell_glsl_structured;  // static stacks + structured control flow by default (exec.c: Mali, Adreno)
 bool maxwell_glsl_push;  // c1 inlined + push constants by default (exec.c: Mali, Adreno)
 const uint8_t *maxwell_const_data;
@@ -965,12 +966,37 @@ static void emit_tex(Ctx *c, uint64_t w, bool bindless) {
 // half as far out, and the lighting changed along a hard vertical line where a light's tiles ended (the floor
 // right of it lighter, MarthaUkuku at 2/3 of the window). The two column steps (pc 0x198: tile x, 0x1a8: tile x +
 // 1) are scaled by aspect * height / width, which is 1 at 16:9: the original shader's result there.
+//
+// VR (maxwell_vr_light_tiles): the tile list is built once per frame (the compute runs in eye 0 only) from the
+// game's own vertical fov and aspect (cbuf 4 0x1b8 / 0x1bc, plain numbers the camera substitution leaves alone)
+// around eye 0's view, while each eye looks its tiles up by its own pixel position through its own, much wider
+// and possibly off-centre projection. A pixel then got the lights of another part of the view: a light ended on a
+// tile row or column, a translucent dark box with straight edges in every room once the table was turned (the
+// eyes' views go further from the game's then; the owner's report, Tail Cave 04B at 40 degrees: a step along
+// tile row 13). So in VR every tile gets the same frustum, one wide enough for any eye: the tile's edges (pc
+// 0x1f8 / 0x210: rows, 0x218 / 0x228: columns, in units of the view direction over cot(fovy / 2), which r2
+// holds from pc 0x208) are set to tan(70 degrees) each way. The lights' sphere-plane and near / far tests are
+// the game's; a tile lists every light that can reach either eye's view (16 at most, as before; a room has a
+// few), so the lookup no longer depends on which tile a pixel falls in.
 static void light_tiles_fix(Ctx *c, const uint64_t *code, size_t end, uint32_t pc) {
     static const uint64_t sig[][2] = {{0x188, 0x5c68100000970309ull}, {0x198, 0x5c68100000d7030dull},
                                       {0x1a8, 0x5c6810000087030bull}, {0x1b0, 0x5c68100000470303ull}};
-    if (c->stage != STAGE_COMPUTE || (pc != 0x198 && pc != 0x1a8) || end <= 0x1b0 / 8) return;
+    static const uint64_t vr_sig[][2] = {{0x1f8, 0x3958103f80070913ull}, {0x208, 0x5080000000470202ull},
+                                         {0x210, 0x3958103f80070303ull}, {0x218, 0x4c58301006f70d15ull},
+                                         {0x228, 0x4c58301006f70b11ull}, {0x238, 0x5c68100001371505ull}};
+    bool vr = maxwell_vr_light_tiles && pc == 0x228;
+    if (c->stage != STAGE_COMPUTE || (pc != 0x198 && pc != 0x1a8 && !vr) || end <= 0x238 / 8) return;
     for (size_t i = 0; i < sizeof sig / sizeof sig[0]; i++)
         if (code[sig[i][0] / 8] != sig[i][1]) return;
+    if (vr) {
+        for (size_t i = 0; i < sizeof vr_sig / sizeof vr_sig[0]; i++)
+            if (code[vr_sig[i][0] / 8] != vr_sig[i][1]) return;
+        static const int lo[2] = {19, 21}, hi[2] = {3, 17};  // (row top / bottom, column left / right)
+        for (int k = 0; k < 2; k++)
+            sp(&c->body, "    r%d = as_type<uint>(as_type<float>(r2) * -2.7474774f); r%d = as_type<uint>(as_type<float>(r2) * 2.7474774f);\n",
+               lo[k], hi[k]);  // (GLSL: as_type is rewritten)
+        return;
+    }
     int d = (int)(code[pc / 8] & 0xff);  // (the destination: r13 / r11)
     char a[48], h[48], w[48];
     cbuf_ref(c, 4, 0x1bc, NULL, a);  // camera aspect

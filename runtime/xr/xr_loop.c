@@ -28,6 +28,8 @@ static struct {  // (XR thread; the presenting thread's fields under g_xr.mu)
     // sets shown for the first time: their latch -> display and located-for -> display times
     uint64_t pose_ok, pose_bad, eye_split, firsts;
     int64_t lat_sum_ns, vt_err_sum_ns, vt_err_max_ns;
+    // the frame end: the queue lock's wait and the runtime's xrEndFrame (SteamVR's waits behind the queue's backlog)
+    uint64_t end_n, end_slow, lock_slow, end_sum_ns, end_max_ns;
 } st;
 
 bool xr_active(void) { return g_xr.thread_on && g_xr.session; }
@@ -208,9 +210,16 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
     }
     XrFrameEndInfo ei = {.type = XR_TYPE_FRAME_END_INFO, .displayTime = fs->predictedDisplayTime,
                          .environmentBlendMode = g_xr.has_alpha_blend && g_xr.shown_any && g_xr.shown.alpha ? XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND : XR_ENVIRONMENT_BLEND_MODE_OPAQUE, .layerCount = n, .layers = layers};
+    uint64_t t0 = plat_now_ns();
     vk_queue_lock();
+    uint64_t t1 = plat_now_ns();
     XrResult r = XR_RT(p_xrEndFrame(g_xr.session, &ei));
     vk_queue_unlock();
+    uint64_t t2 = plat_now_ns();
+    st.end_n++, st.end_sum_ns += t2 - t1;
+    if (t2 - t1 > st.end_max_ns) st.end_max_ns = t2 - t1;
+    if (t2 - t1 > 2000000) st.end_slow++;
+    if (t1 - t0 > 1000000) st.lock_slow++;
     xr_ok_(r, "xrEndFrame");
 }
 
@@ -219,14 +228,16 @@ static void log_stats(double secs) {
     LOG("[xr] %.0f s: %llu refreshes at %.0f Hz (%llu missed), %llu vsyncs, %llu sets shown (%.1f ms after submission), "
         "%llu refreshes re-showed a set, %llu waited for the GPU, %llu without layers; presenting: %llu waits (%.2f ms avg), "
         "%llu frames skipped; pose mismatches %llu of %llu refreshes with the executor's eyes, %llu sets with eyes of two frames; "
-        "latch to display %.1f ms (poses located for %.1f ms off it, max %.1f; predict %s %.1f ms)\n", secs, (unsigned long long)st.refreshes,
+        "latch to display %.1f ms (poses located for %.1f ms off it, max %.1f; predict %s %.1f ms); xrEndFrame avg %.2f ms, max %.1f, "
+        "%llu over 2 ms, %llu waited over 1 ms for the queue\n", secs, (unsigned long long)st.refreshes,
         g_xr.display_hz, (unsigned long long)st.missed,
         (unsigned long long)st.vsyncs, (unsigned long long)st.released, st.released ? st.latency_ns / 1e6 / st.released : 0.0,
         (unsigned long long)st.reshown, (unsigned long long)st.gpu_late, (unsigned long long)st.no_render,
         (unsigned long long)st.waits, st.waits ? st.wait_ns / 1e6 / st.waits : 0.0, (unsigned long long)st.skipped,
         (unsigned long long)st.pose_bad, (unsigned long long)(st.pose_ok + st.pose_bad), (unsigned long long)st.eye_split,
         st.firsts ? st.lat_sum_ns / 1e6 / st.firsts : 0.0, st.firsts ? st.vt_err_sum_ns / 1e6 / st.firsts : 0.0, st.vt_err_max_ns / 1e6,
-        g_xr.predict ? "measured" : "vsync", atomic_load(&g_xr.lat_ns) / 1e6);
+        g_xr.predict ? "measured" : "vsync", atomic_load(&g_xr.lat_ns) / 1e6, st.end_n ? st.end_sum_ns / 1e6 / st.end_n : 0.0,
+        st.end_max_ns / 1e6, (unsigned long long)st.end_slow, (unsigned long long)st.lock_slow);
     memset(&st, 0, sizeof st);
     pthread_mutex_unlock(&g_xr.mu);
 }
@@ -279,18 +290,20 @@ static void *xr_thread(void *arg) {
             }
         }
         {   // below 100 Hz (90): the game held in its 30 fps mode (pace.c pace_xr_lock); 120 Hz: 60 as the pacer decides.
-            // LARECOMP_XR_FPS=60 (a test): below 100 Hz the pacer decides too, with a 16.67 ms game frame
+            // LARECOMP_XR_FPS=60 (a test): below 100 Hz the pacer decides too, with a 16.67 ms game frame.
+            // About 60 Hz (SteamVR throttling 120 Hz, framesToThrottle=1): 60 as the pacer decides, one refresh a frame
             static int locked = -1;
             static int test60 = -1;
             if (test60 < 0) test60 = getenv("LARECOMP_XR_FPS") && atoi(getenv("LARECOMP_XR_FPS")) == 60;
             int fr = __atomic_exchange_n(&g_fps_req, -1, __ATOMIC_ACQ_REL);
             if (fr >= 0 && (fr == 60) != (test60 == 1)) test60 = fr == 60, LOG("[xr] game frame rate at 90 Hz: %s (VR settings)\n", test60 ? "60 fps (test)" : "30 fps");
-            int want = g_xr.display_hz < 100 ? (test60 ? 60 : 30) : 0;
+            bool hz60 = g_xr.display_hz > 0 && g_xr.display_hz < 75;
+            int want = hz60 ? 1 : g_xr.display_hz < 100 ? (test60 ? 60 : 30) : 0;  // (1: 60 fps at 60 Hz)
             if (want != locked) {
                 pace_xr_lock(want == 30 ? 30 : 0);
-                pace_xr_frame_ms(want == 30 ? 0 : want == 60 ? 1e3 / 60 : 2e3 / g_xr.display_hz);
+                pace_xr_frame_ms(want == 30 ? 0 : want == 60 ? 1e3 / 60 : (want == 1 ? 1e3 : 2e3) / g_xr.display_hz);
                 if (want == 60) LOG("[xr] test: 60 fps at %.0f Hz (uneven cadence)\n", g_xr.display_hz);
-                LOG("[xr] display at %.0f Hz: the game %s\n", g_xr.display_hz, want == 30 ? "held at 30 fps (3 refreshes a frame)" : want == 60 ? "at 60 fps (1 or 2 refreshes a frame)" : "at 60 fps (2 refreshes a frame)");
+                LOG("[xr] display at %.0f Hz: the game %s\n", g_xr.display_hz, want == 30 ? "held at 30 fps (3 refreshes a frame)" : want == 60 ? "at 60 fps (1 or 2 refreshes a frame)" : want == 1 ? "at 60 fps (1 refresh a frame)" : "at 60 fps (2 refreshes a frame)");
                 locked = want;
             }
         }
