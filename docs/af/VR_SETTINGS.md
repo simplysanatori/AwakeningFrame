@@ -54,7 +54,7 @@ carried render poses and the table moving only on new game frames are unchanged.
 | Recentre Table | button | none | none | live (`xr_rig_recentre`; greyed out in a flat build) |
 | Table Edge | Off, Fade, Passthrough (default Off) | `vr_edge_style = black \| fade \| passthrough` | `LARECOMP_VR_EDGE` (`black`, `fade`, `passthrough`; the variable still takes `fog` and `gradient`) | live (`edge_set_mode`, edge.c: the next eye is drawn in the new mode; each XR set carries its mode, so the projection layer's alpha flag and the blend mode follow the images; Passthrough needs the runtime's `ALPHA_BLEND`, else the void shows black) |
 | Foveation | Off, Low, Medium, High (eye-tracked only; default High) | `vr_foveation = off \| low \| medium \| high` | `LARECOMP_VR_FOVEATION` (always set from the tab: the lane's own default is medium) | live (`fov_set_level`; the level is in the shading-rate map's key, so the next pass redraws it). Off at start still enables the extension, so it can be turned on; only `LARECOMP_VR_FOVEATION=off` from the launch environment leaves it out |
-| Dynamic Resolution | Off, On (default On; floor 1536 px) | `vr_dynamic_resolution = 1 \| 0` | `LARECOMP_VR_DYNRES` (always set from the tab: the lane's own default is off) | live (`diet_set_dynres`) |
+| Dynamic Resolution | Off, On (default On; floor 1152 px) | `vr_dynamic_resolution = 1 \| 0` | `LARECOMP_VR_DYNRES` (always set from the tab: the lane's own default is off) | live (`diet_set_dynres`) |
 | Panel Distance | 2.0 m, 0.8 to 4.0 m | `vr_panel_distance = <metres>` | `LARECOMP_XR_QUAD=<dist>,<width>` | live (`vrui_set_hud_quad`) |
 | Panel Width | 2.2 m, 0.6 to 4.0 m | `vr_panel_width = <metres>` | the same | live |
 
@@ -70,7 +70,7 @@ next save drops them).
 ## Defaults and the saved file
 
 New defaults, after the first headset session (2026-11-06): Refresh Rate 120 Hz (60 FPS), Foveation High, Dynamic Resolution
-On (floor 1536 px), Table Edge Off, Turning Smooth. An `larecomp.ini` that already holds a value keeps it (the tab writes every
+On (floor 1152 px), Table Edge Off, Turning Smooth. An `larecomp.ini` that already holds a value keeps it (the tab writes every
 row each time it saves, so a file saved before has `vr_refresh = 90`, `vr_foveation = medium`, `vr_dynamic_resolution = 0`
 until they are changed in the tab). The edge is the exception: it has a new key, `vr_edge_style`, and the older `vr_edge_mode`
 (and `vr_edge`) are read and dropped, so Haze and Sky Only choices do not carry over; `vr_culling` is dropped too. The Culling
