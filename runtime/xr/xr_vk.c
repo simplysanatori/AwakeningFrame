@@ -317,9 +317,21 @@ int xr_set_views(const uint64_t id[2], const XrEyeView rendered[2]) {
     XrSet *s = &g_xr.building;
     s->exec_eyes = true;
     const XrLatch *l[2];
+    XrLatch fb;  // (gone from the ring - frames with camera draws but no composite, a load - : the poses as rendered, in
+                 // the app space now; right unless the view was recentred since)
     for (int i = 0; i < 2; i++) {
         l[i] = &g_xr.latch[id[i] % XR_LATCHES];
-        if (!id[i] || l[i]->id != id[i]) return -1;  // (gone from the ring: 16 latches without a set)
+        if (!id[i]) return -1;
+        if (l[i]->id != id[i]) {
+            fb = (XrLatch){id[i], {{.type = XR_TYPE_VIEW}, {.type = XR_TYPE_VIEW}}, g_xr.app, 0, 0};
+            for (int e = 0; e < 2; e++) {
+                const XrEyeView *r = &rendered[e];
+                fb.views[e].pose = (XrPosef){{r->orientation[0], r->orientation[1], r->orientation[2], r->orientation[3]},
+                                             {r->position[0], r->position[1], r->position[2]}};
+                fb.views[e].fov = (XrFovf){r->fov[0], r->fov[1], r->fov[2], r->fov[3]};
+            }
+            l[i] = &fb;
+        }
     }
     s->views[0] = l[0]->views[0], s->views[1] = l[1]->views[1];
     s->space = l[0]->space;
