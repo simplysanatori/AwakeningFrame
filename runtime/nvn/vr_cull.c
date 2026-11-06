@@ -21,7 +21,7 @@ static struct {
     int init, mode, eyes;   // mode: VR_CULL_FIT / WIDE / STOCK
     float kx, kz, hlo, hhi, margin;
 } C;
-static struct { bool have; float quad[4][2], floor_y, hlo, hhi; } g_rect;  // the latest fit's floor quadrilateral (vr_cull_rect)
+static struct { bool have; float quad[4][2], floor_y, hlo, hhi, shrink[4]; } g_rect;  // the latest fit's floor quadrilateral (vr_cull_rect)
 static _Atomic float g_aspect, g_fs;   // the fitted culling aspect (absolute) and fovy scale; 0 = none yet
 static _Atomic float g_fovy_orig = 0;  // the game's own fovy field (radians or degrees, as it is)
 static _Atomic float g_aspect_orig = 0;
@@ -58,6 +58,14 @@ bool vr_cull_get(float *aspect, float *fovy_scale) {
 bool vr_cull_rect(float quad[4][2], float *floor_y, float *hlo, float *hhi) {
     if (!g_rect.have) return false;  // (render thread, like vr_cull_fit)
     memcpy(quad, g_rect.quad, sizeof g_rect.quad), *floor_y = g_rect.floor_y, *hlo = g_rect.hlo, *hhi = g_rect.hhi;
+    return true;
+}
+
+// Per edge of that quadrilateral (the same order): how far the stock screen's own edge lies inside it, as a share of
+// the distance from the quadrilateral's middle to that edge (1 - 1 / k of LARECOMP_VR_CULL_RECT; 0 at k = 1)
+bool vr_cull_rect_shrink(float shrink[4]) {
+    if (!g_rect.have) return false;
+    memcpy(shrink, g_rect.shrink, sizeof g_rect.shrink);
     return true;
 }
 
@@ -128,6 +136,8 @@ void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3],
         for (int i = 0; i < 4; i++) q[i][0] = corner[rg[i]][0], q[i][1] = corner[rg[i]][2];
         for (int i = 0; i < 4; i++) area += q[i][0] * q[(i + 1) % 4][1] - q[(i + 1) % 4][0] * q[i][1];
         for (int i = 0; i < 4; i++) memcpy(g_rect.quad[i], q[area >= 0 ? i : 3 - i], 8);
+        float so[4] = {1 - 1 / fmaxf(C.kz, 1.0f), 1 - 1 / fmaxf(C.kx, 1.0f), 1 - 1 / fmaxf(C.kz, 1.0f), 1 - 1 / fmaxf(C.kx, 1.0f)};
+        for (int i = 0; i < 4; i++) g_rect.shrink[i] = area >= 0 ? so[i] : so[(2 - i + 4) % 4];
         g_rect.floor_y = anchor[1], g_rect.hlo = C.hlo, g_rect.hhi = C.hhi, g_rect.have = true;
     }
     // the prism: 8 points (bottom 0-3, top 4-7 in the order 0 1 3 2 around), 6 faces

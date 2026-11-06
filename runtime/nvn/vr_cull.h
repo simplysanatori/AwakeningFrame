@@ -23,3 +23,6 @@ bool vr_cull_get(float *aspect, float *fovy_scale);
 // (edge pass, render thread) the latest fit's floor quadrilateral in world (x, z), counter-clockwise from above, the floor
 // height (the anchor's y) and the prism's extent below / above it in game units; false: none (stock / wide culling, a side view)
 bool vr_cull_rect(float quad[4][2], float *floor_y, float *hlo, float *hhi);
+// Per edge of that quadrilateral, in its order: where the stock screen's own edge lies, as a share of the distance from the
+// quadrilateral's middle to the edge (1 - 1 / k, k of LARECOMP_VR_CULL_RECT: 0 when the rectangle is the stock screen).
+bool vr_cull_rect_shrink(float shrink[4]);

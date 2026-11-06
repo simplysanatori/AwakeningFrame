@@ -29,7 +29,8 @@ static struct {
     float fog_start, fog_end;  // multiples of the pivot distance
     float soft;                // the edge fade's radius, as a share of the image height
     float strength;            // 0..1 of the edge fade
-    float rect_soft, rect_strength;  // the floor quadrilateral fade: width in game units, 0..1
+    float rect_soft, rect_strength;  // the floor quadrilateral fade: share of its band (1), 0..1
+    float sky[3], skymix;
     float top[3], bot[3];      // the colours the backdrop starts with (and LARECOMP_VR_EDGE_TOP / _BOTTOM: kept)
     bool fixed_colours;
     float desat, bright;       // how the scene's average is turned into haze
@@ -55,14 +56,16 @@ static void cfg_init(void) {
         else if (!strcmp(e, "passthrough")) cfg.mode = EDGE_PASSTHROUGH;
         else if (strcmp(e, "fog") && strcmp(e, "1") && *e) LOG("[edge] LARECOMP_VR_EDGE=%s unknown (fog, gradient, black, passthrough): fog\n", e);
     }
-    cfg.fog_start = 1.9f, cfg.fog_end = 3.6f;
+    cfg.fog_start = 1e6f, cfg.fog_end = 2e6f;  // (distance fog is off unless LARECOMP_VR_EDGE_FOG asks: only the void band fades)
     if ((e = getenv("LARECOMP_VR_EDGE_FOG"))) {
         float a, b;
         if (sscanf(e, "%f,%f", &a, &b) == 2 && a >= 0 && b > a) cfg.fog_start = a, cfg.fog_end = b;
     }
-    cfg.soft = (e = getenv("LARECOMP_VR_EDGE_SOFT")) && atof(e) >= 0 ? (float)atof(e) : 0.07f;
+    cfg.soft = (e = getenv("LARECOMP_VR_EDGE_SOFT")) && atof(e) >= 0 ? (float)atof(e) : 0.04f;
     cfg.strength = (e = getenv("LARECOMP_VR_EDGE_STRENGTH")) ? fminf(fmaxf((float)atof(e), 0.0f), 1.0f) : 1.0f;
-    cfg.rect_soft = (e = getenv("LARECOMP_VR_EDGE_RECT")) && atof(e) >= 0 ? (float)atof(e) : 3.0f;
+    cfg.rect_soft = (e = getenv("LARECOMP_VR_EDGE_RECT")) && atof(e) >= 0 ? (float)atof(e) : 0.0f;  // (the culling quadrilateral fade: opt in)
+    cfg.sky[0] = 0.80f, cfg.sky[1] = 0.89f, cfg.sky[2] = 0.96f, cfg.skymix = (e = getenv("LARECOMP_VR_EDGE_SKYMIX")) ? fminf(fmaxf((float)atof(e), 0.0f), 1.0f) : 0.85f;
+    hex3(getenv("LARECOMP_VR_EDGE_SKY"), cfg.sky);
     cfg.rect_strength = cfg.rect_soft > 0 ? 1.0f : 0.0f;
     cfg.top[0] = 0.36f, cfg.top[1] = 0.46f, cfg.top[2] = 0.40f;
     cfg.bot[0] = 0.16f, cfg.bot[1] = 0.24f, cfg.bot[2] = 0.18f;
@@ -106,7 +109,9 @@ bool edge_passthrough_wanted(void) { return edge_mode() == EDGE_PASSTHROUGH; }
     "  vec4 mi;    // desaturation, brightness, debug, fixed colours\n"                                               \
     "  vec4 vr[3]; // the view's rows (world -> eye), translation in w\n"                                             \
     "  vec4 rq[2]; // the table's floor quadrilateral: x0 z0 x1 z1 / x2 z2 x3 z3 (counter-clockwise)\n"               \
-    "  vec4 rc;    // quadrilateral on, floor y, fade width (units), strength\n"                                      \
+    "  vec4 rc;    // quadrilateral on, floor y, unused, strength\n"                                                  \
+    "  vec4 rb;    // the fade band at each edge of the quadrilateral (game units)\n"                                  \
+    "  vec4 sky;   // the sky tone, how much of the backdrop it takes\n"                                               \
     "} u;\n"                                                                                                           \
     "layout(set = 0, binding = 1) uniform sampler2D dt;\n"                                                             \
     "layout(set = 0, binding = 2) uniform sampler2D ct;\n"                                                             \
@@ -197,21 +202,24 @@ static const char *main_fs =
     "  float r = geo ? pd * length(ray) : 1e9;\n"  // distance from the eye
     "  float elev = dot(normalize(ray), u.up.xyz);\n"
     "  vec3 tc = texelFetch(tn, ivec2(0, 0), 0).rgb, bc = texelFetch(tn, ivec2(1, 0), 0).rgb;\n"
-    "  float g = smoothstep(-0.45, 0.50, elev);\n"
-    "  vec3 back = mix(bc * 0.85, tc, g);\n"
+    "  vec3 skyc = mix(tc, u.sky.rgb, u.sky.w);\n"                 // (the scene's top colour, toward a sky tone)
+    "  vec3 horc = mix(skyc, vec3(1.0), 0.25);\n"  // (a lighter, hazier band at the horizon)
+    "  vec3 belc = mix(horc, bc, 0.2) * 0.96;\n"
+    "  float g = smoothstep(-0.55, 0.0, elev), g2 = smoothstep(0.0, 0.75, elev);\n"
+    "  vec3 back = mix(mix(belc, horc, g), skyc, g2);\n"
     "  float fog = smoothstep(u.fog.x, u.fog.y, r);\n"
     "  float rect = 0.0;\n"
     "  if (u.rc.x > 0.5 && geo) {\n"   // (the table's floor quadrilateral: the culling's: fade to the backdrop at its edge)
     "    vec3 v = vec3(xy * pd, -pd);\n"
     "    vec3 w = u.vr[0].xyz * (v.x - u.vr[0].w) + u.vr[1].xyz * (v.y - u.vr[1].w) + u.vr[2].xyz * (v.z - u.vr[2].w);\n"
-    "    float dmin = 1e9;\n"
     "    for (int i = 0; i < 4; i++) {\n"
     "      vec2 a = i < 2 ? (i == 0 ? u.rq[0].xy : u.rq[0].zw) : (i == 2 ? u.rq[1].xy : u.rq[1].zw);\n"
     "      vec2 b = i == 3 ? u.rq[0].xy : (i == 0 ? u.rq[0].zw : (i == 1 ? u.rq[1].xy : u.rq[1].zw));\n"
     "      vec2 e = b - a, f = w.xz - a;\n"
-    "      dmin = min(dmin, (e.x * f.y - e.y * f.x) / max(length(e), 1e-4));\n"
+    "      float d = (e.x * f.y - e.y * f.x) / max(length(e), 1e-4);\n"
+    "      float t = clamp(d / max(u.rb[i], 1e-3), 0.0, 1.0);\n"
+    "      rect = max(rect, (1.0 - t * t * (3.0 - 2.0 * t)) * u.rc.w);\n"  // (full at the edge, none a band inside)
     "    }\n"
-    "    rect = (1.0 - smoothstep(0.0, u.rc.z, dmin)) * u.rc.w;\n"
     "  }\n"
     "  float cover = texture(mk, p).r;\n"
     "  float edge = (1.0 - smoothstep(0.5, 0.97, cover)) * u.fog.w;\n"
@@ -371,7 +379,7 @@ static void begin(VkCommandBuffer cb, VkImageView view, VkImageLayout layout, ui
     }
 }
 
-typedef struct { float proj[4], zt[4], fl[4], up[4], cc[4], sz[4], fog[4], top[4], bot[4], mi[4], vr[3][4], rq[2][4], rc[4]; } UBlock;
+typedef struct { float proj[4], zt[4], fl[4], up[4], cc[4], sz[4], fog[4], top[4], bot[4], mi[4], vr[3][4], rq[2][4], rc[4], rb[4], sky[4]; } UBlock;
 
 static VkDescriptorSet make_set(const UBlock *ub, VkImageView depth, VkImageView color, VkImageView mask, VkImageView tint) {
     VkSpan s = vk_transient_copy(ub, sizeof *ub, 256);
@@ -535,16 +543,25 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
         float quad[4][2], fy, hlo, hhi;
         if (cfg.rect_strength > 0 && vr_cull_rect(quad, &fy, &hlo, &hhi)) {
             memcpy(u.rq, quad, sizeof quad);
-            u.rc[0] = 1.0f, u.rc[1] = fy, u.rc[2] = cfg.rect_soft, u.rc[3] = cfg.rect_strength;
+            u.rc[0] = 1.0f, u.rc[1] = fy, u.rc[3] = cfg.rect_strength;
             // the eye's world position (-R^T t) and its distance to the quadrilateral's middle: the fog scales with it
             float E[3];
             for (int k = 0; k < 3; k++) E[k] = -(V[k] * V[3] + V[4 + k] * V[7] + V[8 + k] * V[11]);
             float cx = 0, cz = 0;
             for (int i = 0; i < 4; i++) cx += quad[i][0] * 0.25f, cz += quad[i][1] * 0.25f;
+            float shrink[4];
+            vr_cull_rect_shrink(shrink);
+            for (int i = 0; i < 4; i++) {  // each edge's band: the part between the stock screen's edge and the culling's
+                float ax = quad[i][0], az = quad[i][1], bx = quad[(i + 1) % 4][0], bz = quad[(i + 1) % 4][1];
+                float ex = bx - ax, ez = bz - az, el = sqrtf(ex * ex + ez * ez) + 1e-6f;
+                float dc = (ex * (cz - az) - ez * (cx - ax)) / el;  // the middle's distance to the edge
+                u.rb[i] = fmaxf(shrink[i] * dc * cfg.rect_soft, 0.4f);
+            }
             pd = sqrtf((E[0] - cx) * (E[0] - cx) + (E[1] - fy) * (E[1] - fy) + (E[2] - cz) * (E[2] - cz));
             u.up[3] = pd, u.fog[0] = cfg.fog_start * pd, u.fog[1] = cfg.fog_end * pd;
         }
     }
+    memcpy(u.sky, cfg.sky, sizeof cfg.sky), u.sky[3] = cfg.skymix;
     u.mi[0] = cfg.desat, u.mi[1] = cfg.bright, u.mi[2] = (float)cfg.debug, u.mi[3] = cfg.fixed_colours ? 1.0f : 0.0f;
 
     // the backdrop colours: eye 0 makes this frame's from the last (the other image); eye 1 reads them
