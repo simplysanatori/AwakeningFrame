@@ -24,12 +24,18 @@ Plus, Minus) name the Frame control that does it:
 | right Menu | Plus | pause menu |
 | left View | Minus | map |
 | left D-pad | D-pad | the d-pad (items, when set to Items) |
-| stick clicks | stick clicks | |
-| right stick left / right | (rig) | snap turn (`xr_input_take_snap`) |
+| stick clicks | stick clicks | no function in play that this port knows of; a single click still reaches the game as the stick-click buttons |
+| right stick left / right | (rig) | turns the table smoothly (`XrRigInput.turn`); with the Turning option on Snap, a flick turns it 45 degrees behind a blink (`xr_input_take_snap`) |
 | right stick up / down | (rig) | table tilt (`XrRigInput.tilt`) |
-| left grip held | (rig modifier) | the left D-pad becomes height (up / down) and size (right / left); a click of the right stick recentres the table |
+| both stick clicks together (held 0.1 s) | (rig) | reset the view: the table goes back to the game's own angle and in front of you again (tilt, height and size are kept) |
+| left grip held | (rig modifier) | the left D-pad becomes height (up / down) and size (right / left); a click of the right stick does the same reset as both stick clicks |
 
 What the rig does with these (ranges, the blink, side views): docs/af/RIG.md.
+
+The right stick turns or tilts, not both: the axis it was first pushed along wins until the other is 1.4 times bigger, and
+the other reads zero, so a thumb that wanders does not tilt a turn. Both stick clicks pressed together for 0.1 s are the
+rig's: the game gets neither until both are let go. A single click, or both for less than 0.1 s, goes to the game (as far as this port knows the
+game has no use for them, but a rebind in the Controls tab could give them one). "View Reset" shows on the HUD for a moment, no sound.
 
 The shield is R and the Pegasus Boots are L (they have no slot on the Items page, so they are fixed buttons; the touch
 build's prompts say the same: "R appears with the shield, L with the Pegasus Boots"). In the Switch version ZL and ZR have no

@@ -50,12 +50,26 @@ anchoring with that follow; camera jumps still blink. Unset or `auto`: the per-a
 
 | Frame | Rig |
 |---|---|
-| right stick left / right (a flick) | snap turn 45 degrees behind a blink. Right: the view goes a step round the table to the right (the table turns clockwise), as in GalaxyFrame. Not in side views |
+| right stick left / right | smooth turning (the VR tab's Turning: Smooth, the default): the table turns about its centre (the anchor) at up to 80 degrees a second, outside a 0.2 dead zone, on an eased curve of the deflection (`t * (0.4 + 0.6 t)`: half a stick is about a third of the speed), and the turn speed follows the stick's with a 0.12 s lag, so it starts and stops without a jerk. Right: the view goes round the table to the right (the table turns clockwise), as in GalaxyFrame. Not in side views |
+| right stick left / right (a flick) | with Turning on Snap: a snap turn of 45 degrees behind a blink, the same direction. Not in side views |
 | right stick up / down | tilt, 45 degrees a second (outside a 0.3 dead zone), from -20 to +50 degrees. Up lifts the far edge. A tilt away is also limited so the head looks at least 20 degrees down onto the table (a grazing look put the eyes under Mabe's ledges). Not in side views |
+| both stick clicks together (0.1 s) | reset the view: behind a blink the yaw goes back to 0, the game's own angle (the table seen from where the game's camera looks), and the table goes in front of the player again, as a recentre. Tilt, height and size are kept. "View Reset" shows on the HUD for about a second and a half. A single click goes to the game |
+| left grip + right stick click | the same reset (an alias) |
 | left grip + D-pad up / down | table height, 0.3 m a second, from -0.5 to +0.4 m |
 | left grip + D-pad right / left | table size, doubling or halving in about a second, from x0.4 to x3 |
-| left grip + right stick click | recentre: the table goes in front of the player again, at the head's height, behind a blink |
-| SteamVR recentre | the same (the runtime moves LOCAL; `xr_session.c` re-makes the app space at the head) |
+| SteamVR recentre | a recentre: the table in front again, the yaw kept (the runtime moves LOCAL; `xr_session.c` re-makes the app space at the head). The VR tab's Recentre Table does the same |
+
+The right stick turns or tilts, never both (`xr_input.c`): the axis it was first pushed along is the one that counts until the
+other is 1.4 times bigger, and the other reads zero (a thumb pushed up and a little sideways tilts only).
+
+Smooth turning is applied once per game frame, in `xr_rig_update` like everything the rig does to the table, integrating
+with the game frame's `dt`, not once per display refresh. The eye images are drawn once per game frame, with the table's
+pose in them, and the compositor shows that frame for one refresh (or two at 120 Hz / 60 FPS); a table that moved between
+refreshes would be shown at two places within one game frame (GalaxyFrame's double image), and moving the pose per refresh
+would need a re-render. So the turn is as smooth as the game itself: at 120 Hz / 60 FPS the table steps 1.3 degrees a game
+frame at the full 80 degrees a second (a tile 10 cm across at 0.5 m from the centre moves 1 cm), at 90 Hz / 30 FPS 2.7
+degrees, like Link's own steps. The speed is integrated over the time since the last game frame (capped at 0.1 s), so the
+rate does not depend on the frame rate.
 
 The left stick is turned by the table's yaw (`xr_input_set_yaw`, called whenever the yaw changes; in side views with
 the side yaw), so "up" walks Link away from the player. The rig's inputs never reach the game (`runtime/xr/xr_input.c`).
@@ -65,7 +79,7 @@ the side yaw), so "up" walks Link away from the player. The rig's inputs never r
 On screen only, no sound. The present multiplies the eye images and the HUD by `1 - fade`
 (`screen_filter_params` sets `pf.y = xr_rig_fade()`).
 
-- Snap turns, recentres and yaw changes from the settings fade out (0.08 s), the change is made at the first game
+- Snap turns, recentres, view resets and yaw changes from the settings fade out (0.08 s), the change is made at the first game
   frame once black, the image stays black 0.05 s (recentre 0.08 s: the new app space is made on the next refresh),
   then fades in (0.15 s).
 - Automatic cuts (another room or area, a warp, a door, a camera cut in a cutscene) go black at once on the frame
@@ -87,6 +101,8 @@ void xr_rig_get_user(XrRigUser *u);
 void xr_rig_set_user(const XrRigUser *u);  // clamped; the yaw behind a blink
 void xr_rig_reset_user(void);              // 0, 1, 0, 0
 void xr_rig_recentre(void);
+void xr_rig_reset_view(void);              // the same, and the yaw back to 0; tilt, height, size kept
+void xr_rig_set_turn_mode(int snap);       // 1: snap turns, 0: smooth turning (the default; LARECOMP_VR_TURN=smooth|snap)
 // ranges: XR_RIG_HEIGHT_MIN/MAX (-0.5, 0.4), XR_RIG_SIZE_MIN/MAX (0.4, 3), XR_RIG_TILT_MIN/MAX (-20, 50)
 ```
 
@@ -109,6 +125,7 @@ docs/af/VR_SETTINGS.md).
 | `LARECOMP_VR_DIST`, `LARECOMP_VR_PITCH`, `LARECOMP_VR_TABLE`, `LARECOMP_VR_SCALE` | placement (above) |
 | `LARECOMP_VR_HEIGHT`, `LARECOMP_VR_SIZE`, `LARECOMP_VR_TILT`, `LARECOMP_VR_YAW` | the player's values at the start (tests; override the file) |
 | `LARECOMP_VR_FOLLOW=auto\|smooth\|room\|fixed`, `LARECOMP_VR_FOLLOW_TAU` | anchoring (above) |
+| `LARECOMP_VR_TURN=smooth\|snap` | the right stick's turning (the VR tab's Turning; default smooth) |
 | `LARECOMP_VR_RIG=<path>`, `LARECOMP_VR_RIG_SAVE=0` | the settings file |
 | `LARECOMP_LOG_RIG=<frames>` | the rig's state every that many game frames |
 
