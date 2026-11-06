@@ -1,6 +1,6 @@
 // VR culling fitted to the table (vr_cull.h). The game culls on its game thread with its own camera, aspect (camera field
 // +0x570, rt_cull_aspect) and vertical fov (+0x564, rt_fovy). In VR that camera is never shown; what the eyes need is the
-// diorama: a floor rectangle around the pivot (the stock screen footprint scaled by LARECOMP_VR_CULL_RECT, about the
+// diorama: a floor rectangle around the table centre (the stock screen footprint scaled by LARECOMP_VR_CULL_RECT, about the
 // 1.2 x 1 screens the edge fade keeps), from LARECOMP_VR_CULL_HEIGHT below the floor to above it, cut by both eyes'
 // frusta (widened by LARECOMP_VR_CULL_MARGIN in tangent, for head motion between the fit and the frame that uses it).
 // Its corners, seen from the game camera, give the half-angle tangents the game's frustum needs. Never narrower than the
@@ -30,7 +30,7 @@ static void init(void) {
     C.init = 1;
     C.mode = VR_CULL_FIT, C.eyes = 1;
     if ((e = getenv("LARECOMP_VR_CULL"))) C.mode = !strcmp(e, "wide") ? VR_CULL_WIDE : !strcmp(e, "stock") ? VR_CULL_STOCK : VR_CULL_FIT;
-    C.kx = 1.3f, C.kz = 1.2f, C.hlo = 1.5f, C.hhi = 3.0f, C.margin = 0.3f;
+    C.kx = 1.2f, C.kz = 1.0f, C.hlo = 1.5f, C.hhi = 3.0f, C.margin = 0.3f;
     if ((e = getenv("LARECOMP_VR_CULL_RECT"))) sscanf(e, "%f,%f", &C.kx, &C.kz);
     if ((e = getenv("LARECOMP_VR_CULL_HEIGHT"))) sscanf(e, "%f,%f", &C.hlo, &C.hhi);
     if ((e = getenv("LARECOMP_VR_CULL_MARGIN"))) C.margin = (float)atof(e);
@@ -80,7 +80,7 @@ static void eye_planes(const CamRef *r, float m, float pl[4][4]) {  // left, rig
     }
 }
 
-void vr_cull_fit(const CamLatch *l, const float pivot[3], const CamRef *eye0, const CamRef *eye1) {
+void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3], const CamRef *eye0, const CamRef *eye1) {
     if (!C.init) init();
     if (C.mode != VR_CULL_FIT || !l || !l->valid) return;
     const CamRef *g = &l->ref;
@@ -112,7 +112,7 @@ void vr_cull_fit(const CamLatch *l, const float pivot[3], const CamRef *eye0, co
         float p[3] = {g->eye[0] + t * d[0], pivot[1], g->eye[2] + t * d[2]};
         float rx = (p[0] - pivot[0]) * hr[0] + (p[2] - pivot[2]) * hr[2], rz = (p[0] - pivot[0]) * hf[0] + (p[2] - pivot[2]) * hf[2];
         rx *= C.kx, rz *= C.kz;
-        corner[c][0] = pivot[0] + rx * hr[0] + rz * hf[0], corner[c][1] = pivot[1], corner[c][2] = pivot[2] + rx * hr[2] + rz * hf[2];
+        corner[c][0] = anchor[0] + rx * hr[0] + rz * hf[0], corner[c][1] = anchor[1], corner[c][2] = anchor[2] + rx * hr[2] + rz * hf[2];
     }
     // the prism: 8 points (bottom 0-3, top 4-7 in the order 0 1 3 2 around), 6 faces
     static const int ring[4] = {0, 1, 3, 2};

@@ -60,6 +60,8 @@ void cam_override_draw(const CamDrawInfo *d);
 // Turns the probe's hooks on; widened culling (3.2:1.5) unless LARECOMP_FREECAM_CULL says otherwise.
 typedef bool (*CamEyeFn)(const struct CamLatch *l, const float pivot[3], float V[2][16], float P[2][16]);
 void cam_override_stereo(CamEyeFn fn, bool identity);
+// (stereo.c, once per latch) where the table's centre sits in the world (the followed anchor, not the raw pivot)
+void cam_override_table_anchor(const float a[3]);
 void cam_override_set_eye(int eye);         // the eye being executed (0 / 1)
 bool cam_override_eye_ready(void);          // the latched frame has eye cameras (substitution is on for it)
 // Per eye the 320 bytes get floats 0-47 (view, projection, view-projection), 48-63 (the rotation-only block: rows

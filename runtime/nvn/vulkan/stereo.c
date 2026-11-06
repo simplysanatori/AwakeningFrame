@@ -150,6 +150,7 @@ static bool eye_fn(const CamLatch *l, const float pivot_in[3], float V[2][16], f
     if (!cfg.init) cfg_init();
     float pivot_raw[3] = {pivot_in[0], pivot_in[1], pivot_in[2]}, pivot[3];
     anchor_update(pivot_raw, pivot);
+    cam_override_table_anchor(pivot);  // (perf lane: the culling fit centres the table here)
     if (!cfg.have_table) {
         if (!cfg.have_pitch) {
             float p = asinf(fminf(fmaxf(-l->ref.fwd[1], -1.0f), 1.0f)) * (float)(180.0 / M_PI);

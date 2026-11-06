@@ -461,6 +461,9 @@ void cam_override_stereo(CamEyeFn fn, bool identity) {
     LOG("[stereo] per-eye cameras on (%s); culling %g:%g\n", identity ? "identity test: the game's camera in both eyes" : "diorama",
         c.cull_aspect, c.cull_fovy);
 }
+static float g_anchor[3];
+static uint64_t g_anchor_frame = ~0ull;
+void cam_override_table_anchor(const float a[3]) { memcpy(g_anchor, a, sizeof g_anchor), g_anchor_frame = g_latch.frame; }
 void cam_override_set_eye(int eye) { g_eye_cur = eye == 1; }
 
 static bool eye_cams(void) {  // the latched frame's eye cameras (made once per latch)
@@ -483,7 +486,7 @@ static bool eye_cams(void) {  // the latched frame's eye cameras (made once per 
             g_eye_ok = g_eye_ref[e].ok;
         }
 #ifndef CAM_STANDALONE
-        if (g_eye_ok && g_cull_fit) vr_cull_fit(&g_latch, pv, &g_eye_ref[0], &g_eye_ref[1]);
+        if (g_eye_ok && g_cull_fit) vr_cull_fit(&g_latch, pv, g_anchor_frame == g_latch.frame ? g_anchor : pv, &g_eye_ref[0], &g_eye_ref[1]);
 #endif
     }
     return g_eye_ok;
