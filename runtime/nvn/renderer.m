@@ -6021,6 +6021,7 @@ bool renderer_prepare_begin(void) {
 }
 
 int renderer_prepare_pending(void) { return g_prep_pending; }
+bool renderer_prepare_multiview(void) { return false; }  // (the Vulkan backend's VR multiview: not on Metal)
 int renderer_prepare_finished(void) { return g_prep_finished; }
 void renderer_prepare_end(void) {  // (the binary archive: saved now, off this thread - a PLAY waiting on the
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ archive_save(false); });  // preparation doesn't wait for it)

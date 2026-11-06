@@ -875,6 +875,14 @@ static void create_device(void) {
     if (xr_mode()) f12.shaderOutputViewportIndex = have12.shaderOutputViewportIndex, f12.shaderOutputLayer = have12.shaderOutputLayer;
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
                                             .storageBuffer16BitAccess = VK_TRUE, .pNext = &f12};
+    if (xr_mode() && vk_mv_on()) {  // (LARECOMP_MV: the stereo executor's multiview passes, docs/af/STEREO.md)
+        VkPhysicalDeviceVulkan11Features h11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+        VkPhysicalDeviceFeatures2 hf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &h11};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &hf);
+        f11.multiview = h11.multiview;
+        g_vk.multiview = h11.multiview;
+        LOG("[mv] multiview %s\n", h11.multiview ? "on" : "not supported: double execution");
+    }
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,
                                            .pNext = &f11};
     VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = fault ? (void *)&ff : (void *)&f11};

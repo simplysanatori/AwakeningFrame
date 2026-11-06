@@ -118,6 +118,48 @@ still apply (`LARECOMP_VR_FOLLOW` set: the comfort follow instead of the rig's p
 - **s:** `LARECOMP_VR_SCALE` (0.067 m per unit). `LARECOMP_VR_YAW` sets the yaw.
 - **Depth:** the eye projections keep the game's depth terms. `LARECOMP_VR_NEAR=<units>` overrides them.
 
+## Multiview (`LARECOMP_MV=1`; off by default)
+
+One run of a list draws both eyes (VK_KHR_multiview, `viewMask` 3) instead of running the list once per eye.
+
+- **Twins are layer 1** (`textures.c`). A twin candidate (16:9 scalable target, guest-sized AO target) is made with
+  two array layers (`TexBackend.mv2`). `b->layers` still says 1 because that is the guest's view. It becomes a twin
+  (`mv_tw`) like a v1 twin does: when an eye-1 run or a multiview run starts and the texture has not been presented,
+  or when eye 0 copies a twin into it (`vk_stereo_twin_add`). That case re-creates a one-layer image with two layers,
+  both holding the old contents. A texture presented after it became a twin stays one. Single-layer views of a
+  layered image take layer `vk_eye_layer`. `vk_view_mv` gives the 2D_ARRAY view of both layers.
+- **Passes** (`exec.c begin_pass`, `mv_rt_kind`):
+  - If every attachment is layered, the pass is multiview: 2D_ARRAY views, and the view mask goes into the pipeline
+    keys and the clear pipeline.
+  - If the only shared attachments are presented images (the HUD clone, the window image over the scene's twinned
+    depth), eye 0's view is drawn alone. Eye 1's draws into those images are never shown.
+  - Any other mix of layered and shared attachments makes eye 1 run the list again, as in v1. That run skips the
+    multiview passes and the copies and clears into layered images. These lists are counted in the `[mv] 5 s` line.
+  - A list with no such pass is done in one run, and its fences are signalled after it.
+- **Per-eye camera** (`mv_program`, `cbuf_info`, `cam_pair`):
+  - A multiview pass's draw uses the base program unless a vertex or fragment constant buffer (k >= 3) is a camera
+    block (the 320-byte main camera, or a block `cam_override_patch` rewrites) or it samples a layered texture.
+  - Otherwise it uses the variant whose `ShaderKey.mv` is the stage's mask of those buffers (bit i: cbuf i + 3, cbufs
+    3-10). Each masked buffer is bound as an [eye 0 | eye 1] copy, with eye 1 `cbuf_mv_rows[k]` rows (16 bytes each)
+    after eye 0. The translator declares it with twice the rows and reads `gl_ViewIndex == 0 ? cb[r] : cb[r + rows]`.
+    Both indices stay constant, so the driver can still keep the block in constant registers. Other buffers are read as
+    in the base program.
+  - The first version took the masks from a push constant and offset every buffer's row by
+    `gl_ViewIndex * bit * rows`. With every index non-constant, Turnip's GPU time went up by about 2.8 ms a frame at
+    Mabe.
+  - Sampled layered textures are bound as 2D arrays and read at layer `gl_ViewIndex` (`ShaderKey.tex_amask`).
+  - The shader prep records carry `SR_MV` / `SR_MVP` / `v=`, so these variants are prepared before the game starts.
+- **Copies and clears** into a layered image are done for both layers by eye 0's run. Feedback snapshots of a layered
+  attachment have both layers.
+- **Eye outputs:** the composite into the eye output is one multiview pass. `vk_stereo_eyes` presents layer `eye`.
+  The eye post hook gets `layer` / `depth_layer` (`StereoEyePost`).
+- **Foveation:** Turnip has no layered shading-rate attachments (`layeredShadingRateAttachments` false). A multiview
+  pass gets one map (`fov_pass` eye 2): each texel takes the finer rate of the two eyes' foci. The density-map mode
+  (`LARECOMP_VR_FOVEATION_MODE=fdm`) gives multiview passes no map.
+- **Debugging:** `LARECOMP_DEBUG_FRAME` pass dumps are named by eye (`_e0` / `_e1`, `m`: a multiview pass, one PNG
+  per layer). `LARECOMP_MV_PASSES=0` keeps the layered storage and runs each list per eye (stage 1: the storage
+  checked against v1 alone).
+
 ## Switches and tests
 
 | Variable | Meaning |
@@ -136,6 +178,8 @@ still apply (`LARECOMP_VR_FOLLOW` set: the comfort follow instead of the rig's p
 | `LARECOMP_VR_DYNRES=1`, `_MIN` / `_MAX` / `_MS` | dynamic eye resolution (off by default; docs/af/PASSES.md) |
 | `LARECOMP_GPU_OVERLAP=0\|1` | the CPU / GPU overlap (VR default on, flat off on Turnip; docs/af/PASSES.md) |
 | `LARECOMP_VR_FOVEATION=off\|low\|medium\|high` | eye-tracked foveation of the eye passes (above) |
+| `LARECOMP_MV=1` | multiview stereo: twins as layer 1, one run per list (above) |
+| `LARECOMP_MV_PASSES=0` | with `LARECOMP_MV=1`: the layered twins, but each list still runs once per eye |
 
 Mock run: `XR_RUNTIME_JSON=build/xrmock/runtime.json LARECOMP_XR=1 MOCK_XR_EYE_SIZE=1728x1728
 MOCK_XR_POSE=static:0,1.6,0,0,-45 SDL_VIDEODRIVER=offscreen ENABLE_GAMESCOPE_WSI=0 ...`. The head looks 45 degrees down

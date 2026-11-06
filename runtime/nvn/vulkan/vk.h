@@ -42,6 +42,7 @@ typedef struct {
     PFN_vkCmdSetVertexInputEXT set_vertex_input;
     // LARECOMP_VK_GPL_PROBE=1 only (exec.c gpl_probe, measurement): VK_EXT_graphics_pipeline_library enabled
     bool gpl_probe;
+    bool multiview;       // (LARECOMP_MV, VR) VK multiview enabled: the stereo executor's multiview passes (exec.c)
     bool map_placed, unmap_reserve;  // VK_EXT_map_memory_placed: driver memory mapped at a given address (exec.c guest_heap_dmabuf)
     bool heap_dmabuf_default;  // the heap as driver memory by default: RADV and Mesa's PanVK (device.c; LARECOMP_VK_HEAP_DMABUF overrides)
     bool heap_no_split;        // ... whose mapping page protection must never split (Turnip / msm: exec.c backend_guest_heap_prepare)
@@ -119,6 +120,11 @@ typedef struct TexBackend {
     // texture's backend is eye 0's except while eye 1 executes; is_twin marks eye 1's
     struct TexBackend *twin;
     bool is_twin;
+    // (LARECOMP_MV, docs/af/STEREO.md "Multiview") mv2: the image has a second layer, eye 1's: a twin without a second
+    // backend. b->layers still says 1 (the guest's view of it); views pick the layer (vk_eye_layer, vk_view_mv).
+    // mv_tw: twinned (as a stereo-v1 twin exists): latched for the candidates not presented when an eye-1 run starts
+    // (vk_mv_latch), or by vk_stereo_twin_add; kept when the texture is presented later.
+    bool mv2, mv_tw;
     // (g_vk.lean_usage) the only formats views of this image may have: nview_fmt 0 = any compatible one
     VkFormat view_fmt[2];
     uint8_t nview_fmt;
@@ -134,8 +140,17 @@ int vk_stereo_swap(bool eye1);
 bool vk_stereo_twin_add(NvnTexture *t);
 static inline bool vk_tex_twinned(const NvnTexture *t) {  // its backend has (or is) an eye twin
     const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
-    return b && (b->is_twin || b->twin);
+    return b && (b->is_twin || b->twin || b->mv_tw);
 }
+// ---- multiview storage (LARECOMP_MV=1, VR mode): twins are layer 1 of their eye-0 image
+bool vk_mv_on(void);       // LARECOMP_MV=1 and the stereo executor wanted (read once)
+extern int vk_eye_layer;   // the layer single-layer views of twinned images take (the eye being executed: 0 / 1)
+static inline bool vk_b_layered(const TexBackend *b) { return b && b->mv2 && b->mv_tw; }
+void vk_mv_latch(void);    // (an eye-1 run starts, or a multiview run) the layered candidates not presented become twins
+static inline uint32_t vk_b_layer(const TexBackend *b) { return vk_b_layered(b) ? (uint32_t)vk_eye_layer : 0; }
+// A view of both layers (2D_ARRAY) of a layered texture: render (an attachment of a multiview pass: one level) or
+// sampled (the shader's 2D slot taken as a 2D array, layer = gl_ViewIndex). VK_NULL_HANDLE: not layered.
+VkImageView vk_view_mv(NvnTexture *t, const NvnTextureView *v, bool has_view, bool render);
 VkFormat vk_format(uint32_t nvn_format);
 VkFormat vk_image_format(uint32_t nvn_format, VkImageAspectFlags *aspect);  // (shader preparation)
 void vk_pipeline_cache_save(void);

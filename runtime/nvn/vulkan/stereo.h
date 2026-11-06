@@ -53,5 +53,6 @@ typedef struct {
     float V[16], P[16];        // stereo_eye_matrices (identity when none)
     bool have_matrices;
     float zn, zf;              // the scene pass's depth range (st.depth_range of its viewport 0)
+    uint32_t layer, depth_layer;  // (LARECOMP_MV) the image layer of color / depth that is this eye's (0 otherwise)
 } StereoEyePost;
 void stereo_eye_post(const StereoEyePost *e);

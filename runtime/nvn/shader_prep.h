@@ -23,7 +23,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-enum { SR_FLIP_Y = 1, SR_DEPTH_MINUS_ONE = 2, SR_FLIP_X = 4 };
+enum { SR_FLIP_Y = 1, SR_DEPTH_MINUS_ONE = 2, SR_FLIP_X = 4, SR_MV = 8, SR_MVP = 16 };  // (MV: a multiview pass's pipeline, MVP: its multiview program)
 
 typedef struct {
     char kind;               // 'G' graphics pipeline, 'C' compute program
@@ -43,6 +43,8 @@ typedef struct {
     uint8_t topo;            // primitive class: 0 points, 1 lines, 2 triangles
     uint8_t poly_fill;       // filled polygons (0: lines)
     uint32_t local[3];       // compute: local size
+    uint32_t mv_amask;       // (SR_MVP) fragment textures sampled as both eyes' layers (ShaderKey.tex_amask)
+    uint8_t mv_cb[2];        // (SR_MVP) vertex, fragment: per-eye constant buffers (ShaderKey.mv: bit i = cbuf i + 3)
 } ShaderRec;
 
 // The record's text form (one line, no newline) and back
@@ -76,7 +78,8 @@ void shader_rec_note(const ShaderRec *r);
 // ---- the player's own list (runtime/nvn/shader_seen.c): cache/shader_seen.txt in the data folder, in the shipped
 // list's format. Every variant the game builds that the shipped list doesn't have is added (queued by
 // shader_rec_note, written by a background thread in batches and at exit; at most 20000 records), and the next
-// preparation does them after the shipped list ("[shader] prepared N + M seen before"), so a shader met once is
+// preparation does them after the shipped list ("[shader] prepared N + M seen before"; multiview records, SR_MV /
+// SR_MVP, before both when renderer_prepare_multiview() and not at all otherwise), so a shader met once is
 // ready from the second run on. LARECOMP_SHADER_SEEN=0 turns it off (nothing recorded, nothing prepared from it).
 bool shader_seen_on(void);
 void shader_seen_note(const ShaderRec *r);
@@ -107,6 +110,7 @@ typedef struct {
 bool renderer_prepare_begin(void);
 bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vs, const ShaderBlob *fs);
 int renderer_prepare_pending(void);
+bool renderer_prepare_multiview(void);  // the multiview records (SR_MV / SR_MVP) can be built and are this run's eye passes
 int renderer_prepare_finished(void);  // builds done so far (with pending: the share of the queued builds done)
 void renderer_prepare_end(void);  // all builds done (e.g. keep the pipeline cache)
 

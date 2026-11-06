@@ -537,6 +537,7 @@ static void ts_resolve(void) {
 static struct {
     bool have;
     TexBackend *color, *depth;
+    uint32_t layer, depth_layer;  // (LARECOMP_MV: the eye's layer of each)
     float ax, ay, V[16], P[16], zn, zf;
 } noted[2];
 
@@ -546,7 +547,7 @@ void stereo_eye_post(const StereoEyePost *e) {
     // (noted in every mode, black too: a switch from the VR tab then finds the current images, never stale ones)
     __typeof__(noted[0]) *n = &noted[e->eye];
     n->have = e->depth && e->have_matrices;
-    n->color = e->color, n->depth = e->depth, n->ax = e->ax, n->ay = e->ay, n->zn = e->zn, n->zf = e->zf;
+    n->color = e->color, n->depth = e->depth, n->layer = e->layer, n->depth_layer = e->depth_layer, n->ax = e->ax, n->ay = e->ay, n->zn = e->zn, n->zf = e->zf;
     memcpy(n->V, e->V, 64), memcpy(n->P, e->P, 64);
     static bool said;
     if (!said && edge_mode() != EDGE_BLACK && (!e->depth || !e->have_matrices)) LOG("[edge] eye %d: no %s noted: the edge pass waits for it\n", e->eye, e->depth ? "matrices" : "depth"), said = true;
@@ -592,8 +593,8 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
         static const VkComponentMapping id = {0};
         VkFormat cf = n->color->format == VK_FORMAT_R8G8B8A8_SRGB ? VK_FORMAT_R8G8B8A8_UNORM
                     : n->color->format == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_B8G8R8A8_UNORM : n->color->format;
-        ein.color = vk_image_view(n->color, VK_IMAGE_VIEW_TYPE_2D, cf, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
-        ein.depth = vk_image_view(n->depth, VK_IMAGE_VIEW_TYPE_2D, n->depth->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
+        ein.color = vk_image_view(n->color, VK_IMAGE_VIEW_TYPE_2D, cf, 0, 1, n->layer, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
+        ein.depth = vk_image_view(n->depth, VK_IMAGE_VIEW_TYPE_2D, n->depth->format, 0, 1, n->depth_layer, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
         ein.color_crop[0] = ein.depth_crop[0] = n->ax, ein.color_crop[1] = ein.depth_crop[1] = n->ay;
         memcpy(ein.V, n->V, 64), memcpy(ein.P, n->P, 64);
         ein.zn = n->zn, ein.zf = n->zf, ein.pivot_dist = 0;
