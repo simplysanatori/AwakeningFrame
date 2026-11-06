@@ -1,4 +1,4 @@
-# Shader warm-up (AwakeningFrame lane "warm")
+# Shader warm-up
 
 Goal: no shader or pipeline compile during play, in VR above all, where one slow frame is a freeze in the player's view.
 
@@ -72,13 +72,13 @@ caches survive translator changes, but variants nobody has built are first visit
 pipeline cache starts over (tag), and the next start prepares what it can in 20 s and finishes over the following starts,
 or run the tour again.
 
-## First start in VR (hudbox lane)
+## First start in VR
 
-The owner's first start after the install (the headset log of 2026-11-06 08:03) showed what a cold cache did with the
+A first start on the headset after an install (log of 2026-11-06 08:03) showed what a cold cache did with the
 20 s budget: the preparation went through all 1587 records in 20 s but most of their builds were still queued on the
 worker threads when it gave up ("out of time after 20 s at -6 %"), so the game started with ~1000 pipelines still
 building. For the next 35 s the title, the file select and the first room drew with pieces missing (up to 6570 draws
-skipped per 2 s, `[vk] t=...` lines); that was the "scuffed" panel. The second start prepared everything in 6 s and
+skipped per 2 s, `[vk] t=...` lines); that was a scuffed panel. The second start prepared everything in 6 s and
 skipped nothing. Meanwhile the headset showed nothing at all for those 20 s (the XR loop had no layers to submit).
 
 - **Progress:** `[shader] preparing: N %` counted records gone through minus builds pending; a record queues one or two

@@ -80,7 +80,7 @@ bool xr_set_begin(uint64_t timeout_ns, uint32_t *hud_index);
 // yet). Latches the views if nobody did (xr_latch_views), and hands the set to the XR thread.
 void xr_set_submit(uint64_t seq);
 
-// ---- eyes (lane 4: the stereo executor renders the scene into these)
+// ---- eyes (the stereo executor renders the scene into these)
 // Between xr_set_begin and xr_set_submit, on the presenting thread (or the render thread that executes the frame, as
 // long as calls do not overlap). Acquires and waits eye `eye` (0 left, 1 right) of the current set once; later calls
 // in the same set return the same image. The image is in COLOR_ATTACHMENT_OPTIMAL and must be left in it. Returns
@@ -119,7 +119,7 @@ bool xr_latch_gaze(uint64_t id, float dir[3]);
 int xr_set_views(const uint64_t id[2], const XrEyeView rendered[2]);
 // The eye swapchains' size (false before xr_start).
 bool xr_eye_size(uint32_t *w, uint32_t *h);
-// (lane 4) GPU ms of eye 0 and eye 1 of the latest finished game frame: xr_timing.log's gpu0 / gpu1 (-1: unknown).
+// GPU ms of eye 0 and eye 1 of the latest finished game frame: xr_timing.log's gpu0 / gpu1 (-1: unknown).
 void xr_note_eye_gpu(float ms0, float ms1);
 // The predicted display time (XrTime, ns) of the latest vsync's game frame, and the display's refresh (Hz).
 int64_t xr_target_display_time(void);
@@ -128,7 +128,7 @@ float xr_display_hz(void);
 // blue, right red, to check which image each eye sees).
 void xr_stub_eye_colour(int eye, float rgba[4]);
 
-// ---- controllers (lane 5: runtime/xr/xr_input.c; any thread)
+// ---- controllers (runtime/xr/xr_input.c; any thread)
 // Link walks with the left stick, rotated by the diorama's yaw so that "up" walks him away from the player. The rig
 // calls this whenever its yaw changes (default 0; LARECOMP_XR_YAW=<degrees> sets the first value, for tests): the
 // rotation of the table about the vertical axis, counter-clockwise seen from above (T_table's Rot_y), taking the game's
@@ -148,7 +148,9 @@ void xr_input_set_yaw(float yaw_radians);
 //   both stick clicks held 0.1 s, or the left grip and a click of the right stick: xr_input_take_reset_view() (the view back
 //                               to the game's own angle and the table in front of the player again), consumed by the call.
 //                               Until both clicks are let go the game sees neither; a single click (or both for under 0.1 s)
-//                               goes to the game as the stick-click buttons.
+//                               goes to the game as the stick-click buttons. The same hold, 2 s from the press:
+//                               xr_input_take_reset_full() (the view reset and tilt, height, size and distance back to the
+//                               defaults), once per hold, consumed by the call.
 typedef struct {
     float tilt, turn;
     float height, size;
@@ -157,6 +159,7 @@ typedef struct {
 void xr_input_rig(XrRigInput *out);
 int xr_input_take_snap(void);
 bool xr_input_take_reset_view(void);
+bool xr_input_take_reset_full(void);
 
 // (the rig, runtime/xr/xr_rig.c) the app's space put at the head and turned to where it faces, as after SteamVR's own
 // recentre (xr_session.c: the next refresh makes the new space; the table, placed relative to it, is in front again).

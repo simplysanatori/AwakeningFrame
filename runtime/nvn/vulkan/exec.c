@@ -180,6 +180,8 @@ static void gmir_writeback(void);  // (... what the GPU stored, into guest memor
 #ifdef __linux__
 static bool gmem_mprotect_broken;  // (exec.c guest heap: driver memory that page protection corrupts)
 #endif
+static void heap_lazy_touch(uint64_t addr, uint64_t size);  // (the lazy heap: the GPU is to use [addr, addr+size))
+static void heap_lazy_stats(char *out, size_t n);           // (renderer_stats: the lazy heap's granules so far)
 // The page the "is there write tracking?" probes query (a query may protect it): the top of the heap range, which
 // the game's heap never reaches - not HEAP_BASE, where the game's heap allocator keeps its header and lock.
 #define TRACK_PROBE_PAGE (HEAP_BASE + HEAP_MAX - 4096)
@@ -669,6 +671,20 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     passes_in_sub = 0;
     stat_flushes++;
     cum_submits++;
+    {   // (VR) how far the queue may run ahead of the GPU: LARECOMP_XR_INFLIGHT=<n> submissions besides the one just
+        // queued (0: no limit). SteamVR's xrEndFrame waits on work of its own queued behind ours, so a long backlog
+        // made the XR thread's frames late.
+        static int lim = -2;
+        if (lim == -2) {
+            const char *e = getenv("LARECOMP_XR_INFLIGHT");
+            lim = !stereo_wanted() ? 0 : e ? atoi(e) : 0;
+            if (lim > 0) LOG("[vk] submissions in flight: at most %d besides the newest (LARECOMP_XR_INFLIGHT)\n", lim);
+        }
+        if (lim > 0 && submit_seq > (uint64_t)lim && vk_completed_seq() < submit_seq - (uint64_t)lim) {
+            wait_why = "in-flight limit";
+            vk_wait_seq(submit_seq - (uint64_t)lim);
+        }
+    }
     gmir_writeback();  // (the readbacks already done)
     ring_retire();
     vk_collect_dead();
@@ -1347,6 +1363,8 @@ const char *renderer_stats(void) {
         if (gc_shift) {
             snprintf(stats_text + n, sizeof stats_text - n, " | heap chunks %d imported (%llu MB), %llu misses", gc_imported,
                      (unsigned long long)gc_imported_bytes >> 20, (unsigned long long)stat_gc_misses);
+            n = strlen(stats_text);
+            heap_lazy_stats(stats_text + n, sizeof stats_text - n);
             n = strlen(stats_text);
             if (gc_lazy) {
                 snprintf(stats_text + n, sizeof stats_text - n, ", pointer scans %llu (%.2f MB), %llu skipped",
@@ -2554,6 +2572,7 @@ typedef struct {
     uint8_t blend_on, a2c, topo_class, poly_fill;
     uint32_t write_mask[8];
     uint32_t view_mask;  // (multiview) the pass's view mask
+    uint32_t coarse;     // (scene, Low Quality) a draw past the table: 2x2 fragments (fov_pipeline_chain_coarse)
 } PipeKey;
 
 typedef struct { PipeKey k; uint64_t hash; VkPipeline pipe; _Atomic int state; } Pipe;  // state: 0 building, 1 ready, 2 failed
@@ -2576,7 +2595,7 @@ struct PipeMemo {
     VkFormat color[8], depth, stencil;
     uint32_t attrib[16], stream[16][2], rt_fmt[8];
     uint8_t blend[8][8], blend_on, a2c, cls, poly_fill;
-    uint32_t view_mask;
+    uint32_t view_mask, coarse;
     Pipe *pp;
     VtxLayout vl;  // the layout pipe_key_fill made from these inputs (dynamic vertex input leaves it out of pp's key)
 };
@@ -2742,7 +2761,8 @@ static void pipe_ci_fill(PipeCI *c, const PipeKey *k) {
     if (g_vk.vids) c->dyn[NDYN] = VK_DYNAMIC_STATE_VERTEX_INPUT_EXT;
     c->dy = (VkPipelineDynamicStateCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
                                                .dynamicStateCount = NDYN + g_vk.vids, .pDynamicStates = c->dyn};
-    c->ri = (VkPipelineRenderingCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .pNext = fov_pipeline_chain(),
+    const void *fov_chain = k->coarse && fov_pipeline_chain_coarse() ? fov_pipeline_chain_coarse() : fov_pipeline_chain();
+    c->ri = (VkPipelineRenderingCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .pNext = fov_chain,
                                             .viewMask = k->view_mask, .colorAttachmentCount = k->ncolor,
                                             .pColorAttachmentFormats = k->color, .depthAttachmentFormat = k->depth,
                                             .stencilAttachmentFormat = k->stencil};
@@ -3264,6 +3284,7 @@ static bool snap_on(void) {
             LOG("[vk] storage snapshots off: the game's heap fills the range\n");
         } else {
             plat_commit(HEAP_BASE + snap_base, SNAP_RING);  // (Windows: backed before the import pins it)
+            heap_lazy_touch(HEAP_BASE + snap_base, SNAP_RING);  // (the lazy heap: the GPU stores there)
             LOG("[vk] storage buffers the CPU rewrites: copies at %llx (%llu MB ring after the game's heap)\n",
                 (unsigned long long)(HEAP_BASE + snap_base), (unsigned long long)(SNAP_RING >> 20));
             snap_ring_import_tail();  // (lazy chunks: one imported short of the ring already is imported again over it)
@@ -4118,7 +4139,7 @@ static bool gmem_import(uint64_t size) {
 // memory is mapped at HEAP_BASE before the game starts, so the GPU sees an ordinary buffer. Called from boot (main.c)
 // on the main thread before any guest thread exists; a reboot frees it with gmem_buf (vk_exec_reset) and the guest
 // window's reset unmaps it, so the next boot gets fresh zeroed memory. Costs: the whole HEAP_MAX is committed once the
-// GPU first uses it, and Linux write tracking can't watch this mapping (the heap is then re-checked like on Beta 4).
+// GPU first uses it (not on Turnip: made lazily there, heap_lazy_try), and Linux write tracking can't watch this mapping (the heap is then re-checked like on Beta 4).
 // Nothing writes the heap before boot (the start screen doesn't use guest memory): the mapping replaces it unseen.
 // The mapping: where the driver has VK_EXT_map_memory_placed (RADV, Mesa 24.1+), it maps the memory at HEAP_BASE
 // itself, through its own DRM file as for any vkMapMemory. Else the memory is exported as a dma-buf and that is
@@ -4175,6 +4196,150 @@ static void heap_unmap_placed(void) {
 #endif
     if (unmap2) unmap2(g_vk.dev, &ui);
     gmem_placed = false;
+}
+
+// The heap as driver memory made lazily (Turnip: g_vk.heap_sparse). One driver allocation of HEAP_MAX is resident
+// from the GPU's first use of it (msm allocates a buffer's pages all at once), 3.3 GB, though the game's own use is far
+// less - and on the Steam Frame that ended the owner's game in an OOM kill at its start (2026-11-06). Instead gmem_buf
+// is a sparse buffer over the heap (one device address, as the whole allocation's: the shaders and chunks above are
+// unchanged), and each granule of the heap gets its own allocation, mapped at its place (placed map) and bound to
+// the buffer there, when it is first used:
+// - by the CPU: HEAP_BASE stays anonymous memory that nothing has touched, registered with a userfaultfd for missing
+//   pages (platform/linux.c plat_lazy_range); a thread's first access to a granule waits while it is made;
+// - by the GPU: the ranges draws and dispatches bind (gc_touch), what copies store into the heap (gmem_copy), and the
+//   storage snapshots' ring. A granule neither has touched holds zeros, which is what the GPU reads where nothing is
+//   bound (residencyNonResidentStrict); only a GPU store through a pointer into one would be lost.
+// Granules of LARECOMP_VK_HEAP_GRANULE_MB (a power of two; default 2). LARECOMP_VK_HEAP_LAZY=0: one allocation as before.
+#define LZ_GRAN_MAX (HEAP_MAX >> 20)  // (granules of 1 MB at least)
+static bool gmem_lazy_heap;            // gmem_buf is the sparse buffer, made granule by granule
+static VkDeviceMemory lz_mem[LZ_GRAN_MAX];
+static uint64_t lz_gran;
+static VkFence lz_fence;
+static _Atomic uint64_t lz_made_bytes, lz_make_ns, lz_made_n;
+
+static void lz_make(uint64_t addr, uint64_t size) {  // (plat_lazy_range: one at a time)
+    uint64_t t0 = SDL_GetTicksNS(), g = (addr - HEAP_BASE) / lz_gran;
+    VkMemoryAllocateFlagsInfo af = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
+    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = g_vk.bda ? &af : NULL,
+                               .allocationSize = size, .memoryTypeIndex = gmem_dmabuf_type};
+    VkDeviceMemory mem;
+    VkResult r = vkAllocateMemory(g_vk.dev, &ai, NULL, &mem);
+    if (r != VK_SUCCESS) FATAL("the guest heap: no driver memory for %llu MB at %llx (%d)\n", (unsigned long long)(size >> 20), (unsigned long long)addr, r);
+#ifdef VK_EXT_map_memory_placed
+    static PFN_vkMapMemory2KHR map2;
+    if (!map2) map2 = (PFN_vkMapMemory2KHR)vkGetDeviceProcAddr(g_vk.dev, "vkMapMemory2KHR");
+    VkMemoryMapPlacedInfoEXT pl = {.sType = VK_STRUCTURE_TYPE_MEMORY_MAP_PLACED_INFO_EXT, .pPlacedAddress = (void *)(uintptr_t)addr};
+    VkMemoryMapInfoKHR mi = {.sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO_KHR, .pNext = &pl, .flags = VK_MEMORY_MAP_PLACED_BIT_EXT,
+                             .memory = mem, .size = VK_WHOLE_SIZE};
+    void *p = NULL;
+    r = map2(g_vk.dev, &mi, &p);
+    if (r != VK_SUCCESS || p != (void *)(uintptr_t)addr) FATAL("the guest heap: driver memory not mapped at %llx (%d)\n", (unsigned long long)addr, r);
+#endif
+    VkSparseMemoryBind b = {.resourceOffset = addr - HEAP_BASE, .size = size, .memory = mem};
+    VkSparseBufferMemoryBindInfo bb = {.buffer = gmem_buf, .bindCount = 1, .pBinds = &b};
+    VkBindSparseInfo bi = {.sType = VK_STRUCTURE_TYPE_BIND_SPARSE_INFO, .bufferBindCount = 1, .pBufferBinds = &bb};
+    vkResetFences(g_vk.dev, 1, &lz_fence);
+    extern void vk_queue_lock(void), vk_queue_unlock(void);
+    if (g_vk.sparse_queue) r = vkQueueBindSparse(g_vk.sparse_queue, 1, &bi, lz_fence);
+    else vk_queue_lock(), r = vkQueueBindSparse(g_vk.queue, 1, &bi, lz_fence), vk_queue_unlock();
+    if (r == VK_SUCCESS) r = vkWaitForFences(g_vk.dev, 1, &lz_fence, VK_TRUE, 10000000000ull);
+    if (r != VK_SUCCESS) FATAL("the guest heap: binding %llx for the GPU failed (%d)\n", (unsigned long long)addr, r);
+    lz_mem[g] = mem;
+    lz_made_bytes += size;
+    lz_made_n++;
+    lz_make_ns += SDL_GetTicksNS() - t0;
+}
+
+static void heap_lazy_touch(uint64_t addr, uint64_t size) {
+    if (!gmem_lazy_heap) return;
+    // (a binding's size can be "the rest of the heap": at most 64 MB from its start are made, the rest stays as it is)
+    if (size > (64ull << 20)) {
+        static int nlog;
+        if (nlog++ < 8) LOG("[vk] lazy heap: a %llu MB GPU range at %llx: its first 64 MB made\n", (unsigned long long)(size >> 20), (unsigned long long)addr);
+        size = 64ull << 20;
+    }
+    plat_lazy_touch(addr, size);
+    // (logged here, on the render thread: lz_make may run on the fault thread while the faulting one holds the log's lock)
+    static uint64_t logged;
+    if (lz_made_bytes >> 28 != logged) {
+        logged = lz_made_bytes >> 28;
+        LOG("[vk] lazy heap: %llu MB made in %llu granules (%.1f ms)\n", (unsigned long long)(lz_made_bytes >> 20),
+            (unsigned long long)lz_made_n, lz_make_ns / 1e6);
+    }
+}
+void vk_heap_lazy_log(void) {  // (device.c vk_log_memory)
+    if (gmem_lazy_heap)
+        LOG("[vk] memory: the lazy heap holds %llu MB in %llu granules\n", (unsigned long long)(lz_made_bytes >> 20), (unsigned long long)lz_made_n);
+}
+static void heap_lazy_stats(char *out, size_t n) {
+    if (gmem_lazy_heap)
+        snprintf(out, n, ", lazy heap %llu MB in %llu granules (%.1f ms making them)", (unsigned long long)(lz_made_bytes >> 20),
+                 (unsigned long long)lz_made_n, lz_make_ns / 1e6);
+}
+
+// The heap as granules made on first use (guest_heap_dmabuf_try, memory type `type`; buffer usage `usage`). False:
+// not here (then one allocation as before).
+static bool heap_lazy_try(int type, VkBufferUsageFlags usage) {
+    const char *e = getenv("LARECOMP_VK_HEAP_LAZY"), *ge = getenv("LARECOMP_VK_HEAP_GRANULE_MB");
+    if (!g_vk.heap_sparse || (e && !atoi(e)) || !g_vk.map_placed) return false;
+    uint64_t gran = (ge && atoi(ge) > 0 ? (uint64_t)atoi(ge) : 2) << 20;
+    if (gran & (gran - 1) || HEAP_MAX % gran || gran > HEAP_MAX) { LOG("[vk] lazy heap: granule %s MB is no power of two dividing the heap\n", ge); return false; }
+    VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = HEAP_MAX, .usage = usage,
+                              .flags = VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT};
+    VkBuffer buf;
+    if (vkCreateBuffer(g_vk.dev, &bci, NULL, &buf) != VK_SUCCESS) { LOG("[vk] lazy heap: no sparse buffer\n"); return false; }
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(g_vk.dev, buf, &req);
+    const char *why = !(req.memoryTypeBits & (1u << type)) ? "memory type not allowed" : gran % req.alignment ? "granule below the binding alignment" :
+                      req.size != HEAP_MAX ? "buffer size" : NULL;
+    if (!why && !lz_fence) {
+        VkFenceCreateInfo fci = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        if (vkCreateFence(g_vk.dev, &fci, NULL, &lz_fence) != VK_SUCCESS) why = "no fence";
+    }
+    if (!why) {
+        plat_write_tracking_off("the guest heap is driver memory");  // (a range has one userfaultfd: the lazy range's)
+        gmem_buf = buf;  // (lz_make binds to it, from the first touch on)
+        lz_gran = gran;
+        gmem_dmabuf_type = (uint32_t)type;
+        if (!plat_lazy_range(HEAP_BASE, HEAP_BASE + HEAP_MAX, gran, lz_make)) why = "no userfaultfd";
+    }
+    if (why) {
+        LOG("[vk] lazy heap: not possible here (%s): one allocation\n", why);
+        gmem_buf = VK_NULL_HANDLE;
+        vkDestroyBuffer(g_vk.dev, buf, NULL);
+        return false;
+    }
+    heap_note_type((uint32_t)type);
+    gmem_mem = VK_NULL_HANDLE;
+    gmem_size = HEAP_MAX;
+    gmem_dmabuf = true;
+    gmem_lazy_heap = true;
+    lz_made_bytes = lz_make_ns = lz_made_n = 0;
+    LOG("[vk] guest heap as driver memory, made lazily (memory type %d, %llu MB granules, sparse buffer%s): %llu MB at %llx\n",
+        type, (unsigned long long)(gran >> 20), g_vk.sparse_queue ? ", binds on a sparse queue" : "",
+        (unsigned long long)(HEAP_MAX >> 20), (unsigned long long)HEAP_BASE);
+    return true;
+}
+
+// At a reboot (vk_exec_reset, GPU idle, guest threads stopped): the range is ordinary memory again, each granule's
+// mapping left reserved and its memory freed; the caller then resets the range to fresh zeroed memory.
+static void heap_lazy_free(void) {
+    plat_lazy_off();
+#ifdef VK_EXT_map_memory_placed
+    PFN_vkUnmapMemory2KHR unmap2 = (PFN_vkUnmapMemory2KHR)vkGetDeviceProcAddr(g_vk.dev, "vkUnmapMemory2KHR");
+#endif
+    for (uint64_t g = 0; g < HEAP_MAX / lz_gran; g++) {
+        if (!lz_mem[g]) continue;
+#ifdef VK_EXT_map_memory_placed
+        VkMemoryUnmapInfoKHR ui = {.sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO_KHR, .memory = lz_mem[g],
+                                   .flags = g_vk.unmap_reserve ? VK_MEMORY_UNMAP_RESERVE_BIT_EXT : 0};
+        if (unmap2) unmap2(g_vk.dev, &ui);
+#endif
+        vkFreeMemory(g_vk.dev, lz_mem[g], NULL);
+        lz_mem[g] = VK_NULL_HANDLE;
+    }
+    LOG("[vk] lazy heap: %llu granules (%llu MB) freed at the reboot\n", (unsigned long long)lz_made_n, (unsigned long long)(lz_made_bytes >> 20));
+    gmem_lazy_heap = false;
 }
 
 // Whether the heap is to be the driver's memory (gmir_on asks this before the heap is set up: no copies then)
@@ -4236,6 +4401,7 @@ static bool guest_heap_dmabuf_try(void) {
     if (!placed && !g_vk.dmabuf) { LOG("[vk] heap as driver memory: no way to map it here\n"); return false; }
     bi.pNext = placed ? NULL : &eb;  // (an exportable buffer only for the dma-buf mapping)
     if (g_vk.bda) bi.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;  // (Turnip: chunks of it by address, gc_import)
+    if (placed && heap_lazy_try(type, bi.usage)) return true;
     VkBuffer buf;
     if (vkCreateBuffer(g_vk.dev, &bi, NULL, &buf) != VK_SUCCESS) { LOG("[vk] heap as driver memory: buffer failed\n"); return false; }
     VkMemoryRequirements req;
@@ -4324,6 +4490,11 @@ mapped:;
         "once the GPU first uses it\n", gmem_placed ? "placed map" : "dma-buf", type, (unsigned long long)(size >> 20), (unsigned long long)HEAP_BASE);
     return true;
 }
+#else
+static const bool gmem_lazy_heap = false;
+static void heap_lazy_touch(uint64_t addr, uint64_t size) { (void)addr, (void)size; }
+static void heap_lazy_stats(char *out, size_t n) { (void)out, (void)n; }
+void vk_heap_lazy_log(void) {}
 #endif
 
 // The guest heap's GPU memory on Linux: the driver's own (above) where it can be, else host-pointer imports - the
@@ -4750,6 +4921,7 @@ static bool gc_scan_needed(void) {
 // 1-9 MB into the chunk after the bound range), and a size of 0 means "the rest of the buffer".
 static void gc_touch(uint64_t off, uint64_t size) {
     if (!gc_lazy || off >= HEAP_MAX) return;
+    heap_lazy_touch(HEAP_BASE + off, size ? size : 1);  // (the lazy heap: the range itself)
     int k0 = (int)(off >> gc_shift), k1 = (int)((off + (size ? size : 1) - 1) >> gc_shift) + 1;
     if (k1 >= gc_n) k1 = gc_n - 1;
     for (int k = k0; k <= k1; k++) if (!gc[k].buf) gc_import(k);
@@ -4956,6 +5128,8 @@ static void gc_frame(void) {
 
 // In lazy mode the heap-side offsets of a copy are in chunks: one vkCmdCopyBuffer per chunk piece. other = the GPU side.
 static void gmem_copy(VkCommandBuffer cb, VkBuffer other, const VkBufferCopy *cp, int n, bool to_heap) {
+    if (to_heap && gmem_lazy_heap)  // (the lazy heap: what the GPU stores there must exist)
+        for (int i = 0; i < n; i++) heap_lazy_touch(HEAP_BASE + cp[i].dstOffset, cp[i].size);
     if (!to_heap && heap_noncoherent())  // (the GPU's copies out of the heap - the vertex cache, gfast - read memory)
         for (int i = 0; i < n; i++) heap_clean(HEAP_BASE + cp[i].srcOffset, cp[i].size);
     if (!gc_lazy) {
@@ -5913,7 +6087,8 @@ void vk_exec_reset(void) {
     gmir_reset();
     if (gmem_buf) {
 #ifdef __linux__
-        bool placed = gmem_placed;
+        bool placed = gmem_placed || gmem_lazy_heap;
+        if (gmem_lazy_heap) heap_lazy_free();
         heap_unmap_placed();
 #endif
         vkDestroyBuffer(g_vk.dev, gmem_buf, NULL);
@@ -7059,7 +7234,7 @@ static void draw(CmdRec *r, bool indexed) {
     if (wx_composite && g_eye <= 0) weather_encode();
     PROF_ADD(prof_draw);
 }
-// ---- (lane ring; vr_cull.h, LARECOMP_VR_RING) in stereo, the draws outside the table fit's footprint ("ring" draws) go
+// ---- (ring draws; vr_cull.h, LARECOMP_VR_RING) in stereo, the draws outside the table fit's footprint ("ring" draws) go
 // into the eyes' colour passes only: not into the shared passes (the shadow casters; LARECOMP_VR_RING_CAST keeps the
 // nearer ones casting) nor the eyes' depth-only pre-pass. In the colour pass their EQUAL against the pre-pass's depth
 // becomes LESS_OR_EQUAL with depth write, which is right in any draw order. A draw is ring when its world box (vertex box
@@ -7162,7 +7337,7 @@ static bool ring_world_box(CmdRec *r, bool indexed, float wlo[3], float whi[3]) 
     }
     return true;
 }
-static int ring_class(CmdRec *r, bool indexed, int kind) {  // 0 core, 1 ring, 2 ring that casts
+static int ring_class(CmdRec *r, bool indexed, int kind) {  // 0 core, 1 ring, 2 ring that casts, 3 past the EXTENT box
     extern int vr_ring_class(const float lo[3], const float hi[3], uint64_t frame);
     uint64_t inst = indexed ? r->x[6] : r->x[4];
     if (inst > 1 || !st.ubuf[0][2].addr) return 0;  // (instanced: grass and the like stay core)
@@ -7206,9 +7381,9 @@ static bool ring_route_(CmdRec *r, bool indexed, int log);
 static bool ring_route(CmdRec *r, bool indexed) {  // true: skip this draw
     extern bool vr_ring_on(void);
     g_ring_leq = false;
-    static int on = -1, log = 0;
-    if (on < 0) on = vr_ring_on(), log = getenv("LARECOMP_VR_RING_LOG") != NULL;
-    if (!on || g_eye < 0) return false;
+    static int log = -1;  // (vr_ring_on is read per draw: the VR tab's Surroundings row switches it live)
+    if (log < 0) log = getenv("LARECOMP_VR_RING_LOG") != NULL;
+    if (g_eye < 0 || !vr_ring_on()) return false;
     if (!log) return ring_route_(r, indexed, 0);
     uint64_t t0 = SDL_GetTicksNS();
     bool skip = ring_route_(r, indexed, 1);
@@ -7222,26 +7397,27 @@ static bool ring_route_(CmdRec *r, bool indexed, int log) {
     if (st.rt.depth) tw |= vk_tex_twinned(st.rt.depth);
     int kind = !tw ? 0 : !nc ? 1 : 2;  // shared / an eye's depth-only pass / an eye's colour pass
     int c = ring_class(r, indexed, kind);
-    bool skip = (kind == 0 && !nc && c == 1) || (kind == 1 && c >= 1);  // (shared: depth-only ones, the casters)
+    bool skip = (kind == 0 && !nc && (c == 1 || c == 3)) || (kind == 1 && c >= 1) || (kind == 2 && c == 3);  // (shared: depth-only ones, the casters)
     static int lowres = -1;  // LARECOMP_VR_RING_LOWRES=0: ring draws stay out of the eyes' smaller colour passes too
     if (lowres < 0) lowres = !getenv("LARECOMP_VR_RING_LOWRES") || atoi(getenv("LARECOMP_VR_RING_LOWRES")) != 0;
     if (!lowres && kind == 2 && c >= 1 && wx_scene_w && st.rt.color[0] && st.rt.color[0]->width * 4 < wx_scene_w * 3) skip = true;
     g_ring_leq = kind == 2 && c >= 1;
     ring_dump(r, indexed, kind, c);
     if (log) {
-        static uint64_t hist[2][3][3][2], hframe;
+        static uint64_t hist[2][3][4][2], hframe;
         uint64_t f = renderer_exec_frame();
         if (f != hframe) {
             if (hframe % 300 == 0) {
                 LOG("[ring] frame %llu: classification %.3f + %.3f ms (eye 0 + 1), %llu vertex boxes made, %llu skipped early "
-                    "(not in the counts below); (kind: class core/ring/cast, drawn+skipped):", (unsigned long long)hframe,
+                    "(not in the counts below); (kind: class core/ring/cast/beyond, drawn+skipped):", (unsigned long long)hframe,
                     ring_ns[0] / 1e6, ring_ns[1] / 1e6, (unsigned long long)ring_boxes, (unsigned long long)ring_early_n);
                 static const char *kn[3] = {"shared", "eye depth-only", "eye colour"};
                 for (int e = 0; e < 2; e++)
                     for (int kk = 0; kk < 3; kk++)
-                        LOG(" | e%d %s %llu/%llu+%llu/%llu+%llu", e, kn[kk], (unsigned long long)hist[e][kk][0][0],
+                        LOG(" | e%d %s %llu/%llu+%llu/%llu+%llu/%llu+%llu", e, kn[kk], (unsigned long long)hist[e][kk][0][0],
                             (unsigned long long)hist[e][kk][1][0], (unsigned long long)hist[e][kk][1][1],
-                            (unsigned long long)hist[e][kk][2][0], (unsigned long long)hist[e][kk][2][1]);
+                            (unsigned long long)hist[e][kk][2][0], (unsigned long long)hist[e][kk][2][1],
+                            (unsigned long long)hist[e][kk][3][0], (unsigned long long)hist[e][kk][3][1]);
                 LOG("\n");
             }
             memset(hist, 0, sizeof hist), hframe = f, ring_ns[0] = ring_ns[1] = ring_boxes = ring_early_n = 0;
@@ -7284,7 +7460,7 @@ static bool diet_draw(Prog *pr, uint64_t last_hash) {
     }
     return false;
 }
-// (lane ring) the early route: a ring draw in a depth-only pass (the shared casters, an eye's pre-pass) is skipped at the
+// (ring draws) the early route: a ring draw in a depth-only pass (the shared casters, an eye's pre-pass) is skipped at the
 // top of draw_, before the program lookup and the per-draw bookkeeping, which matter only for passes with colour
 // targets. What a skipped draw must still leave behind is done here: the frame's first scene camera (cam_override's
 // latch, whose address the stereo patch matches, widescreen's and the weather's), the weather's scene depth, the
@@ -7293,14 +7469,14 @@ static bool diet_draw(Prog *pr, uint64_t last_hash) {
 // interpolation (logging or replay) takes the full path.
 static bool ring_early(CmdRec *r, bool indexed) {
     extern bool vr_ring_on(void);
-    static int on = -1, log = 0;
-    if (on < 0) on = vr_ring_on(), log = getenv("LARECOMP_VR_RING_LOG") != NULL;
-    if (!on || g_eye < 0 || g_interp_log || g_interp_replaying || !st.rt.depth) return false;
+    static int log = -1;
+    if (log < 0) log = getenv("LARECOMP_VR_RING_LOG") != NULL;
+    if (g_eye < 0 || g_interp_log || g_interp_replaying || !st.rt.depth || !vr_ring_on()) return false;
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) return false;
     uint64_t t0 = log ? SDL_GetTicksNS() : 0;
     bool tw = vk_tex_twinned(st.rt.depth);
     int c = ring_class(r, indexed, tw ? 1 : 0);
-    bool skip = tw ? c >= 1 : c == 1;
+    bool skip = tw ? c >= 1 : (c == 1 || c == 3);
     if (skip) {
         if (tw) st_last_depth = st.rt.depth, memcpy(st_last_zr, st.depth_range[0], sizeof st_last_zr);
         if (g_eye == 1) eye1_skip_rt();  // (its counters)
@@ -7390,7 +7566,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
     g_mvp = false, g_tex_amask = 0, g_mv_bits[0] = g_mv_bits[1] = 0;
     if (!st.program) { SKIP(SK_NO_PROGRAM); return; }
-    if (ring_early(r, indexed)) { SKIP(SK_RING); return; }  // (lane ring: a ring draw in a depth-only pass)
+    if (ring_early(r, indexed)) { SKIP(SK_RING); return; }  // (ring draws: a ring draw in a depth-only pass)
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
@@ -7538,7 +7714,7 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     if (g_debug_frame) debug_draw(pr, r, indexed);
     snow_cover_check(r, indexed, pr);  // (the snow on the ground: its stencil marks, the cover after the opaque draws)
-    if (ring_route(r, indexed)) { SKIP(SK_RING); return; }  // (lane ring: a ring draw outside the eyes' colour passes)
+    if (ring_route(r, indexed)) { SKIP(SK_RING); return; }  // (ring draws: a ring draw outside the eyes' colour passes)
     if (ct_on()) ct_draw(pr, "draw");
     alias_draw_check();
     resolve_feedback(pr);
@@ -7574,10 +7750,18 @@ static void draw_(CmdRec *r, bool indexed) {
     int nat = st.nattrib < 0 ? 0 : st.nattrib > 16 ? 16 : st.nattrib, nst = st.nstream < 0 ? 0 : st.nstream > 16 ? 16 : st.nstream;
     uint32_t npc = pass_ncolor < 8 ? pass_ncolor : 8;
     prof_key_draws++;
+    // (scene: the Surroundings row's Low Quality) ring draws in an eye's colour pass shade 2x2 fragments
+    extern int vr_scene_mode(void);
+    uint32_t coarse = 0;
+    if (g_ring_leq && vr_scene_mode() == 1 /* VR_SCENE_LOW */) {
+        static bool said;
+        coarse = fov_pipeline_chain_coarse() ? 1u : 0u;
+        if (!said) said = true, LOG("[scene] low quality: draws past the table %s\n", coarse ? "shade 2x2 fragments" : "at full rate (no pipeline shading rates)");
+    }
     PipeKey k;
     VtxLayout vl;  // the draw's vertex layout (on a memo hit: the memo's, made from the same inputs)
     Pipe *pp;
-    if (pm && pm->pp && pm->gen == key_gen && pm->view_mask == pass_view_mask && pm->ncolor == pass_ncolor && pm->samples == pass_samples && pm->depth == pass_depth &&
+    if (pm && pm->pp && pm->gen == key_gen && pm->view_mask == pass_view_mask && pm->coarse == coarse && pm->ncolor == pass_ncolor && pm->samples == pass_samples && pm->depth == pass_depth &&
         pm->stencil == pass_stencil && pm->nattrib == st.nattrib && pm->nstream == st.nstream && pm->channel_mask == in.channel_mask &&
         pm->blend_on == in.blend_on && pm->a2c == in.a2c && pm->cls == in.topo_class && pm->poly_fill == in.poly_fill &&
         !memcmp(pm->color, pass_color, npc * sizeof pass_color[0]) && !memcmp(pm->rt_fmt, rt_fmt, sizeof rt_fmt) &&
@@ -7589,6 +7773,7 @@ static void draw_(CmdRec *r, bool indexed) {
     } else {
         pipe_key_fill(&k, pr, &in, pass_color, pass_ncolor, pass_depth, pass_stencil, pass_samples, &vl);
         k.view_mask = pass_view_mask;
+        k.coarse = coarse;
         uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
         if (!ph) ph = 1;
         uint32_t pslot = (uint32_t)(ph ^ (ph >> 29)) & (PIPE_TAB - 1);
@@ -7618,7 +7803,7 @@ static void draw_(CmdRec *r, bool indexed) {
             pipe_tab[pslot].pipe = pp;
         }
         if (pm) {
-            pm->gen = key_gen; pm->view_mask = pass_view_mask; pm->ncolor = pass_ncolor; pm->samples = pass_samples; pm->depth = pass_depth; pm->stencil = pass_stencil;
+            pm->gen = key_gen; pm->view_mask = pass_view_mask; pm->coarse = coarse; pm->ncolor = pass_ncolor; pm->samples = pass_samples; pm->depth = pass_depth; pm->stencil = pass_stencil;
             pm->nattrib = st.nattrib; pm->nstream = st.nstream; pm->channel_mask = in.channel_mask; pm->blend_on = in.blend_on;
             pm->a2c = in.a2c; pm->cls = in.topo_class; pm->poly_fill = in.poly_fill;
             memcpy(pm->color, pass_color, sizeof pm->color); memcpy(pm->rt_fmt, rt_fmt, sizeof pm->rt_fmt);
@@ -7646,7 +7831,7 @@ static void draw_(CmdRec *r, bool indexed) {
     bool dt = st.ds[0] && !nodt && pass_depth;
     if (ss_need(SS_DT, ss.dt == (VkBool32)dt)) { ss.dt = dt; rec_CmdSetDepthTestEnable(cb, dt); }
     VkCompareOp dop = dt ? compare_fn(st.ds[2]) : VK_COMPARE_OP_ALWAYS;
-    bool ring_leq = g_ring_leq && dop == VK_COMPARE_OP_EQUAL;  // (lane ring: no pre-pass depth of its own: tests and writes)
+    bool ring_leq = g_ring_leq && dop == VK_COMPARE_OP_EQUAL;  // (ring draws: no pre-pass depth of its own: tests and writes)
     if (ring_leq) dop = VK_COMPARE_OP_LESS_OR_EQUAL;
     VkBool32 dw = dt && (st.ds[1] || ring_leq);
     if (ss_need(SS_DW, ss.dw == dw)) { ss.dw = dw; rec_CmdSetDepthWriteEnable(cb, dw); }
@@ -9347,6 +9532,7 @@ static void exec_list(uint64_t handle, int depth) {
                 // (a shared target made from a twin: eye 1 would see eye 0's) the destination is twinned from now on, so
                 // eye 1 runs this copy into its own image (filled with eye 0's first: vk_stereo_twin_add)
                 NvnTexture *s_ = (NvnTexture *)(uintptr_t)t[0].tex, *d_ = (NvnTexture *)(uintptr_t)dst->tex;
+                vk_end_pass();  // (multiview: the twin add copies the image into its eye-1 layer now, outside a pass)
                 vk_tex(d_, true);
                 bool added = vk_stereo_twin_add(d_);
                 static int n;
@@ -9758,7 +9944,7 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
     return drawn;
 }
 
-// The eye post hook's default (stereo.h): nothing. The edge lane defines the real one.
+// The eye post hook's default (stereo.h): nothing. edge.c defines the real one.
 __attribute__((weak)) void stereo_eye_post(const StereoEyePost *e) { (void)e; }
 
 // (device.c, LARECOMP_STEREO_DUMP_AT=<frame>,...: the eye outputs as PNGs, <dir>/stereo_<frame>_eye<n>.png)

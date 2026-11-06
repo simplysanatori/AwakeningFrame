@@ -87,7 +87,7 @@ UNPACKED=
 [ -x "$HERE/lasrecomp" ] && [ -d "$HERE/lasgen" ] && [ -f "$HERE/VERSION" ] && UNPACKED=$HERE
 VERSION=
 [ -n "$UNPACKED" ] && VERSION=$(head -n 1 "$HERE/VERSION" | tr -d '\r')
-# A program installed from a source tree (no release marker): the owner's or a developer's build. A release leaves it
+# A program installed from a source tree (no release marker): the maintainer's or a developer's build. A release leaves it
 # as it is unless asked (--replace-source): it goes next to it, and the Steam entry stays the source install's.
 is_source_install() { [ -x "$1/lasrecomp" ] && ! grep -q '^release ' "$1/.af-install" 2> /dev/null; }
 BESIDE=

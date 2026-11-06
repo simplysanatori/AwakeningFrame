@@ -768,6 +768,13 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
     float fade_c[3] = {0}, fade_r = cfg.radius, fade_w = cfg.width;  // (fade) the table's centre, the clear radius, the width
     float drawn[4][2];
     bool fitted = false, cut = false;
+    // (scene: the overworld drawn further out, the VR tab's Surroundings) the fade ends at the drawn box's nearer side
+    // instead of radius + width out, unless LARECOMP_VR_EDGE_RADIUS says otherwise; with a reach the culling frustum is
+    // opened wide and the box limits what is drawn, so the fit to the frustum's floor is left out
+    static int r_given = -1;
+    if (r_given < 0) r_given = getenv("LARECOMP_VR_EDGE_RADIUS") != NULL;
+    float reach = vr_cull_scene_reach();
+    if (!r_given) fade_r = fmaxf(fade_r, reach - cfg.width);
     if (mode == EDGE_FADE) {
         float lo[3], hi[3];
         bool room, zone;
@@ -779,7 +786,7 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
                 float dx = (i & 1 ? hi[0] : lo[0]) - fade_c[0], dz = (i & 2 ? hi[2] : lo[2]) - fade_c[2];
                 fade_r = fmaxf(fade_r, sqrtf(dx * dx + dz * dz) + cfg.room_margin);
             }
-        if (ow == 1 && cfg.fit && vr_cull_drawn(drawn)) fitted = fade_fit(eye, drawn, fade_c, &fade_r, &fade_w, &cut);
+        if (ow == 1 && cfg.fit && !(reach > 0) && vr_cull_drawn(drawn)) fitted = fade_fit(eye, drawn, fade_c, &fade_r, &fade_w, &cut);
     }
     EdgeEye ein = {.eye = eye};
     const EdgeEye *in = &ein;

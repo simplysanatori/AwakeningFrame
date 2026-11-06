@@ -74,6 +74,7 @@ typedef struct {
 static struct {
     bool init, dev_ok, log_passes;
     bool vrs;           // shading-rate attachments (default); false: density maps (LARECOMP_VR_FOVEATION_MODE=fdm)
+    bool max_combiner;  // fragmentShadingRateNonTrivialCombinerOps: a pipeline's rate and the attachment's can combine (MAX)
     float uniform;      // (debug) LARECOMP_VR_FOVEATION_UNIFORM=<density>: the whole map at one density
     int level;
     float min_scale;    // passes smaller than this part of the eye size are left alone
@@ -146,6 +147,7 @@ static bool setup_vrs(VkPhysicalDevice phys, bool have_ext, const char **ext, ui
         return false;
     }
     ext[(*n_ext)++] = VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME;
+    F.max_combiner = pp.fragmentShadingRateNonTrivialCombinerOps;
     F.fsr_feat = (VkPhysicalDeviceFragmentShadingRateFeaturesKHR){.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR,
                                                                   .pipelineFragmentShadingRate = VK_TRUE,
                                                                   .attachmentFragmentShadingRate = VK_TRUE, .pNext = f->pNext};
@@ -224,6 +226,17 @@ const void *fov_pipeline_chain(void) {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR, .fragmentSize = {1, 1},
         .combinerOps = {VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR, VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR}};
     return F.dev_ok && F.vrs ? &st : NULL;
+}
+
+// (scene, the Surroundings row's Low Quality) pipelines of the draws past the table: 2x2 fragments, coarser where the
+// foveation map is coarser (MAX; without non-trivial combiners the 2x2 alone). NULL: no shading rates on this device.
+const void *fov_pipeline_chain_coarse(void) {
+    static VkPipelineFragmentShadingRateStateCreateInfoKHR st = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR, .fragmentSize = {2, 2},
+        .combinerOps = {VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR, VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR}};
+    if (!F.dev_ok || !F.vrs) return NULL;
+    st.combinerOps[1] = F.max_combiner ? VK_FRAGMENT_SHADING_RATE_COMBINER_OP_MAX_KHR : VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR;
+    return &st;
 }
 
 // ---------------------------------------------------------------- the focus

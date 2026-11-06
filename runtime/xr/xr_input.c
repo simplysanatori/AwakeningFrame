@@ -18,6 +18,7 @@
 #include "../rt.h"
 #include "../settings.h"
 #include "xr_input.h"
+#include "xr_pointer.h"
 
 // ---- the layout: which Frame control is which gamepad button (SDL names, Switch positions: the east button is A)
 // Each control may drive several; the player's own controller bindings (Controls tab) turn them into game inputs.
@@ -62,9 +63,9 @@ static int face_host(Ctl c, bool by_label) {
 }
 
 // ---- the actions
-typedef enum { T_BOOL, T_FLOAT, T_VEC2, T_HAPTIC } Kind;
+typedef enum { T_BOOL, T_FLOAT, T_VEC2, T_HAPTIC, T_POSE } Kind;
 enum { A_A, A_B, A_X, A_Y, A_MENU, A_VIEW, A_DUP, A_DDOWN, A_DLEFT, A_DRIGHT, A_BUMP_L, A_BUMP_R, A_CLICK_L, A_CLICK_R,
-       A_TRIG_L, A_TRIG_R, A_GRIP_L, A_GRIP_R, A_STICK_L, A_STICK_R, A_HAPTIC, A_COUNT };
+       A_TRIG_L, A_TRIG_R, A_GRIP_L, A_GRIP_R, A_STICK_L, A_STICK_R, A_HAPTIC, A_AIM, A_COUNT };
 #define L_ "/user/hand/left/"
 #define R_ "/user/hand/right/"
 static const struct { const char *name, *label; Kind kind; const char *frame, *touch; } k_act[A_COUNT] = {
@@ -89,6 +90,7 @@ static const struct { const char *name, *label; Kind kind; const char *frame, *t
     [A_STICK_L] = {"stick_left", "Left Stick", T_VEC2, L_ "input/thumbstick", L_ "input/thumbstick"},
     [A_STICK_R] = {"stick_right", "Right Stick", T_VEC2, R_ "input/thumbstick", R_ "input/thumbstick"},
     [A_HAPTIC] = {"haptic", "Haptic", T_HAPTIC, R_ "output/haptic", R_ "output/haptic"},  // (and the left one: both below)
+    [A_AIM] = {"aim", "Menu Pointer", T_POSE, R_ "input/aim/pose", R_ "input/aim/pose"},     // (the menu laser; both hands)
 };
 // (the Frame's controls to the virtual buttons: A_* of a boolean control -> C_*, the floats go through thresholds)
 static const int8_t k_bool_ctl[A_GRIP_L] = {[A_A] = C_A, [A_B] = C_B, [A_X] = C_X, [A_Y] = C_Y, [A_MENU] = C_MENU, [A_VIEW] = C_VIEW,
@@ -96,7 +98,14 @@ static const int8_t k_bool_ctl[A_GRIP_L] = {[A_A] = C_A, [A_B] = C_B, [A_X] = C_
                                            [A_BUMP_L] = C_BUMP_L, [A_BUMP_R] = C_BUMP_R, [A_CLICK_L] = C_CLICK_L,
                                            [A_CLICK_R] = C_CLICK_R, [A_TRIG_L] = C_TRIG_L, [A_TRIG_R] = C_TRIG_R};
 
-#define RESET_HOLD_NS 100000000ull  // both sticks clicked together this long: reset the view
+// runtime/ui/menu.mm: the recomp menu (or its name entry) has the controls; the laser's mouse; its hover count
+bool menu_input_captured(void);
+void menu_xr_pointer(bool on_panel, float x, float y, bool down, float wheel);
+unsigned menu_xr_hover_ticks(void);
+static int pointer_hand(void);
+
+#define RESET_HOLD_NS 100000000ull    // both sticks clicked together this long: reset the view
+#define RESET_FULL_NS 2000000000ull   // ... and held this long from the press: reset tilt, height, size and distance too
 
 #define XRIN_FUNCS(F)                                                                                                 \
     F(xrStringToPath) F(xrCreateActionSet) F(xrDestroyActionSet) F(xrCreateAction) F(xrSuggestInteractionProfileBindings) \
@@ -112,6 +121,7 @@ static struct {
     XrActionSet gaze_set;      // the eye gaze (XR_EXT_eye_gaze_interaction: foveation), a set of its own
     XrAction gaze_act;
     XrSpace gaze_space;
+    XrSpace aim[2];            // the menu laser: each hand's aim pose
     XrAction act[A_COUNT];
     XrPath hand[2];
     bool down[C_COUNT];        // the virtual buttons now (thresholds applied)
@@ -127,11 +137,21 @@ static struct {
     int dom;                   // the right stick's dominant axis: 0 none, 1 sideways (turn), 2 up / down (tilt)
     uint64_t both_ns;          // when both stick clicks went down together (0: not both down)
     bool both_fired;           // the reset for this press was sent
+    // the menu laser (GalaxyFrame's pointer; xr_input_pointer): shown / on the panel as of the last refresh; a press of the
+    // pointing hand's trigger that began while it was shown is the laser's until let go (the game and the menu's pad
+    // input never see it), and clicks the menu if it began on the panel; the right stick scrolls while it is on the panel
+    bool ptr_shown, ptr_on_panel, ptr_owns, ptr_press_on_panel, ptr_trig_was, ptr_sent, ptr_tracked;
+    int ptr_hand;
+    float ptr_wheel;
+    unsigned ptr_ticks;
+    uint64_t ptr_swell_ns, ptr_last_ns;
+    uint64_t rs_ns;            // when the reset hold began (both stick clicks, or the left grip and the right click): 0 = none
+    bool rs_short, rs_full;    // the short / full reset for this hold was sent
 } S = {.snap_armed = true};
 
 static _Atomic float g_yaw;
 static _Atomic int g_snap;                // -1 / +1 pending, 0 none
-static _Atomic bool g_reset;
+static _Atomic bool g_reset, g_reset_full;
 static _Atomic float g_tilt, g_turn, g_height, g_size;
 static _Atomic bool g_modifier;
 
@@ -142,6 +162,7 @@ void xr_input_rig(XrRigInput *out) {
 }
 int xr_input_take_snap(void) { return atomic_exchange(&g_snap, 0); }
 bool xr_input_take_reset_view(void) { return atomic_exchange(&g_reset, false); }
+bool xr_input_take_reset_full(void) { return atomic_exchange(&g_reset_full, false); }
 
 // ---- set-up
 static XrPath path(const char *s) {
@@ -161,6 +182,7 @@ static bool suggest(const char *profile, bool frame, const char *grip) {
         if (strstr(p, "%s")) snprintf(buf, sizeof buf, p, grip), p = buf;
         b[n++] = (XrActionSuggestedBinding){S.act[i], path(p)};
         if (i == A_HAPTIC) b[n++] = (XrActionSuggestedBinding){S.act[i], path(L_ "output/haptic")};
+        if (i == A_AIM) b[n++] = (XrActionSuggestedBinding){S.act[i], path(L_ "input/aim/pose")};
     }
     XrInteractionProfileSuggestedBinding sb = {.type = XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING,
                                                .interactionProfile = path(profile), .suggestedBindings = b, .countSuggestedBindings = n};
@@ -198,8 +220,9 @@ void xr_input_init(PFN_xrGetInstanceProcAddr gipa, bool valve) {
         snprintf(ai.actionName, sizeof ai.actionName, "%s", k_act[i].name);
         snprintf(ai.localizedActionName, sizeof ai.localizedActionName, "%s", k_act[i].label);
         ai.actionType = k_act[i].kind == T_BOOL ? XR_ACTION_TYPE_BOOLEAN_INPUT : k_act[i].kind == T_FLOAT ? XR_ACTION_TYPE_FLOAT_INPUT
-                      : k_act[i].kind == T_VEC2 ? XR_ACTION_TYPE_VECTOR2F_INPUT : XR_ACTION_TYPE_VIBRATION_OUTPUT;
-        if (k_act[i].kind == T_HAPTIC) ai.countSubactionPaths = 2, ai.subactionPaths = S.hand;
+                      : k_act[i].kind == T_VEC2 ? XR_ACTION_TYPE_VECTOR2F_INPUT : k_act[i].kind == T_POSE ? XR_ACTION_TYPE_POSE_INPUT
+                      : XR_ACTION_TYPE_VIBRATION_OUTPUT;
+        if (k_act[i].kind == T_HAPTIC || k_act[i].kind == T_POSE) ai.countSubactionPaths = 2, ai.subactionPaths = S.hand;
         if (!XR_OK(p_xrCreateAction(S.set, &ai, &S.act[i]))) return;
     }
     bool ok = false;
@@ -238,6 +261,11 @@ void xr_input_attach(void) {
                                       .poseInActionSpace = {.orientation = {0, 0, 0, 1}}};
         if (!XR_OK(p_xrCreateActionSpace(g_xr.session, &sc, &S.gaze_space))) S.gaze_space = XR_NULL_HANDLE;
     }
+    for (int h = 0; S.attached && h < 2; h++) {
+        XrActionSpaceCreateInfo sc = {.type = XR_TYPE_ACTION_SPACE_CREATE_INFO, .action = S.act[A_AIM], .subactionPath = S.hand[h],
+                                      .poseInActionSpace = {.orientation = {0, 0, 0, 1}}};
+        if (!XR_OK(p_xrCreateActionSpace(g_xr.session, &sc, &S.aim[h]))) S.aim[h] = XR_NULL_HANDLE;
+    }
     if (S.attached) LOG("[xr] controllers: %d actions attached (%s)\n", A_COUNT, S.valve ? "Steam Frame profile" : "Touch profile only");
 }
 
@@ -248,6 +276,7 @@ void xr_input_shutdown(void) {
             p_xrStopHapticFeedback(g_xr.session, &hi);
         }
     if (S.gaze_space) p_xrDestroySpace(S.gaze_space);
+    for (int h = 0; h < 2; h++) if (S.aim[h]) p_xrDestroySpace(S.aim[h]), S.aim[h] = XR_NULL_HANDLE;
     if (S.gaze_set) p_xrDestroyActionSet(S.gaze_set);
     if (S.set) p_xrDestroyActionSet(S.set);
     S.set = S.gaze_set = XR_NULL_HANDLE, S.gaze_space = XR_NULL_HANDLE, S.ready = S.attached = S.buzzing = false;
@@ -405,23 +434,44 @@ void xr_input_frame(void) {
         memset(S.down, 0, sizeof S.down);
     }
     bool mod = S.down[C_GRIP_L];
+    // the menu laser's trigger and the right stick's scroll (see S.ptr_*; the shown / on-panel state is the last refresh's)
+    S.ptr_hand = pointer_hand();
+    Ctl ptrig = S.ptr_hand ? C_TRIG_R : C_TRIG_L;
+    if (S.down[ptrig] && !S.ptr_trig_was) S.ptr_owns = S.ptr_shown, S.ptr_press_on_panel = S.ptr_on_panel;
+    if (!S.down[ptrig]) S.ptr_owns = false;
+    S.ptr_trig_was = S.down[ptrig];
+    S.ptr_wheel = 0;
+    if (S.ptr_shown && S.ptr_on_panel) S.ptr_wheel = sr[1], sr[0] = sr[1] = 0;
 
     // the rig's: the left grip makes the D-pad (and a click of the right stick) the rig's, not the game's; so does a click
     // of both sticks, held for RESET_HOLD: a single click, or both for less than that, goes to the game as it always did
     bool rig_ctl[C_COUNT] = {0};
     if (mod) rig_ctl[C_DUP] = rig_ctl[C_DDOWN] = rig_ctl[C_DLEFT] = rig_ctl[C_DRIGHT] = rig_ctl[C_CLICK_R] = true;
+    if (S.ptr_owns || S.ptr_shown) rig_ctl[ptrig] = true;  // (the laser's: not a game or menu button)
     atomic_store(&g_modifier, mod);
+    uint64_t now = plat_now_ns();
     {
-        uint64_t now = plat_now_ns();
         if (S.down[C_CLICK_L] && S.down[C_CLICK_R]) {
             if (!S.both_ns) S.both_ns = now, S.both_fired = false;
             if (now - S.both_ns >= RESET_HOLD_NS) {
-                if (!S.both_fired) S.both_fired = true, atomic_store(&g_reset, true);
+                S.both_fired = true;
                 rig_ctl[C_CLICK_L] = rig_ctl[C_CLICK_R] = true;  // (the reset's: the game sees neither until both are let go)
             }
         } else if (S.both_fired && (S.down[C_CLICK_L] || S.down[C_CLICK_R])) {
             rig_ctl[C_CLICK_L] = rig_ctl[C_CLICK_R] = true;      // (one let go, the other still down: still not a click of the game's)
         } else S.both_ns = 0, S.both_fired = false;
+    }
+    // the view reset: both stick clicks held RESET_HOLD, or the left grip and a click of the right stick (an alias), send the short
+    // reset once; the same hold, 2 s from the press, sends the full one once (it includes the short one's yaw and recentre, so the
+    // short one is not sent again). Let go of the hold (or of the sticks, both and the alias ending) and a new press starts over.
+    {
+        bool both = S.down[C_CLICK_L] && S.down[C_CLICK_R], hold = both || (mod && S.down[C_CLICK_R]);
+        if (!hold) S.rs_ns = 0, S.rs_short = S.rs_full = false;
+        else {
+            if (!S.rs_ns) S.rs_ns = both ? S.both_ns : now, S.rs_short = S.rs_full = false;  // (both: from the first click's press)
+            if (!S.rs_short && now - S.rs_ns >= RESET_HOLD_NS) S.rs_short = true, atomic_store(&g_reset, true);
+            if (!S.rs_full && now - S.rs_ns >= RESET_FULL_NS) S.rs_full = true, atomic_store(&g_reset_full, true);
+        }
     }
     // the right stick: sideways turns the table, up / down tilts it; the axis it was first pushed along wins until the other
     // is clearly bigger (1.4 times), so a thumb that wanders does not tilt a turn or turn a tilt
@@ -434,9 +484,6 @@ void xr_input_frame(void) {
     atomic_store(&g_turn, S.dom == 1 ? sr[0] : 0.0f);
     atomic_store(&g_height, mod ? (float)(S.down[C_DUP] - S.down[C_DDOWN]) : 0.0f);
     atomic_store(&g_size, mod ? (float)(S.down[C_DRIGHT] - S.down[C_DLEFT]) : 0.0f);
-    static bool click_was;  // (left grip + a click of the right stick: the same reset as both sticks)
-    if (mod && S.down[C_CLICK_R] && !click_was) atomic_store(&g_reset, true);
-    click_was = mod && S.down[C_CLICK_R];
     if (ax < 0.35f) S.snap_armed = true;
     else if (ax > 0.7f && S.snap_armed && S.dom == 1) S.snap_armed = false, atomic_store(&g_snap, sr[0] > 0 ? 1 : -1);
 
@@ -485,6 +532,91 @@ void xr_input_frame(void) {
     last_game = game, last_menus = menus;
     input_xr_set2(game, menus, lx, ly);
     haptics();
+}
+
+// ---- the menu laser (GalaxyFrame xr_app.cpp updateInput / updateAimVk, vr_settings.cpp settingsPointer): the pointing
+// hand's aim ray against the HUD panel (the quad xr_loop.c shows: g_xr.quad_dist ahead in the app space, g_xr.quad_width
+// wide), in the panel's pixels, which are the menu's (the HUD image is the menu's target). Every refresh, for its display
+// time, after the app space's update, so the beam never lags the hand; only while the recomp menu (or its name entry)
+// has the controls. The game's own menus read the pad only.
+static int pointer_hand(void) {  // 1 right (default), 0 left: LARECOMP_VR_POINTER_HAND=left|right, else the VR tab's
+    static int env = -2;
+    if (env == -2) {
+        const char *e = getenv("LARECOMP_VR_POINTER_HAND");
+        env = !e ? -1 : !strcasecmp(e, "left") ? 0 : 1;
+    }
+    return env >= 0 ? env : g_settings.vr.pointer_hand == VRS_HAND_LEFT ? 0 : 1;
+}
+
+static void quat_rot(XrQuaternionf q, const float v[3], float out[3]) {
+    float tx = 2 * (q.y * v[2] - q.z * v[1]), ty = 2 * (q.z * v[0] - q.x * v[2]), tz = 2 * (q.x * v[1] - q.y * v[0]);
+    out[0] = v[0] + q.w * tx + (q.y * tz - q.z * ty);
+    out[1] = v[1] + q.w * ty + (q.z * tx - q.x * tz);
+    out[2] = v[2] + q.w * tz + (q.x * ty - q.y * tx);
+}
+
+void xr_input_pointer(XrTime t) {
+    if (!S.attached) return;
+    int hm = S.ptr_hand;
+    uint64_t now = plat_now_ns();
+    float dt = S.ptr_last_ns ? (float)((now - S.ptr_last_ns) / 1e9) : 0;
+    if (dt > 0.1f) dt = 0.1f;
+    S.ptr_last_ns = now;
+    XrPointerPose pp = {0};
+    bool on_panel = false, tracked = false;
+    float px = 0, py = 0;
+    if (S.was_focused && S.aim[hm] && menu_input_captured()) {
+        const XrSpaceLocationFlags need = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+        XrSpaceLocation al = {.type = XR_TYPE_SPACE_LOCATION}, hl = {.type = XR_TYPE_SPACE_LOCATION};
+        tracked = XR_SUCCEEDED(p_xrLocateSpace(S.aim[hm], g_xr.app, t, &al)) && (al.locationFlags & need) == need;
+        if (tracked && XR_SUCCEEDED(p_xrLocateSpace(g_xr.view, g_xr.app, t, &hl)) && (hl.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
+            static const float fwd[3] = {0, 0, -1};
+            float *o = pp.origin, *d = pp.dir;
+            o[0] = al.pose.position.x, o[1] = al.pose.position.y, o[2] = al.pose.position.z;
+            quat_rot(al.pose.orientation, fwd, d);
+            pp.head[0] = hl.pose.position.x, pp.head[1] = hl.pose.position.y, pp.head[2] = hl.pose.position.z;
+            // the panel's plane (z = -dist, facing +z): where the ray meets it, in front of the hand and within 6 m
+            float hit = d[2] < -1e-4f ? (-g_xr.quad_dist - o[2]) / d[2] : -1;
+            pp.dot = hit > 0 && hit < 6;
+            pp.length = pp.dot ? hit : 1.0f;  // (else a metre of beam, as GalaxyFrame's off the screen)
+            if (pp.dot) {
+                const XrChain *hc = &g_xr.hud[0];
+                float w = g_xr.quad_width, h = w * (float)hc->h / (float)hc->w;
+                float u = (o[0] + d[0] * hit) / w + 0.5f, v = 0.5f - (o[1] + d[1] * hit) / h;
+                on_panel = u >= 0 && u <= 1 && v >= 0 && v <= 1;
+                px = u * (float)hc->w, py = v * (float)hc->h;
+            }
+            pp.shown = true;
+        }
+    }
+    if (pp.shown != S.ptr_shown) LOG("[xr] menu laser %s (%s hand)\n", pp.shown ? "on" : "off", hm ? "right" : "left");
+    if (tracked != S.ptr_tracked && menu_input_captured() && S.was_focused)
+        LOG("[xr] menu laser: %s controller aim %s\n", hm ? "right" : "left", tracked ? "tracked" : "lost");
+    S.ptr_tracked = tracked;
+    if (on_panel != S.ptr_on_panel && pp.shown) LOG("[xr] menu laser %s the panel (%.0f, %.0f)\n", on_panel ? "on" : "off", px, py);
+    S.ptr_shown = pp.shown, S.ptr_on_panel = on_panel;
+    // to the menu: the position, the left button (a press of the trigger begun on the panel), the wheel (the right stick)
+    if (pp.shown || S.ptr_sent) {
+        menu_xr_pointer(on_panel, px, py, pp.shown && S.ptr_owns && S.ptr_press_on_panel, on_panel ? S.ptr_wheel * dt * 5 : 0);
+        S.ptr_sent = pp.shown;
+    }
+    // a light tick (and the dot's swell) when it reaches a new control of the menu (GalaxyFrame: 0.25 for 15 ms, not while
+    // the game's rumble runs; the Controls tab's Rumble turns it off)
+    unsigned ticks = menu_xr_hover_ticks();
+    if (ticks != S.ptr_ticks) {
+        S.ptr_ticks = ticks;
+        if (pp.shown) {
+            S.ptr_swell_ns = now;
+            if (g_settings.rumble && !S.buzzing) {
+                XrHapticActionInfo hi = {.type = XR_TYPE_HAPTIC_ACTION_INFO, .action = S.act[A_HAPTIC], .subactionPath = S.hand[hm]};
+                XrHapticVibration v = {.type = XR_TYPE_HAPTIC_VIBRATION, .duration = 15000000, .frequency = XR_FREQUENCY_UNSPECIFIED, .amplitude = 0.25f};
+                p_xrApplyHapticFeedback(g_xr.session, &hi, (const XrHapticBaseHeader *)&v);
+            }
+        }
+    }
+    float sw = 1 - (float)((now - S.ptr_swell_ns) / 2.5e8);
+    pp.swell = S.ptr_swell_ns && sw > 0 ? sw : 0;
+    xr_pointer_set(&pp);
 }
 
 // (xr_vk.c xr_latch_gaze) the eye gaze's direction in `base` at `t` (unit, -z of the gaze pose); false: no gaze then

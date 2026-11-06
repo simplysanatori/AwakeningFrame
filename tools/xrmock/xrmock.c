@@ -21,6 +21,7 @@
 //   MOCK_XR_SECONDS=<s>      session length before STOPPING is sent (20; 0 = until the app quits)
 //   MOCK_XR_FRAMES=<n>       or stop after n frames (0 = off)
 //   MOCK_XR_HZ=<hz>          display refresh, 120 default (90, 72 ...); xrEnumerateDisplayRefreshRatesFB offers 72/90/120
+//   MOCK_XR_PERIOD_BLIP=n:ms every nth xrWaitFrame reports predictedDisplayPeriod = ms (one-frame blips, as SteamVR at 120 Hz)
 //   MOCK_XR_PIPELINE=<n>     refreshes from xrWaitFrame's return to the predicted display time (2)
 //   MOCK_XR_DEADLINE_MS=<ms> an xrEndFrame later than this before the display time counts as late (period / 2)
 //   MOCK_XR_SKIP=0           a frame loop that falls behind loses refreshes (the wait grid jumps), as on a headset; 0 makes it catch up instead (on by default)
@@ -33,10 +34,23 @@
 //   MOCK_XR_SHOT=<spec>      write the submitted images to PNG for these frames (1-based, as in the trace):
 //                            "30", "10,20", "5-8", "every:60", "all"
 //                            (a dumped frame stalls the loop for ~0.5 s per image: copy and PNG on the CPU)
+//   MOCK_XR_SHOT_VIEW=1      with MOCK_XR_SHOT: also f<frame>_view.png, what the left eye sees (half size): its projection
+//                            image with the quad layers over it in order, each where its pose puts it (nearest sample)
 //   MOCK_XR_SHOT_DIR=<dir>   where (default .): f<frame>_proj<layer>_eye<0|1>.png, f<frame>_quad<layer>.png
+//   MOCK_XR_SHIFT=<file>     per refresh, the projection layer's pose against the head's at the display time; per new
+//                            eye image, its content's shift against a reference image, measured without stalling the
+//                            loop (tools/xrmock/shift-report.py, step-report.py)
+//   MOCK_XR_SHIFT_REF=<s>    the reference image: each eye's first image this many seconds in (30)
+//   MOCK_XR_SHIFT_DUMP=<dir> also write the probed images (the centre 2/3, luma, half size) as PGM, for the
+//   MOCK_XR_SHIFT_DUMP_AT=a,b  display times a to b seconds
+//   MOCK_XR_COMPOSITOR=lead[,from]  (MOCK_XR_COMPOSITOR_PRIO=realtime|high|medium|none: its priority) a compositor's GPU job (two eye-sized blits) on its own high-priority device, lead
+//                            ms before each vsync; the summary gives its latency and the refreshes it would have missed,
+//                            counted from `from` seconds on (MOCK_XR_COMPOSITOR_LOG=<file>: one line per refresh)
 //   MOCK_XR_VK_MAX=1.3       highest Vulkan version offered (1.2 is what SteamVR offers; the instance is refused above it)
 //   MOCK_XR_BUSY_MS=<ms>     at each release wait for the app's queue to go idle; longer than this is an error
 //                            (the app released an image whose GPU work was unfinished).  Off unless set.
+//   MOCK_XR_AIM=<spec>       point a controller: "t0-t1:right|left:x,y,z;..." from t0 to t1 s after xrBeginSession that hand's
+//                            action spaces (aim, grip) turn so their -z points at STAGE point x,y,z (else straight ahead)
 //   MOCK_XR_EXTENSIONS=a,b   replace the extension list offered
 //   MOCK_XR_NO_LOCAL_FLOOR=1 refuse LOCAL_FLOOR spaces
 //
@@ -59,8 +73,9 @@
 #include <openxr/openxr_loader_negotiation.h>
 
 #include "xrmock_vk.h"
+#include "xrmock_png.h"
 
-static FILE *gTrace, *gTiming;
+static FILE *gTrace, *gTiming, *gShift;
 static int gFrame = 0;  // xrWaitFrame calls so far (the frame number in the trace)
 static int gErrors = 0, gWarns = 0;
 
@@ -301,6 +316,29 @@ typedef struct { int used, kind; Pose offset; int hand; } Space;  // kind: refer
 static Space gSpaces[256];
 static int gSpaceCount = 0;
 static Pose gLocalOrigin, gLocalFloorOrigin;
+typedef struct { double t0, t1; int hand; XrVector3f at; } AimKey;  // MOCK_XR_AIM
+static AimKey gAim[32];
+static int gAimCount = -1;
+static Q aimAt(int hand, XrVector3f from, double t) {
+    if (gAimCount < 0) {
+        gAimCount = 0;
+        const char* e = getenv("MOCK_XR_AIM");
+        for (const char* p = e; p && *p && gAimCount < 32; p = strchr(p, ';') ? strchr(p, ';') + 1 : NULL) {
+            AimKey k;
+            char h[8] = "";
+            if (sscanf(p, "%lf-%lf:%7[a-z]:%f,%f,%f", &k.t0, &k.t1, h, &k.at.x, &k.at.y, &k.at.z) == 6) {
+                k.hand = strcmp(h, "left") != 0;
+                gAim[gAimCount++] = k;
+            } else fprintf(stderr, "xrmock: MOCK_XR_AIM: cannot read '%s'\n", p);
+        }
+    }
+    for (int i = 0; i < gAimCount; i++)
+        if (gAim[i].hand == hand && t >= gAim[i].t0 && t < gAim[i].t1) {
+            float dx = gAim[i].at.x - from.x, dy = gAim[i].at.y - from.y, dz = gAim[i].at.z - from.z;
+            return qeuler(atan2f(-dx, -dz), atan2f(dy, sqrtf(dx * dx + dz * dz)), 0);
+        }
+    return (Q){0, 0, 0, 1};
+}
 
 static XrResult XRAPI_CALL mEnumRefSpaces(XrSession s, uint32_t cap, uint32_t* count, XrReferenceSpaceType* t) {
     (void)s;
@@ -351,7 +389,11 @@ static Pose spaceInStage(const Space* s, double t) {
     case XR_REFERENCE_SPACE_TYPE_VIEW: base = headPoseAt(t); break;
     case XR_REFERENCE_SPACE_TYPE_LOCAL: base = gLocalOrigin; break;
     case XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR: base = gLocalFloorOrigin; break;
-    case -1: base = (Pose){{0, 0, 0, 1}, {s->hand ? 0.25f : -0.25f, 1.15f, -0.35f}}; break;
+    case -1: {
+        XrVector3f at = {s->hand ? 0.25f : -0.25f, 1.15f, -0.35f};
+        base = (Pose){aimAt(s->hand, at, t), at};
+        break;
+    }
     default: base = (Pose){{0, 0, 0, 1}, {0, 0, 0}}; break;
     }
     return pcompose(base, s->offset);
@@ -459,6 +501,7 @@ typedef struct {
     int acquired, next, waited;
     int lastReleased;       // image index, -1 none yet
     int everReleased;
+    int releases, probed;   // MOCK_XR_SHIFT: images released so far, and the release last probed
 } Chain;
 static Chain gChains[MAXSC];
 static int gChainCount = 0;
@@ -592,6 +635,7 @@ static XrResult XRAPI_CALL mRelease(XrSwapchain sc, const XrSwapchainImageReleas
     // The image released is the one acquired first: images are acquired in rotation.
     c->lastReleased = ((c->next - c->acquired) % c->count + c->count) % c->count;
     c->everReleased = 1;
+    c->releases++;
     c->acquired--;
     c->waited--;
     trace("release sc%d", chainId(sc));
@@ -651,6 +695,12 @@ static void summary(void) {
     if (gSummaryDone) return;
     gSummaryDone = 1;
     fprintf(stderr, "xrmock: summary: %d errors, %d warnings; %d frames ended\n", gErrors, gWarns, gEnded);
+    if (gShift) fflush(gShift);
+    {
+        char line[512];
+        mockvk_compositor_stop(line, sizeof line);
+        if (line[0]) fprintf(stderr, "xrmock: %s\n", line);
+    }
     if (gNIntervals > 1) {
         qsort(gIntervals, (size_t)gNIntervals, sizeof(float), cmpf);
         double sum = 0;
@@ -691,6 +741,12 @@ static XrResult XRAPI_CALL mBeginSession(XrSession s, const XrSessionBeginInfo* 
     if (bi->primaryViewConfigurationType != XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO) return XR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED;
     gT0 = nowNs();
     initOrigins();
+    if (getenv("MOCK_XR_COMPOSITOR")) {  // "lead_ms[,from_s]": the compositor model (xrmock_vk.c)
+        double lead = 4.0, from = 0.0;
+        sscanf(getenv("MOCK_XR_COMPOSITOR"), "%lf,%lf", &lead, &from);
+        int pr = mockvk_compositor_start(gT0, gPeriod, lead, from, gEyeW, gEyeH, getenv("MOCK_XR_COMPOSITOR_LOG"));
+        fprintf(stderr, "xrmock: compositor model %s (global priority %d), its job %.1f ms before each vsync\n", pr >= 0 ? "on" : "FAILED", pr, lead);
+    }
     const char* secs = getenv("MOCK_XR_SECONDS");
     double sec = secs ? atof(secs) : 20.0;
     gEndAt = sec > 0 ? gT0 + (int64_t)(sec * 1e9) : 0;
@@ -758,6 +814,16 @@ static XrResult XRAPI_CALL mWaitFrame(XrSession s, const XrFrameWaitInfo* wi, Xr
     int64_t ret = nowNs();
     fs->predictedDisplayTime = wake + (int64_t)gPipeline * gPeriod;
     fs->predictedDisplayPeriod = gPeriod;
+    static int blipEvery = -1;
+    static int64_t blipPeriod;
+    if (blipEvery < 0) {
+        const char* b = getenv("MOCK_XR_PERIOD_BLIP");
+        int n = 0;
+        double ms = 0;
+        blipEvery = b && sscanf(b, "%d:%lf", &n, &ms) == 2 && n > 0 ? n : 0;
+        blipPeriod = (int64_t)(ms * 1e6);
+    }
+    if (blipEvery && (gFrame + 1) % blipEvery == 0) fs->predictedDisplayPeriod = blipPeriod;
     fs->shouldRender = XR_TRUE;
     gWaits++;
     gFrame++;
@@ -795,8 +861,126 @@ static XrResult XRAPI_CALL mBeginFrame(XrSession s, const XrFrameBeginInfo* bi) 
     return r;
 }
 
+
+// ---- MOCK_XR_SHIFT: what the eye images show against the poses they come with -------------------------------
+// Per refresh ("disp" lines): the projection layer's eye 0 pose against the head's true eye 0 pose at the display
+// time (what a compositor's reprojection has to correct: rotation in degrees, translation in mm), which release of
+// each eye's swapchain the layer shows, and the locate time of its poses.  Per new eye image ("img" lines): the
+// image's centre is copied without stalling the loop (mockvk_probe_submit), and its shift against a reference image
+// (the eye's first image MOCK_XR_SHIFT_REF seconds into the session, 30 by default) is measured by correlating
+// gradient profiles: dy from the rows (a nod about the eyes' axis), dx from the columns (a turn).  Converted to
+// degrees with the eye's focal length, that is the head rotation the image content was rendered for; the layer's
+// pose is what the image claims.  tools/xrmock/shift-report.py compares them.
+static double gShiftRef = 30.0, gDumpFrom = 1e9, gDumpTo = -1;
+static const char* gDumpDir;
+#define SHIFT_SUB 2
+#define SHIFT_TAGS 64
+static struct { int frame, eye, sc, rel; XrTime display, located; XrPosef pose; XrFovf fov; int used, w, h; } gShiftMeta[SHIFT_TAGS];
+static int gShiftTag;
+static struct { int ok, w, h; float* rows; float* cols; XrPosef pose; } gShiftRefImg[2];
+static float* gShiftBuf;
+static void fwdOf(XrPosef p, float* pitch, float* yaw) {
+    XrVector3f f = qrot(fromXr(p).q, (XrVector3f){0, 0, -1});
+    *pitch = asinf(f.y < -1 ? -1 : f.y > 1 ? 1 : f.y) / D2R;
+    *yaw = atan2f(-f.x, -f.z) / D2R;
+}
+static float qangle(Q a, Q b) {  // degrees between two orientations
+    float d = fabsf(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w);
+    return 2.0f * acosf(d > 1 ? 1 : d) / D2R;
+}
+// gradient profiles of a w x h luma image: rows (the mean of the middle half of the columns), cols (of the rows)
+static void profiles(const float* im, int w, int h, float* rows, float* cols) {
+    for (int y = 0; y < h; y++) {
+        double a = 0;
+        for (int x = w / 4; x < w * 3 / 4; x++) a += im[(size_t)y * w + x];
+        rows[y] = (float)(a / (w / 2));
+    }
+    for (int x = 0; x < w; x++) {
+        double a = 0;
+        for (int y = h / 4; y < h * 3 / 4; y++) a += im[(size_t)y * w + x];
+        cols[x] = (float)(a / (h / 2));
+    }
+    for (int y = 0; y + 1 < h; y++) rows[y] = rows[y + 1] - rows[y];
+    rows[h - 1] = 0;
+    for (int x = 0; x + 1 < w; x++) cols[x] = cols[x + 1] - cols[x];
+    cols[w - 1] = 0;
+}
+// the shift s (in profile samples) maximising the normalised correlation of ref[i] with cur[i + s], i in the middle
+// of the profile, |s| <= n / 4; sub-sample by a parabola.  *q: the peak's correlation.
+static double bestShift(const float* ref, const float* cur, int n, double* q) {
+    int lo = n / 4 + 2, hi = n - n / 4 - 2, S = n / 4 - 2, bi = 0;
+    double best = -2, sc[2 * 512 + 3];
+    if (S > 512) S = 512;
+    for (int s = -S; s <= S; s++) {
+        double a = 0, b = 0, c = 0;
+        for (int i = lo; i < hi; i++) {
+            double r = ref[i], u = cur[i + s];
+            a += r * u, b += r * r, c += u * u;
+        }
+        double v = b > 0 && c > 0 ? a / sqrt(b * c) : 0;
+        sc[s + S] = v;
+        if (v > best) best = v, bi = s;
+    }
+    *q = best;
+    double off = 0;
+    if (bi > -S && bi < S) {
+        double l = sc[bi - 1 + S], m = sc[bi + S], r = sc[bi + 1 + S], d = l - 2 * m + r;
+        if (d < 0) off = 0.5 * (l - r) / d;
+    }
+    return bi + off;
+}
+static void shiftCollect(void) {
+    int tag, w, h;
+    while (gShiftBuf && mockvk_probe_collect(&tag, &w, &h, gShiftBuf, SHIFT_SUB)) {
+        int k = tag % SHIFT_TAGS;
+        if (!gShiftMeta[k].used) continue;
+        gShiftMeta[k].used = 0;
+        int e = gShiftMeta[k].eye;
+        double t = (double)(gShiftMeta[k].display - gT0) / 1e9;
+        if (gDumpDir && t >= gDumpFrom && t <= gDumpTo) {  // MOCK_XR_SHIFT_DUMP: the probed luma as a PGM
+            char path[600];
+            snprintf(path, sizeof(path), "%s/f%05d_e%d.pgm", gDumpDir, gShiftMeta[k].frame, e);
+            FILE* f = fopen(path, "wb");
+            if (f) {
+                fprintf(f, "P5\n%d %d\n255\n", w, h);
+                for (int i = 0; i < w * h; i++) fputc((int)(gShiftBuf[i] + 0.5f), f);
+                fclose(f);
+            }
+            float lp0, ly0;
+            fwdOf(gShiftMeta[k].pose, &lp0, &ly0);
+            fprintf(gShift, "dump frame=%d eye=%d t=%.4f loc_ms=%.3f pitch=%.4f yaw=%.4f\n", gShiftMeta[k].frame, e, t, (double)(gShiftMeta[k].located - gT0) / 1e6, lp0, ly0);
+        }
+        float* rows = (float*)malloc(sizeof(float) * (size_t)(w + h));
+        float* cols = rows + h;
+        profiles(gShiftBuf, w, h, rows, cols);
+        if (!gShiftRefImg[e].ok) {
+            if (t < gShiftRef) { free(rows); continue; }
+            gShiftRefImg[e] = (typeof(gShiftRefImg[e])){1, w, h, rows, cols, gShiftMeta[k].pose};
+            float rp, ry;
+            fwdOf(gShiftMeta[k].pose, &rp, &ry);
+            fprintf(gShift, "ref eye=%d frame=%d t=%.4f pitch=%.4f yaw=%.4f\n", e, gShiftMeta[k].frame, t, rp, ry);
+            continue;
+        }
+        if (w != gShiftRefImg[e].w || h != gShiftRefImg[e].h) { free(rows); continue; }
+        double qy, qx;
+        double dy = bestShift(gShiftRefImg[e].rows, rows, h, &qy) * SHIFT_SUB, dx = bestShift(gShiftRefImg[e].cols, cols, w, &qx) * SHIFT_SUB;
+        const XrFovf* f = &gShiftMeta[k].fov;
+        double fy = (double)gShiftMeta[k].h / (tan(f->angleUp) - tan(f->angleDown)), fx = (double)gShiftMeta[k].w / (tan(f->angleRight) - tan(f->angleLeft));
+        float lp, ly, rp, ry;
+        fwdOf(gShiftMeta[k].pose, &lp, &ly);
+        fwdOf(gShiftRefImg[e].pose, &rp, &ry);
+        fprintf(gShift, "img frame=%d eye=%d sc=%d rel=%d t=%.4f loc_ms=%.3f layer_dpitch=%.4f layer_dyaw=%.4f img_dpitch=%.4f img_dyaw=%.4f qy=%.3f qx=%.3f\n",
+                gShiftMeta[k].frame, e, gShiftMeta[k].sc, gShiftMeta[k].rel, t, (double)(gShiftMeta[k].located - gT0) / 1e6, lp - rp, ly - ry,
+                atan(dy / fy) / D2R, -atan(dx / fx) / D2R, qy, qx);
+        free(rows);
+    }
+}
+static void shiftLayer(int frame, const XrCompositionLayerProjection* p, XrTime displayTime, XrTime located);
+
 static int samePose(const XrPosef* a, const XrPosef* b) { return !memcmp(a, b, sizeof(XrPosef)); }
+static XrTime gLastLocated;  // (checkPoses: the locate time of the layer just checked, 0 if not from a locate)
 static void checkPoses(const XrCompositionLayerProjection* p, XrTime displayTime) {
+    gLastLocated = 0;
     if (p->viewCount != 2) {
         xrmock_error("projection layer with %u views", p->viewCount);
         return;
@@ -820,11 +1004,46 @@ static void checkPoses(const XrCompositionLayerProjection* p, XrTime displayTime
         return;
     }
     XrTime t = gLocates[both].time;
+    gLastLocated = t;
     if (t == displayTime) gPoseSameTime++;
     else if (t < displayTime) gPoseEarlier++;
     else gPoseLater++;
     long k = lround((double)(displayTime - t) / (double)gPeriod);
     gPoseAge[k < 0 ? 0 : k > 3 ? 5 : k + 1]++;
+}
+
+static void shiftLayer(int frame, const XrCompositionLayerProjection* p, XrTime displayTime, XrTime located) {
+    if (!gShift || p->viewCount != 2) return;
+    shiftCollect();
+    double t = (double)(displayTime - gT0) / 1e9;
+    Space* base = spaceOf(p->space);
+    if (!base) return;
+    Pose head = headPoseAt(t), inBase = pinv(spaceInStage(base, t));
+    Pose eye0 = pcompose(inBase, pcompose(head, (Pose){{0, 0, 0, 1}, {-gIpd * 0.5f, 0, 0}}));
+    Pose lay = fromXr(p->views[0].pose);
+    float dx = lay.p.x - eye0.p.x, dy = lay.p.y - eye0.p.y, dz = lay.p.z - eye0.p.z;
+    float lp, ly, tp, ty;
+    fwdOf(p->views[0].pose, &lp, &ly);
+    fwdOf(toXr(eye0), &tp, &ty);
+    int rel[2] = {-1, -1};
+    for (int v = 0; v < 2; v++) {
+        Chain* c = chainOf(p->views[v].subImage.swapchain);
+        if (!c) continue;
+        rel[v] = c->releases;
+        if (c->releases != c->probed && c->lastReleased >= 0) {
+            int k = gShiftTag % SHIFT_TAGS;
+            // the centre two thirds of the eye
+            int w = c->w * 2 / 3, h = c->h * 2 / 3;
+            if (!gShiftBuf) gShiftBuf = (float*)malloc(sizeof(float) * (size_t)(w / SHIFT_SUB + 1) * (size_t)(h / SHIFT_SUB + 1));
+            if (mockvk_probe_submit(c->images, c->lastReleased, p->views[v].subImage.imageArrayIndex, (c->w - w) / 2, (c->h - h) / 2, w, h, gShiftTag) >= 0) {
+                gShiftMeta[k] = (typeof(gShiftMeta[k])){frame, v, chainId(p->views[v].subImage.swapchain), c->releases, displayTime, located, p->views[v].pose, p->views[v].fov, 1, c->w, c->h};
+                gShiftTag++;
+                c->probed = c->releases;
+            }
+        }
+    }
+    fprintf(gShift, "disp frame=%d t=%.4f loc_ms=%.3f rel0=%d rel1=%d layer_pitch=%.4f layer_yaw=%.4f true_pitch=%.4f true_yaw=%.4f rot_err=%.4f pos_err_mm=%.3f\n",
+            frame, t, located ? (double)(located - gT0) / 1e6 : -1.0, rel[0], rel[1], lp, ly, tp, ty, qangle(lay.q, eye0.q), 1000.0f * sqrtf(dx * dx + dy * dy + dz * dz));
 }
 
 // Checks a sub-image against its swapchain; returns the chain or NULL.
@@ -860,6 +1079,76 @@ static int fovOk(const XrFovf* f) {
     return f->angleLeft < f->angleRight && f->angleDown < f->angleUp && f->angleLeft > -1.5707f && f->angleRight < 1.5707f && f->angleDown > -1.5707f && f->angleUp < 1.5707f;
 }
 
+// MOCK_XR_SHOT_VIEW: the left eye's view of the layers (a check of where quad layers land: menus, lasers)
+static float srgbToLin(uint8_t v) {
+    float s = v / 255.0f;
+    return s <= 0.04045f ? s / 12.92f : powf((s + 0.055f) / 1.055f, 2.4f);
+}
+static void compositeView(int frame, const XrFrameEndInfo* ei) {
+    const XrCompositionLayerProjection* proj = NULL;
+    for (uint32_t i = 0; i < ei->layerCount && !proj; i++)
+        if (ei->layers[i]->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) proj = (const XrCompositionLayerProjection*)ei->layers[i];
+    if (!proj || !proj->viewCount || !spaceOf(proj->space)) return;
+    const XrCompositionLayerProjectionView* pv = &proj->views[0];
+    Chain* pc = chainOf(pv->subImage.swapchain);
+    if (!pc || pc->lastReleased < 0) return;
+    int W = pv->subImage.imageRect.extent.width, H = pv->subImage.imageRect.extent.height, OW = W / 2, OH = H / 2;
+    uint8_t* eye = mockvk_read_rgba(pc->images, pc->lastReleased, pv->subImage.imageArrayIndex, W, H);
+    if (!eye) return;
+    double ts = (double)(ei->displayTime - gT0) / 1e9;
+    Pose cam = pcompose(spaceInStage(spaceOf(proj->space), ts), fromXr(pv->pose));
+    float* acc = malloc(sizeof(float) * 3 * (size_t)OW * OH);
+    for (int y = 0; y < OH; y++)
+        for (int x = 0; x < OW; x++)
+            for (int c = 0; c < 3; c++) acc[3 * (y * OW + x) + c] = srgbToLin(eye[4 * ((2 * y) * W + 2 * x) + c]);
+    free(eye);
+    float tl = tanf(pv->fov.angleLeft), tr = tanf(pv->fov.angleRight), tu = tanf(pv->fov.angleUp), td = tanf(pv->fov.angleDown);
+    for (uint32_t i = 0; i < ei->layerCount; i++) {
+        if (ei->layers[i]->type != XR_TYPE_COMPOSITION_LAYER_QUAD) continue;
+        const XrCompositionLayerQuad* q = (const XrCompositionLayerQuad*)ei->layers[i];
+        Chain* c = chainOf(q->subImage.swapchain);
+        if (!c || c->lastReleased < 0 || !spaceOf(q->space)) continue;
+        int iw = q->subImage.imageRect.extent.width, ih = q->subImage.imageRect.extent.height;
+        uint8_t* img = mockvk_read_rgba(c->images, c->lastReleased, q->subImage.imageArrayIndex, iw, ih);
+        if (!img) continue;
+        Pose qp = pcompose(spaceInStage(spaceOf(q->space), ts), fromXr(q->pose));
+        Q qi = qconj(qp.q);
+        XrVector3f o0 = {cam.p.x - qp.p.x, cam.p.y - qp.p.y, cam.p.z - qp.p.z};
+        XrVector3f o = qrot(qi, o0);
+        int blend = (q->layerFlags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT) != 0;
+        for (int y = 0; y < OH; y++)
+            for (int x = 0; x < OW; x++) {
+                XrVector3f dc = {tl + (tr - tl) * (x + 0.5f) / OW, tu + (td - tu) * (y + 0.5f) / OH, -1};
+                XrVector3f d = qrot(qi, qrot(cam.q, dc));
+                if (fabsf(d.z) < 1e-7f) continue;
+                float t = -o.z / d.z;
+                if (t <= 0) continue;
+                float u = (o.x + d.x * t) / q->size.width + 0.5f, v = 0.5f - (o.y + d.y * t) / q->size.height;
+                if (u < 0 || u >= 1 || v < 0 || v >= 1) continue;
+                const uint8_t* s = img + 4 * ((int)(v * ih) * iw + (int)(u * iw));
+                float a = blend ? s[3] / 255.0f : 1;
+                float* p = acc + 3 * (y * OW + x);
+                for (int k = 0; k < 3; k++) p[k] = srgbToLin(s[k]) + p[k] * (1 - a);
+            }
+        free(img);
+    }
+    uint8_t* out = malloc(4 * (size_t)OW * OH);
+    for (size_t k = 0; k < (size_t)OW * OH; k++) {
+        for (int c = 0; c < 3; c++) {
+            float l = acc[3 * k + c];
+            l = l < 0 ? 0 : l > 1 ? 1 : l;
+            float sv = l <= 0.0031308f ? l * 12.92f : 1.055f * powf(l, 1 / 2.4f) - 0.055f;
+            out[4 * k + c] = (uint8_t)(sv * 255 + 0.5f);
+        }
+        out[4 * k + 3] = 255;
+    }
+    char path[512];
+    snprintf(path, sizeof path, "%s/f%04d_view.png", gShotDir, frame);
+    int rc = png_write_rgba(path, out, OW, OH);
+    trace("shot view %s", rc ? "FAILED" : "ok");
+    free(acc), free(out);
+}
+
 static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
     (void)s;
     if (!gSessionRunning) return XR_ERROR_SESSION_NOT_RUNNING;
@@ -884,6 +1173,7 @@ static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
         if (l->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
             const XrCompositionLayerProjection* p = (const XrCompositionLayerProjection*)l;
             checkPoses(p, ei->displayTime);
+            shiftLayer(frame, p, ei->displayTime, gLastLocated);
             snprintf(t, sizeof(t), " proj[flags=%llx", (unsigned long long)p->layerFlags);
             strcat(buf, t);
             for (uint32_t v = 0; v < p->viewCount; v++) {
@@ -928,6 +1218,7 @@ static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
             strcat(buf, t);
         }
     }
+    if (want && getenv("MOCK_XR_SHOT_VIEW")) compositeView(frame, ei);
     double margin = (double)(gBeginRec.predicted - end) / 1e6;
     double deadline = gDeadlineMs >= 0 ? gDeadlineMs : (double)gPeriod / 2e6;
     int late = margin < deadline;
@@ -1214,6 +1505,10 @@ static void init(void) {
     done = 1;
     const char* v;
     if ((v = getenv("MOCK_XR_TRACE"))) gTrace = fopen(v, "w");
+    if ((v = getenv("MOCK_XR_SHIFT"))) gShift = fopen(v, "w");
+    if ((v = getenv("MOCK_XR_SHIFT_REF"))) gShiftRef = atof(v);
+    if ((v = getenv("MOCK_XR_SHIFT_DUMP"))) gDumpDir = v;
+    if ((v = getenv("MOCK_XR_SHIFT_DUMP_AT"))) sscanf(v, "%lf,%lf", &gDumpFrom, &gDumpTo);
     if ((v = getenv("MOCK_XR_TIMING"))) {
         gTiming = fopen(v, "w");
         if (gTiming)

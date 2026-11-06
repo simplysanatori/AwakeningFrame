@@ -13,7 +13,8 @@
 # Settings for one launch from the Steam library, which passes no environment of its own: VAR=value lines
 # in <program folder>/../session.env (e.g. AF_REFRESH_HZ=90, LARECOMP_XR_EYE_SCALE=0.8).
 # Variables: AF_REFRESH_HZ (72, 90 or 120; default: the VR tab's Refresh Rate, else 120), AF_FPS=60 (a test: 60 fps at
-# 90 Hz, frames alternating one and two refreshes; the VR tab's third Refresh Rate choice does the same), AF_VRTIMING=0 (no compositor log), AF_VRCMD,
+# 90 Hz, frames alternating one and two refreshes; the VR tab's third Refresh Rate choice does the same), AF_VRTIMING=0 (no compositor log), AF_THROTTLE=1 (a test: SteamVR
+# paces the game to every other refresh and makes the second refresh itself), AF_VRCMD,
 # AF_HEADSET_FLAG, AF_LOGS, AF_KEEP (sessions of logs kept, default 12), LARECOMP_DATA_ROOT.
 HERE=$(dirname "$(readlink -f "$0")")
 ROOT=$(dirname "$HERE")
@@ -113,7 +114,7 @@ else
     # paces its own 60 fps and a smoothed frame ghosts). SteamAppId is set by Steam when launched from the library.
     VRCMD=${AF_VRCMD:-/opt/steamvr/bin/linuxarm64/vrcmd}
     if [ -n "$SteamAppId" ] && [ -x "$VRCMD" ]; then
-        for kv in preferredRefreshRate=$HZ framesToThrottle=0 additionalFramesToPredict=0 motionSmoothingOverride=2; do
+        for kv in preferredRefreshRate=$HZ framesToThrottle=${AF_THROTTLE:-0} additionalFramesToPredict=0 motionSmoothingOverride=2; do
             "$VRCMD" --set-settings-int "steam.app.$SteamAppId.${kv%=*}" "${kv#*=}" > /dev/null 2>&1 ||
                 log "could not set SteamVR's ${kv%=*} for the game (is SteamVR running?)"
         done

@@ -16,7 +16,7 @@
 #define SCREEN_X 15.0f    // one screen cell, game units (triforce.c)
 #define SCREEN_Z 12.0f
 #define CUT_JUMP 12.0f    // the game camera's focus moving this far in one frame: a camera cut (a warp, a door)
-#define CUT_FAR 24.0f     // the anchor this far from where it should be: snap (as the comfort lane's follow)
+#define CUT_FAR 24.0f     // the anchor this far from where it should be: snap (as the Follow Mode's follow)
 #define SIDE_THIN 6.0f    // a zone thinner than this in z is a side view (as cam_pivot / widescreen.c)
 #define SIDE_PITCH 12.0f  // degrees below the horizon: a side view is a wall at about eye height
 #define MIN_ELEV 20.0f    // degrees: the head never looks along the table flatter than this (a tilt away is limited by it)
@@ -45,8 +45,8 @@ enum { F_IDLE, F_OUT, F_BLACK, F_HOLD, F_IN };
 static struct {
     bool init;
     // configuration (environment)
-    float s0, dist, pitch, tau;
-    bool have_pitch, have_table;
+    float s0, dist0, pitch, tau;  // dist0: the default Distance (LARECOMP_VR_DIST), what the full reset goes back to
+    bool have_table;
     float table[3];
     char path[1024];
     bool save;
@@ -72,6 +72,7 @@ static struct {
     int pend_turn;        // -1 / +1 snap turn waiting for black
     bool pend_recentre;
     bool pend_reset;      // reset view: yaw back to 0 (with the recentre) once black
+    bool pend_full;       // full reset view: and tilt, height, size and distance back to the defaults, once black
     bool snap;            // snap turning (LARECOMP_VR_TURN=snap, the VR tab's Turning), else smooth
     float turn_vel;       // smooth turning's speed now, degrees / s (positive: the view goes round to the right)
     bool pend_yaw;        // xr_rig_set_user changed the yaw
@@ -86,11 +87,12 @@ static float smooth01(float x) { x = clampf(x, 0, 1); return x * x * (3 - 2 * x)
 static void clamp_user(XrRigUser *u) {
     u->height = clampf(isfinite(u->height) ? u->height : 0, XR_RIG_HEIGHT_MIN, XR_RIG_HEIGHT_MAX);
     u->size = clampf(isfinite(u->size) ? u->size : 1, XR_RIG_SIZE_MIN, XR_RIG_SIZE_MAX);
-    u->tilt = clampf(isfinite(u->tilt) ? u->tilt : 0, XR_RIG_TILT_MIN, XR_RIG_TILT_MAX);
+    u->tilt = clampf(isfinite(u->tilt) ? u->tilt : XR_RIG_TILT_DEFAULT, XR_RIG_TILT_MIN, XR_RIG_TILT_MAX);
+    u->dist = clampf(isfinite(u->dist) ? u->dist : XR_RIG_DIST_DEFAULT, XR_RIG_DIST_MIN, XR_RIG_DIST_MAX);
     u->yaw = isfinite(u->yaw) ? remainderf(u->yaw, 360.0f) : 0;
 }
 
-// ---- persistence (height, size, tilt)
+// ---- persistence (height, size, tilt, distance)
 static void load(void) {
     FILE *f = R.path[0] ? fopen(R.path, "r") : NULL;
     if (!f) return;
@@ -100,17 +102,18 @@ static void load(void) {
         if (sscanf(line, "height = %f", &v) == 1) R.u.height = v;
         else if (sscanf(line, "size = %f", &v) == 1) R.u.size = v;
         else if (sscanf(line, "tilt = %f", &v) == 1) R.u.tilt = v;
+        else if (sscanf(line, "distance = %f", &v) == 1) R.u.dist = v;
     }
     fclose(f);
     clamp_user(&R.u);
-    LOG("[rig] %s: height %+.2f m, size x%.2f, tilt %.0f deg\n", R.path, R.u.height, R.u.size, R.u.tilt);
+    LOG("[rig] %s: height %+.2f m, distance %.2f m, size x%.2f, tilt %.0f deg\n", R.path, R.u.height, R.u.dist, R.u.size, R.u.tilt);
 }
 static void save_now(void) {
     R.dirty = false;
     if (!R.save || !R.path[0]) return;
     FILE *f = fopen(R.path, "w");
     if (!f) { LOG("[rig] cannot write %s\n", R.path); return; }
-    fprintf(f, "# AwakeningFrame table placement (docs/af/RIG.md)\nheight = %.3f\nsize = %.3f\ntilt = %.1f\n", R.u.height, R.u.size, R.u.tilt);
+    fprintf(f, "# AwakeningFrame table placement (docs/af/RIG.md)\nheight = %.3f\ndistance = %.3f\nsize = %.3f\ntilt = %.1f\n", R.u.height, R.u.dist, R.u.size, R.u.tilt);
     fclose(f);
 }
 static void mark_dirty(uint64_t now) { R.dirty = true, R.t_dirty = now; }
@@ -119,11 +122,11 @@ static void init(void) {
     const char *e;
     R.init = true;
     R.s0 = (e = getenv("LARECOMP_VR_SCALE")) && atof(e) > 0 ? (float)atof(e) : 0.067f;
-    R.dist = (e = getenv("LARECOMP_VR_DIST")) && atof(e) > 0 ? (float)atof(e) : 1.0f;
+    R.dist0 = (e = getenv("LARECOMP_VR_DIST")) && atof(e) > 0 ? clampf((float)atof(e), XR_RIG_DIST_MIN, XR_RIG_DIST_MAX) : XR_RIG_DIST_DEFAULT;
+    R.pitch = (e = getenv("LARECOMP_VR_PITCH")) && *e ? (float)atof(e) : XR_RIG_PITCH_DEFAULT;
     R.tau = (e = getenv("LARECOMP_VR_FOLLOW_TAU")) && atof(e) > 0 ? (float)atof(e) : 0.5f;
-    if ((e = getenv("LARECOMP_VR_PITCH"))) R.pitch = (float)atof(e), R.have_pitch = true;
     if ((e = getenv("LARECOMP_VR_TABLE")) && sscanf(e, "%f,%f,%f", &R.table[0], &R.table[1], &R.table[2]) == 3) R.have_table = true;
-    R.u = (XrRigUser){.height = 0, .size = 1, .tilt = 0, .yaw = 0};
+    R.u = (XrRigUser){.height = 0, .size = 1, .tilt = XR_RIG_TILT_DEFAULT, .dist = R.dist0, .yaw = 0};
     // the file: LARECOMP_VR_RIG, else next to LARECOMP_SETTINGS' file, else the data root (the working directory)
     const char *st = getenv("LARECOMP_SETTINGS");
     if ((e = getenv("LARECOMP_VR_RIG")) && *e) snprintf(R.path, sizeof R.path, "%s", e);
@@ -138,10 +141,17 @@ static void init(void) {
     if ((e = getenv("LARECOMP_VR_HEIGHT"))) R.u.height = (float)atof(e);
     if ((e = getenv("LARECOMP_VR_SIZE"))) R.u.size = (float)atof(e);
     if ((e = getenv("LARECOMP_VR_TILT"))) R.u.tilt = (float)atof(e);
+    if ((e = getenv("LARECOMP_VR_DISTANCE")) && atof(e) > 0) R.u.dist = (float)atof(e);
     if ((e = getenv("LARECOMP_VR_YAW"))) R.u.yaw = (float)atof(e);
     clamp_user(&R.u);
-    LOG("[rig] %.3f m per unit x%.2f, %.2f m away, height %+.2f m, tilt %.0f deg, yaw %.0f deg; settings file %s%s\n", R.s0, R.u.size,
-        R.dist, R.u.height, R.u.tilt, R.u.yaw, R.path, R.save ? "" : " (not saved)");
+    LOG("[rig] %.3f m per unit x%.2f, %.2f m away at %.0f deg below the horizon, height %+.2f m, tilt %.0f deg, yaw %.0f deg; settings file %s%s\n", R.s0, R.u.size,
+        R.u.dist, R.pitch, R.u.height, R.u.tilt, R.u.yaw, R.path, R.save ? "" : " (not saved)");
+}
+
+// the full view reset's: tilt, height, size and distance back to the defaults (the yaw is the short reset's); saved
+static void apply_full(void) {  // (locked)
+    R.u.height = 0, R.u.size = 1, R.u.tilt = XR_RIG_TILT_DEFAULT, R.u.dist = R.dist0;
+    mark_dirty(plat_now_ns());
 }
 
 // ---- the blink
@@ -152,6 +162,7 @@ static void advance(uint64_t now) {  // (locked)
         // no game frame since it went black (a menu): what needs none is done now, the rest at the next frame
         if (R.pend_recentre) xr_recentre(), R.pend_recentre = false;
         if (R.pend_reset) R.u.yaw = 0, R.turn_vel = 0, R.pend_reset = false;
+        if (R.pend_full) apply_full(), R.pend_full = false;
         R.phase = F_HOLD, R.t0 = now, R.t_hold = T_HOLD;
     } else if (R.phase == F_HOLD && t >= R.t_hold) R.phase = F_IN, R.t0 = now;
     else if (R.phase == F_IN && t >= R.t_in) R.phase = F_IDLE;
@@ -193,12 +204,17 @@ void xr_rig_set_user(const XrRigUser *in) {
     clamp_user(&u);
     pthread_mutex_lock(&g_mu);
     if (!R.init) init();
-    R.u.height = u.height, R.u.size = u.size, R.u.tilt = u.tilt;
+    R.u.height = u.height, R.u.size = u.size, R.u.tilt = u.tilt, R.u.dist = u.dist;
     if (fabsf(remainderf(u.yaw - R.u.yaw, 360.0f)) > 0.01f) R.pend_yaw = true, R.pend_yaw_deg = u.yaw, blink_out();
     mark_dirty(plat_now_ns());
     pthread_mutex_unlock(&g_mu);
 }
-void xr_rig_reset_user(void) { xr_rig_set_user(&(XrRigUser){.height = 0, .size = 1, .tilt = 0, .yaw = 0}); }
+void xr_rig_reset_user(void) {
+    XrRigUser u;
+    xr_rig_get_user(&u);  // (also makes the rig ready: dist0 is set)
+    u.height = 0, u.size = 1, u.tilt = XR_RIG_TILT_DEFAULT, u.dist = R.dist0, u.yaw = 0;
+    xr_rig_set_user(&u);
+}
 void xr_rig_set_turn_mode(int snap) {  // the VR tab's Turning: 1 snap, 0 smooth
     pthread_mutex_lock(&g_mu);
     if (!R.init) init();
@@ -209,6 +225,13 @@ void xr_rig_reset_view(void) {
     pthread_mutex_lock(&g_mu);
     if (!R.init) init();
     R.pend_reset = R.pend_recentre = true;
+    blink_out();
+    pthread_mutex_unlock(&g_mu);
+}
+void xr_rig_reset_view_full(void) {
+    pthread_mutex_lock(&g_mu);
+    if (!R.init) init();
+    R.pend_full = R.pend_reset = R.pend_recentre = true;
     blink_out();
     pthread_mutex_unlock(&g_mu);
 }
@@ -241,7 +264,7 @@ static float room_axis(float raw, float lo, float hi, float half) {
 static void table_point(bool side, float A[3], float *tilt_min) {
     float pitch = (side ? SIDE_PITCH : R.pitch) * DEG;
     if (R.have_table) memcpy(A, R.table, 12);
-    else A[0] = 0, A[1] = -R.dist * sinf(pitch), A[2] = -R.dist * cosf(pitch);
+    else A[0] = 0, A[1] = -R.u.dist * sinf(pitch), A[2] = -R.u.dist * cosf(pitch);
     A[1] += R.u.height;
     float n = sqrtf(A[0] * A[0] + A[1] * A[1] + A[2] * A[2]);
     float below = n > 1e-3f ? asinf(clampf(-A[1] / n, -1, 1)) / DEG : 45.0f;  // the table point's angle under the horizon
@@ -256,17 +279,18 @@ void xr_rig_update(const XrRigIn *in, XrRigPose *out) {
     float dt = R.t_last ? (float)((now - R.t_last) / 1e9) : 0;
     if (dt > 0.1f) dt = 0.1f;
     R.t_last = now;
-    if (!R.have_pitch) {  // the game camera's own pitch at the first frame (about 45 at Mabe), so the first look is the game's
-        float p = asinf(clampf(-in->fwd[1], -1, 1)) / DEG;
-        R.pitch = clampf(p, 25.0f, 65.0f), R.have_pitch = true;
-    }
     advance(now);
 
     // the player's controls
     XrRigInput ri;
     xr_input_rig(&ri);
     int snap = xr_input_take_snap();
-    if (xr_input_take_reset_view()) R.pend_reset = R.pend_recentre = true, blink_out();
+    {   // both sticks: the short reset at once (0.1 s), the full one when they have been held 2 s from the press (xr_input.c); the
+        // full one does the short one's yaw and recentre too, so when both are taken in one frame it is the only one
+        bool full = xr_input_take_reset_full(), shrt = xr_input_take_reset_view();
+        if (full) R.pend_full = R.pend_reset = R.pend_recentre = true, blink_out();
+        else if (shrt) R.pend_reset = R.pend_recentre = true, blink_out();
+    }
     if (snap && R.snap && R.area != XR_RIG_SIDE) R.pend_turn = snap, blink_out();
     {   // smooth turning: the stick sets a turn speed (an eased curve of the deflection), the speed follows it with a lag
         float t = fabsf(ri.turn) > TURN_DEAD ? (fabsf(ri.turn) - TURN_DEAD) / (1 - TURN_DEAD) : 0;
@@ -293,19 +317,28 @@ void xr_rig_update(const XrRigIn *in, XrRigPose *out) {
         }
         if (R.pend_yaw) R.u.yaw = R.pend_yaw_deg;
         if (R.pend_reset) {
+            XrRigUser was = R.u;
             R.u.yaw = 0, R.turn_vel = 0, R.resets++;
-            LOG("[rig] reset view: yaw 0 deg (the game's own angle), tilt %.0f deg, height %+.2f m, size x%.2f kept\n", R.u.tilt, R.u.height, R.u.size);
-            if (view_toast_show) view_toast_show("View Reset");
+            if (R.pend_full) {
+                apply_full();
+                LOG("[rig] full view reset: yaw %.0f -> 0 deg, tilt %.0f -> %.0f deg, height %+.2f -> %+.2f m, distance %.2f -> %.2f m, size x%.2f -> x%.2f\n",
+                    was.yaw, was.tilt, R.u.tilt, was.height, R.u.height, was.dist, R.u.dist, was.size, R.u.size);
+                if (view_toast_show) view_toast_show("Full View Reset");
+            } else {
+                LOG("[rig] reset view: yaw %.0f -> 0 deg (the game's own angle), tilt %.0f deg, height %+.2f m, distance %.2f m, size x%.2f kept\n", was.yaw,
+                    R.u.tilt, R.u.height, R.u.dist, R.u.size);
+                if (view_toast_show) view_toast_show("View Reset");
+            }
         }
         float hold = T_HOLD;
         if (R.pend_recentre) {
             xr_recentre(), R.recentres++, hold = T_HOLD_RECENTRE;
             LOG("[rig] recentre: the table goes in front of the player again\n");
         }
-        R.pend_turn = 0, R.pend_yaw = R.pend_recentre = R.pend_reset = false;
+        R.pend_turn = 0, R.pend_yaw = R.pend_recentre = R.pend_reset = R.pend_full = false;
         R.phase = F_HOLD, R.t0 = now, R.t_hold = hold;
     }
-    if ((R.pend_turn || R.pend_yaw || R.pend_recentre || R.pend_reset) && (R.phase == F_IDLE || R.phase == F_IN)) blink_out();  // (asked mid-blink)
+    if ((R.pend_turn || R.pend_yaw || R.pend_recentre || R.pend_reset || R.pend_full) && (R.phase == F_IDLE || R.phase == F_IN)) blink_out();  // (asked mid-blink)
 
     // the area and the anchor
     int kind;
@@ -313,7 +346,7 @@ void xr_rig_update(const XrRigIn *in, XrRigPose *out) {
     bool cut = false;
     float jump2 = 0;
     for (int i = 0; i < 3; i++) jump2 += (in->raw[i] - R.last_raw[i]) * (in->raw[i] - R.last_raw[i]);
-    if (in->explicit_follow) {  // the comfort lane's follow as it is; jumps still blink
+    if (in->explicit_follow) {  // the Follow Mode's follow as it is; jumps still blink
         kind = classify(in);
         memcpy(target, in->followed, sizeof target);
         float d2 = 0;
@@ -385,9 +418,9 @@ void xr_rig_update(const XrRigIn *in, XrRigPose *out) {
     static uint64_t logged;
     if (logrig > 0 && in->frame >= logged + (uint64_t)logrig) {
         logged = in->frame;
-        LOG("[rig] f%llu %s anchor (%.2f %.2f %.2f) raw (%.2f %.2f %.2f) A (%.2f %.2f %.2f) s %.4f yaw %.0f tilt %.1f height %+.2f size x%.2f fade %.2f\n",
+        LOG("[rig] f%llu %s anchor (%.2f %.2f %.2f) raw (%.2f %.2f %.2f) A (%.2f %.2f %.2f) s %.4f yaw %.0f tilt %.1f height %+.2f dist %.2f size x%.2f fade %.2f\n",
             (unsigned long long)in->frame, area_name(R.area), R.p[0], R.p[1], R.p[2], in->raw[0], in->raw[1], in->raw[2], out->A[0], out->A[1],
-            out->A[2], out->s, yaw / DEG, tilt / DEG, R.u.height, R.u.size, fade_now(now));
+            out->A[2], out->s, yaw / DEG, tilt / DEG, R.u.height, R.u.dist, R.u.size, fade_now(now));
     }
     pthread_mutex_unlock(&g_mu);
 }

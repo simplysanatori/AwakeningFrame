@@ -46,6 +46,8 @@ typedef struct {
     bool map_placed, unmap_reserve;  // VK_EXT_map_memory_placed: driver memory mapped at a given address (exec.c guest_heap_dmabuf)
     bool heap_dmabuf_default;  // the heap as driver memory by default: RADV and Mesa's PanVK (device.c; LARECOMP_VK_HEAP_DMABUF overrides)
     bool heap_no_split;        // ... whose mapping page protection must never split (Turnip / msm: exec.c backend_guest_heap_prepare)
+    bool heap_sparse;          // ... made lazily: a sparse buffer, driver memory per granule on first use (exec.c heap_lazy_try)
+    VkQueue sparse_queue;      // (heap_sparse: the queue its binds go to - a sparse-only family's own, else NULL: the main queue)
     bool ssbo_chunks;  // stores and atomics from fragment and vertex shaders (exec.c: the heap in chunks counts misses)
     bool lazy_heap, bda;  // the heap imported chunk by chunk (device.c lazy_heap_predicted), buffer device addresses enabled for it
     bool heap_probe;      // one import tried at the start, lazy chunks if it runs out of memory (exec.c whole_import_probe_oom)
@@ -143,7 +145,8 @@ static inline bool vk_tex_twinned(const NvnTexture *t) {  // its backend has (or
     return b && (b->is_twin || b->twin || b->mv_tw);
 }
 // ---- multiview storage (LARECOMP_MV=1, VR mode): twins are layer 1 of their eye-0 image
-bool vk_mv_on(void);       // LARECOMP_MV=1 and the stereo executor wanted (read once)
+bool vk_mv_wanted(void);   // the stereo executor wanted and LARECOMP_MV not 0 (default on)
+bool vk_mv_on(void);       // multiview storage: wanted and the device has multiview (LARECOMP_MV=1: even without)
 extern int vk_eye_layer;   // the layer single-layer views of twinned images take (the eye being executed: 0 / 1)
 static inline bool vk_b_layered(const TexBackend *b) { return b && b->mv2 && b->mv_tw; }
 void vk_mv_latch(void);    // (an eye-1 run starts, or a multiview run) the layered candidates not presented become twins

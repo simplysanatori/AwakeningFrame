@@ -1,11 +1,11 @@
-# VR render passes and the pass diet (AwakeningFrame diet lane)
+# VR render passes and the pass diet
 
 Where a VR game frame's GPU time goes, both eyes, and what VR mode leaves out (`runtime/nvn/vulkan/vr_diet.c`).
 
 ## How it was measured
 
-`LARECOMP_GPUPROF_AT=<frame>` under xrmock (1728² eyes, 90 Hz, game at 30 fps), `tools-local/dietbench.sh` (a copy of
-the perf lane's `vrbench.sh`). Each `[gpuprof]` row is the GPU time from one mark (a pass, copy or dispatch) to the next.
+`LARECOMP_GPUPROF_AT=<frame>` under xrmock (1728² eyes, 90 Hz, game at 30 fps), a local bench script around it
+(not in this repository). Each `[gpuprof]` row is the GPU time from one mark (a pass, copy or dispatch) to the next.
 VR rows carry `e0` / `e1` and the first draw's fragment shader address, target and textures.
 `tools/gpuprof_groups.py run.log [n]` sums them into the groups below by fragment shader hash. Eye 0 also holds the
 shared work (shadow map, compute, the HUD) and the GPU idle between submission chunks.
@@ -93,9 +93,9 @@ may make it redundant, but the main pass tests depth EQUAL against it).
 
 `LARECOMP_VR_DYNRES=1`: the eyes are drawn at a factor of the eye size inside the same targets, and the eye present
 scales that part up to the whole eye image (the flat Dynamic mode's plumbing: allocation scale = the eye's, render
-scale = factor times it; `output_scale.c output_scale_vr_factor`). Width `LARECOMP_VR_DYNRES_MIN` (1536; measured below with the earlier default, 1400) to
-`LARECOMP_VR_DYNRES_MAX` (the eye width) in 32-pixel steps. Budget: the game's GPU time per game frame, 14.5 ms at
-120 Hz (60 fps; `LARECOMP_VR_DYNRES_MS`) and 29 ms at 90 Hz (30 fps: fill it, so the eyes stay at full size).
+scale = factor times it; `output_scale.c output_scale_vr_factor`). Width `LARECOMP_VR_DYNRES_MIN` (1152; 1536 with `LARECOMP_VR_HEADROOM=0`; measured below with an earlier default, 1400) to
+`LARECOMP_VR_DYNRES_MAX` (the eye width) in 32-pixel steps. Budget: the game's GPU time per game frame, 10 ms at
+120 Hz (60 fps; `LARECOMP_VR_DYNRES_MS`; 14.5 with `LARECOMP_VR_HEADROOM=0`, and STEREO.md "Frame end" says why it sits well under the 16.7 ms frame) and 29 ms at 90 Hz (30 fps: fill it, so the eyes stay at full size).
 Decisions every half second on the median frame; down when 2 of the last 3 were over (straight to the predicted fit
 with 8% room), up one step when it is predicted under 85% for 2 s and 3 s after the last change. The HUD's box is drawn
 at the same factor. The VR tab's Dynamic Resolution row sets `LARECOMP_VR_DYNRES=1` and switches it live through
@@ -163,7 +163,7 @@ Without dynres outdoors still doesn't fit 60 (GPU 16-17 ms) and is held at 30 at
 ~11-12 ms of translation is what the game thread still waits for (queue wait ~4.5 ms at Mabe): the next serial part.
 `LARECOMP_VR_DYNRES_MS=13.5` changed nothing: outdoors the eye width is at the 1400 floor either way.
 
-Far drawing (lane/ring, `LARECOMP_VR_CULL_EXTENT=52,42 LARECOMP_VR_RING=4`) at 90 Hz, overlap off -> on:
+Far drawing (ring draws, `LARECOMP_VR_CULL_EXTENT=52,42 LARECOMP_VR_RING=4`) at 90 Hz, overlap off -> on:
 
 | spot | ring | fps | gpu ms | rcpu ms | busy ms |
 |---|---|---|---|---|---|

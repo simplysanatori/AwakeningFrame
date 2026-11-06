@@ -15,7 +15,7 @@
 # Placeholders used by docs and tests are allowed: 127.x, 0.0.0.0, the RFC 5737 ranges, multicast, locally
 # administered and all-zero MACs.
 #
-# Personal values (the owner's real name and e-mail, the home network's SSID, LAN addresses, host names, other user
+# Personal values (the maintainer's real name and e-mail, the home network's SSID, LAN addresses, host names, other user
 # names) must not be written into the repository, not even as search patterns. Put them, one case-insensitive
 # extended regular expression per line, in a file outside it:
 #   AF_PRIVACY_PATTERNS=FILE

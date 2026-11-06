@@ -308,10 +308,17 @@ void vk_collect_dead(void) {
 // eye 1's, instead of a second image (vk_stereo_swap's twins). vk_eye_layer: the layer single-layer views take.
 int vk_eye_layer;
 static bool g_mk_mv2;  // (vk_stereo_twin_add) the image being made is a twin from the start
-bool vk_mv_on(void) {
+// Multiview stereo: on by default where the device has multiview (VR mode); LARECOMP_MV=0: off (stereo v1, double
+// execution); LARECOMP_MV=1: on, with the layered twins even without multiview (each list then runs per eye)
+bool vk_mv_wanted(void) {
     static int on = -1;
-    if (on < 0) { const char *e = getenv("LARECOMP_MV"); on = e && atoi(e) > 0 && stereo_wanted(); }
+    if (on < 0) { const char *e = getenv("LARECOMP_MV"); on = (!e || !*e || atoi(e) > 0) && stereo_wanted(); }
     return on;
+}
+bool vk_mv_on(void) {
+    static int forced = -1;
+    if (forced < 0) { const char *e = getenv("LARECOMP_MV"); forced = e && atoi(e) > 0; }
+    return vk_mv_wanted() && (forced || g_vk.multiview);  // (g_vk.multiview: set at device creation, before any texture)
 }
 static bool twin_candidate(const NvnTexture *t, const TexBackend *b);
 extern uint32_t vk_view_gen;

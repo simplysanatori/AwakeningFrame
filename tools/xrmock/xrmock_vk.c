@@ -11,6 +11,7 @@
 #include <vulkan/vulkan.h>
 #define XR_USE_GRAPHICS_API_VULKAN
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -372,7 +373,17 @@ static uint8_t linearToSrgb8(float l) {
     return (uint8_t)(s * 255.0f + 0.5f);
 }
 
+static int dumpImpl(void* images, int index, uint32_t layer, int x, int y, int w, int h, const char* path, char* stats, size_t statcap, uint8_t** keep);
 int mockvk_dump_png(void* images, int index, uint32_t layer, int x, int y, int w, int h, const char* path, char* stats, size_t statcap) {
+    return dumpImpl(images, index, layer, x, y, w, h, path, stats, statcap, NULL);
+}
+uint8_t* mockvk_read_rgba(void* images, int index, uint32_t layer, int w, int h) {
+    char stats[160];
+    uint8_t* out = NULL;
+    if (dumpImpl(images, index, layer, 0, 0, w, h, NULL, stats, sizeof stats, &out)) { free(out); return NULL; }
+    return out;
+}
+static int dumpImpl(void* images, int index, uint32_t layer, int x, int y, int w, int h, const char* path, char* stats, size_t statcap, uint8_t** keep) {
     VkImages* r = (VkImages*)images;
     if (!r || index < 0 || index >= r->count || !r->im[index] || !gQueue) return -1;
     if (layer >= (uint32_t)r->layers) layer = 0;
@@ -462,12 +473,312 @@ int mockvk_dump_png(void* images, int index, uint32_t layer, int x, int y, int w
             memcpy(rgba + k * 4, px, 4);
             sum[0] += px[0]; sum[1] += px[1]; sum[2] += px[2];
         }
-        rc = png_write_rgba(path, rgba, w, h);
+        rc = path ? png_write_rgba(path, rgba, w, h) : 0;
         snprintf(stats, statcap, "%dx%d mean=(%.0f,%.0f,%.0f)", w, h, sum[0] / (double)npx, sum[1] / (double)npx, sum[2] / (double)npx);
-        free(rgba);
+        if (keep) *keep = rgba;
+        else free(rgba);
         DEV(vkUnmapMemory)(gDevice, mem);
     }
     DEV(vkDestroyBuffer)(gDevice, buf, NULL);
     DEV(vkFreeMemory)(gDevice, mem, NULL);
     return rc;
+}
+
+// ---- asynchronous luma probes (MOCK_XR_SHIFT) --------------------------------
+// A copy of the centre of a released image into a host buffer, queued on the app's queue (behind the app's own work,
+// before any later write to that image) with a fence, collected later without waiting: the frame loop is not held up.
+#define PROBES 8
+typedef struct {
+    int busy, tag, w, h;
+    VkFormat fmt;
+    VkBuffer buf;
+    VkDeviceMemory mem;
+    void* map;
+    VkDeviceSize cap;
+    VkCommandPool pool;
+    VkCommandBuffer cb;
+    VkFence fence;
+} Probe;
+static Probe gProbe[PROBES];
+
+int mockvk_probe_submit(void* images, int index, uint32_t layer, int x, int y, int w, int h, int tag) {
+    VkImages* r = (VkImages*)images;
+    if (!r || index < 0 || index >= r->count || !r->im[index] || !gQueue || r->depth) return -1;
+    if (r->format != VK_FORMAT_R8G8B8A8_SRGB && r->format != VK_FORMAT_R8G8B8A8_UNORM && r->format != VK_FORMAT_B8G8R8A8_SRGB &&
+        r->format != VK_FORMAT_B8G8R8A8_UNORM)
+        return -1;
+    if (layer >= (uint32_t)r->layers) layer = 0;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x + w > r->w) w = r->w - x;
+    if (y + h > r->h) h = r->h - y;
+    if (w <= 0 || h <= 0) return -1;
+    int k = 0;
+    while (k < PROBES && gProbe[k].busy) k++;
+    if (k == PROBES) return -1;
+    Probe* p = &gProbe[k];
+    VkDeviceSize size = (VkDeviceSize)w * (VkDeviceSize)h * 4;
+    if (p->cap < size) {
+        if (p->buf) { DEV(vkUnmapMemory)(gDevice, p->mem); DEV(vkDestroyBuffer)(gDevice, p->buf, NULL); DEV(vkFreeMemory)(gDevice, p->mem, NULL); }
+        VkBufferCreateInfo bc = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bc.size = size;
+        bc.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        if (DEV(vkCreateBuffer)(gDevice, &bc, NULL, &p->buf) != VK_SUCCESS) { p->buf = VK_NULL_HANDLE; p->cap = 0; return -1; }
+        VkMemoryRequirements req;
+        DEV(vkGetBufferMemoryRequirements)(gDevice, p->buf, &req);
+        VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        ai.allocationSize = req.size;
+        ai.memoryTypeIndex = memType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+        if (DEV(vkAllocateMemory)(gDevice, &ai, NULL, &p->mem) != VK_SUCCESS) { DEV(vkDestroyBuffer)(gDevice, p->buf, NULL); p->buf = VK_NULL_HANDLE; p->cap = 0; return -1; }
+        DEV(vkBindBufferMemory)(gDevice, p->buf, p->mem, 0);
+        DEV(vkMapMemory)(gDevice, p->mem, 0, size, 0, &p->map);
+        p->cap = size;
+    }
+    if (!p->pool) {
+        VkCommandPoolCreateInfo pci = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        pci.queueFamilyIndex = gQueueFamily;
+        pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        DEV(vkCreateCommandPool)(gDevice, &pci, NULL, &p->pool);
+        VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        ai.commandPool = p->pool;
+        ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        ai.commandBufferCount = 1;
+        DEV(vkAllocateCommandBuffers)(gDevice, &ai, &p->cb);
+        VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        DEV(vkCreateFence)(gDevice, &fi, NULL, &p->fence);
+    }
+    DEV(vkResetCommandBuffer)(p->cb, 0);
+    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    DEV(vkBeginCommandBuffer)(p->cb, &bi);
+    for (int pass = 0; pass < 2; pass++) {
+        VkImageMemoryBarrier m = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        m.srcAccessMask = pass ? VK_ACCESS_TRANSFER_READ_BIT : VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        m.dstAccessMask = pass ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT : VK_ACCESS_TRANSFER_READ_BIT;
+        m.oldLayout = pass ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        m.newLayout = pass ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        m.srcQueueFamilyIndex = m.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        m.image = r->im[index];
+        m.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        m.subresourceRange.levelCount = (uint32_t)(r->mips ? r->mips : 1);
+        m.subresourceRange.layerCount = (uint32_t)r->layers;
+        DEV(vkCmdPipelineBarrier)(p->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &m);
+        if (pass == 0) {
+            VkBufferImageCopy c;
+            memset(&c, 0, sizeof(c));
+            c.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            c.imageSubresource.baseArrayLayer = layer;
+            c.imageSubresource.layerCount = 1;
+            c.imageOffset.x = x;
+            c.imageOffset.y = y;
+            c.imageExtent.width = (uint32_t)w;
+            c.imageExtent.height = (uint32_t)h;
+            c.imageExtent.depth = 1;
+            DEV(vkCmdCopyImageToBuffer)(p->cb, r->im[index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, p->buf, 1, &c);
+        }
+    }
+    DEV(vkEndCommandBuffer)(p->cb);
+    VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &p->cb;
+    DEV(vkResetFences)(gDevice, 1, &p->fence);
+    if (DEV(vkQueueSubmit)(gQueue, 1, &si, p->fence) != VK_SUCCESS) return -1;
+    p->busy = 1, p->tag = tag, p->w = w, p->h = h, p->fmt = r->format;
+    return k;
+}
+
+// A finished probe: its tag, size and luma (0-255, Rec. 601 weights on the stored bytes) box-averaged by `sub`
+// into out (w/sub x h/sub, row-major; out must hold that many). 1 when one was collected, 0 when none is done.
+int mockvk_probe_collect(int* tag, int* w, int* h, float* out, int sub) {
+    for (int k = 0; k < PROBES; k++) {
+        Probe* p = &gProbe[k];
+        if (!p->busy || DEV(vkGetFenceStatus)(gDevice, p->fence) != VK_SUCCESS) continue;
+        int ow = p->w / sub, oh = p->h / sub;
+        int bgr = p->fmt == VK_FORMAT_B8G8R8A8_SRGB || p->fmt == VK_FORMAT_B8G8R8A8_UNORM;
+        const uint8_t* s = (const uint8_t*)p->map;
+        for (int y = 0; y < oh; y++)
+            for (int x = 0; x < ow; x++) {
+                float acc = 0;
+                for (int j = 0; j < sub; j++)
+                    for (int i = 0; i < sub; i++) {
+                        const uint8_t* q = s + (((size_t)(y * sub + j) * (size_t)p->w) + (size_t)(x * sub + i)) * 4;
+                        float rr = bgr ? q[2] : q[0], gg = q[1], bb = bgr ? q[0] : q[2];
+                        acc += 0.299f * rr + 0.587f * gg + 0.114f * bb;
+                    }
+                out[(size_t)y * (size_t)ow + (size_t)x] = acc / (float)(sub * sub);
+            }
+        *tag = p->tag, *w = ow, *h = oh;
+        p->busy = 0;
+        return 1;
+    }
+    return 0;
+}
+
+// ---- a compositor's share of the GPU (MOCK_XR_COMPOSITOR) ---------------------------------------------------------
+// SteamVR's compositor shares the GPU with the app: each refresh it needs about a millisecond of GPU (its timewarp of
+// the layers) finished before the vsync, from its own high-priority context. This models it: a second VkDevice (its
+// own kernel context, global priority HIGH where allowed), and a thread that submits a job of two eye-sized image
+// copies `lead` ms before each vsync of the mock's grid and waits for it. The job's latency (submit to done) shows how
+// long the app's GPU work keeps a compositor from the GPU; a job done after its vsync is a refresh the compositor
+// would have missed (the display would show its previous output again, not reprojected to the new head pose).
+static struct {
+    VkDevice dev;
+    VkQueue q;
+    PFN_vkGetDeviceProcAddr gdpa;
+    VkImage im[4];
+    VkDeviceMemory mem[4];
+    VkCommandPool pool;
+    VkCommandBuffer cb;
+    VkFence fence;
+    pthread_t thread;
+    volatile int stop, running;
+    int64_t t0, period, lead, from;
+    int prio;
+    FILE* log;
+    // stats from `from` on
+    int n, late;
+    double sum, worst;
+    float* lat;
+} gComp;
+#define CDEV(name) ((PFN_##name)gComp.gdpa(gComp.dev, #name))
+static int64_t compNow(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000ll + ts.tv_nsec;
+}
+static void* compThread(void* arg) {
+    (void)arg;
+    int64_t n = (compNow() - gComp.t0) / gComp.period + 1;
+    while (!gComp.stop) {
+        int64_t vs = gComp.t0 + n * gComp.period, at = vs - gComp.lead, now = compNow();
+        if (at < now) { n++; continue; }
+        struct timespec ts = {(time_t)((at - now) / 1000000000ll), (long)((at - now) % 1000000000ll)};
+        nanosleep(&ts, NULL);
+        CDEV(vkResetFences)(gComp.dev, 1, &gComp.fence);
+        VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &gComp.cb;
+        int64_t s = compNow();
+        if (CDEV(vkQueueSubmit)(gComp.q, 1, &si, gComp.fence) != VK_SUCCESS) break;
+        CDEV(vkWaitForFences)(gComp.dev, 1, &gComp.fence, VK_TRUE, 1000000000ull);
+        int64_t d = compNow();
+        double ms = (double)(d - s) / 1e6;
+        int late = d > vs;
+        if (gComp.log) fprintf(gComp.log, "%.3f %.3f %d\n", (double)(vs - gComp.t0) / 1e9, ms, late);
+        if (vs - gComp.t0 >= gComp.from && gComp.n < 400000) {
+            gComp.lat[gComp.n++] = (float)ms;
+            gComp.sum += ms, gComp.late += late;
+            if (ms > gComp.worst) gComp.worst = ms;
+        }
+        n = (compNow() - gComp.t0) / gComp.period + 1;
+    }
+    return NULL;
+}
+int mockvk_compositor_start(int64_t t0, int64_t period, double lead_ms, double from_s, int eye_w, int eye_h, const char* logpath) {
+    if (gComp.running || !gInstance || !gPhys) return -1;
+    float prio = 1.0f;
+    VkDeviceQueueGlobalPriorityCreateInfoKHR gp = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR};
+    VkDeviceQueueCreateInfo qi = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+    qi.queueFamilyIndex = 0;
+    qi.queueCount = 1;
+    qi.pQueuePriorities = &prio;
+    const char* ext[] = {"VK_KHR_global_priority"};
+    VkDeviceCreateInfo dc = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    dc.queueCreateInfoCount = 1;
+    dc.pQueueCreateInfos = &qi;
+    VkResult r = VK_ERROR_INITIALIZATION_FAILED;
+    static const VkQueueGlobalPriorityKHR tries[] = {VK_QUEUE_GLOBAL_PRIORITY_REALTIME_KHR, VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR, VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR};
+    int first = 0;  // MOCK_XR_COMPOSITOR_PRIO=realtime|high|medium|none: where to start (default realtime, then lower)
+    const char* pe = getenv("MOCK_XR_COMPOSITOR_PRIO");
+    if (pe) first = !strcmp(pe, "high") ? 1 : !strcmp(pe, "medium") ? 2 : !strcmp(pe, "none") ? 3 : 0;
+    for (int i = first; i < 4 && r != VK_SUCCESS; i++) {
+        if (i < 3) {
+            gp.globalPriority = tries[i];
+            qi.pNext = &gp;
+            dc.enabledExtensionCount = 1;
+            dc.ppEnabledExtensionNames = ext;
+            gComp.prio = (int)tries[i];
+        } else {
+            qi.pNext = NULL;
+            dc.enabledExtensionCount = 0;
+            gComp.prio = 0;
+        }
+        r = INST(vkCreateDevice)(gPhys, &dc, NULL, &gComp.dev);
+    }
+    if (r != VK_SUCCESS) return -1;
+    gComp.gdpa = (PFN_vkGetDeviceProcAddr)gGipa(gInstance, "vkGetDeviceProcAddr");
+    CDEV(vkGetDeviceQueue)(gComp.dev, 0, 0, &gComp.q);
+    VkPhysicalDeviceMemoryProperties mp;
+    INST(vkGetPhysicalDeviceMemoryProperties)(gPhys, &mp);
+    for (int i = 0; i < 4; i++) {
+        VkImageCreateInfo ic = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        ic.imageType = VK_IMAGE_TYPE_2D;
+        ic.format = VK_FORMAT_R8G8B8A8_UNORM;
+        ic.extent = (VkExtent3D){(uint32_t)eye_w, (uint32_t)eye_h, 1};
+        ic.mipLevels = ic.arrayLayers = 1;
+        ic.samples = VK_SAMPLE_COUNT_1_BIT;
+        ic.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ic.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        CDEV(vkCreateImage)(gComp.dev, &ic, NULL, &gComp.im[i]);
+        VkMemoryRequirements req;
+        CDEV(vkGetImageMemoryRequirements)(gComp.dev, gComp.im[i], &req);
+        uint32_t t = 0;
+        for (t = 0; t < mp.memoryTypeCount; t++)
+            if ((req.memoryTypeBits & (1u << t)) && (mp.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) break;
+        VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        ai.allocationSize = req.size;
+        ai.memoryTypeIndex = t;
+        CDEV(vkAllocateMemory)(gComp.dev, &ai, NULL, &gComp.mem[i]);
+        CDEV(vkBindImageMemory)(gComp.dev, gComp.im[i], gComp.mem[i], 0);
+    }
+    VkCommandPoolCreateInfo pci = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    CDEV(vkCreateCommandPool)(gComp.dev, &pci, NULL, &gComp.pool);
+    VkCommandBufferAllocateInfo cai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    cai.commandPool = gComp.pool;
+    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cai.commandBufferCount = 1;
+    CDEV(vkAllocateCommandBuffers)(gComp.dev, &cai, &gComp.cb);
+    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    CDEV(vkBeginCommandBuffer)(gComp.cb, &bi);
+    VkImageMemoryBarrier m[4];
+    for (int i = 0; i < 4; i++) {
+        m[i] = (VkImageMemoryBarrier){VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        m[i].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+        m[i].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+        m[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        m[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        m[i].srcQueueFamilyIndex = m[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        m[i].image = gComp.im[i];
+        m[i].subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    }
+    CDEV(vkCmdPipelineBarrier)(gComp.cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 4, m);
+    VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {eye_w, eye_h, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {eye_w, eye_h, 1}}};
+    for (int e = 0; e < 2; e++)  // (a filtered blit per eye: the compositor's warp reads and writes about this much)
+        CDEV(vkCmdBlitImage)(gComp.cb, gComp.im[e], VK_IMAGE_LAYOUT_GENERAL, gComp.im[2 + e], VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_LINEAR);
+    CDEV(vkEndCommandBuffer)(gComp.cb);
+    VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    CDEV(vkCreateFence)(gComp.dev, &fi, NULL, &gComp.fence);
+    gComp.t0 = t0, gComp.period = period, gComp.lead = (int64_t)(lead_ms * 1e6), gComp.from = (int64_t)(from_s * 1e9);
+    gComp.lat = (float*)calloc(400000, sizeof(float));
+    gComp.log = logpath ? fopen(logpath, "w") : NULL;
+    gComp.stop = 0;
+    if (pthread_create(&gComp.thread, NULL, compThread, NULL) != 0) return -1;
+    gComp.running = 1;
+    return gComp.prio;
+}
+static int cmpfl(const void* a, const void* b) { float x = *(const float*)a, y = *(const float*)b; return x < y ? -1 : x > y; }
+void mockvk_compositor_stop(char* out, size_t cap) {
+    out[0] = 0;
+    if (!gComp.running) return;
+    gComp.stop = 1;
+    pthread_join(gComp.thread, NULL);
+    gComp.running = 0;
+    if (gComp.log) fclose(gComp.log), gComp.log = NULL;
+    if (gComp.n) {
+        qsort(gComp.lat, (size_t)gComp.n, sizeof(float), cmpfl);
+        snprintf(out, cap, "compositor model (priority %d, %.1f ms before each vsync): %d refreshes, job latency avg %.2f ms, p50 %.2f, p95 %.2f, p99 %.2f, max %.2f; %d done after their vsync (%.1f%%)",
+                 gComp.prio, (double)gComp.lead / 1e6, gComp.n, gComp.sum / gComp.n, gComp.lat[gComp.n / 2], gComp.lat[(int)(gComp.n * 0.95)], gComp.lat[(int)(gComp.n * 0.99)],
+                 gComp.worst, gComp.late, 100.0 * gComp.late / gComp.n);
+    }
+    CDEV(vkDeviceWaitIdle)(gComp.dev);
 }

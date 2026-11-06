@@ -1,4 +1,4 @@
-# Edge treatment (AwakeningFrame "edge" lane)
+# Edge treatment
 
 In the headset the loaded world is a tabletop and everything past the zone edge is black: the eye output is cleared to
 black and the scene depth is cleared to far. This pass replaces that black with a soft backdrop and fades the world into
@@ -10,7 +10,7 @@ it. Code: `runtime/nvn/vulkan/edge.c/.h`. One call in `exec.c vk_stereo_eyes`, i
 **Overworld only, off unless asked.** The default is `LARECOMP_VR_EDGE=black` (off: the present draws the eye as before).
 With a mode on, the pass still runs in the overworld only (`game_level_overworld()`, widescreen.c: the level "Field"). An
 interior, a dungeon or the title keeps its dark void and the game's own glow, drawn by the present exactly as without
-this lane (`LARECOMP_VR_EDGE_INDOORS=1` lifts that, for testing).
+this pass (`LARECOMP_VR_EDGE_INDOORS=1` lifts that, for testing).
 
 Per eye, once per present (all in the frame's command buffer, device local, no read-back):
 
@@ -33,7 +33,7 @@ Per eye, once per present (all in the frame's command buffer, device local, no r
      toward the haze, full at the void's edge and gone about two sigma (2.5% of the height) in. Beyond that band every pixel
      is exactly the untreated eye (dither is applied only where something was blended);
    - the void is found per pixel from the depth, so the silhouette against the haze is as sharp as the eye's own
-     pixels, and the fade follows the loaded extent: when the stream lane renders further, the void shrinks and so does
+     pixels, and the fade follows the loaded extent: when the game renders further, the void shrinks and so does
      the haze, with no setting to change;
    - triangular dither of one 8-bit step where blended, against banding.
 
@@ -44,7 +44,7 @@ screen's edge to the culling rectangle's, so `LARECOMP_VR_CULL_RECT` bigger than
 The eye output is B10G11R11 (no alpha, 5-6 mantissa bits), so the result is not written back into it: a smooth gradient
 would band. The pass draws straight into the XR eye image instead (UNORM view, sRGB bytes, as the present did).
 
-## Fade (`LARECOMP_VR_EDGE=fade`, hudbox lane; edgefx lane)
+## Fade (`LARECOMP_VR_EDGE=fade`)
 
 A round fade to black around the table's centre, like a spotlight on a tabletop: the world ends in a soft round edge
 instead of the loaded zone's straight one. One pass (the main pass alone: no backdrop colours, no void mask), in play
@@ -70,7 +70,8 @@ everywhere: the overworld, interiors, dungeons, side views.
   (the tightest culling seen).
 - In a room or a side view (the rig's area, with its camera zone) `R` is at least the zone's farthest corner from the
   anchor plus 1.5 units: the whole room stays clear and the fade only takes what lies past it (the next rooms, the
-  backdrop glow). No fit there.
+  backdrop glow). No fit there, nor with the VR tab's Surroundings on: the culling is opened wide then and the drawn box
+  limits the scene, so the fade ends at the box's nearer side.
 - **Foveation's blocks are smoothed.** With eye-tracked foveation (VRS) the eye passes shade up to 4 x 4 pixels at once
   away from the gaze; the composite into the eye output is one of them. Those blocks, and the stairs they leave along a
   silhouette against the black, were the "chunky, pixely" fade: the fade is in the periphery by nature, and a dark fade
@@ -112,6 +113,10 @@ they draw: three instanced mist sheets that fade against the scene's depth (`860
 | `black` (`off`, `0`, `none`; the default) | off: the present draws the eye as before |
 | `fade` | round fade to black around the table's centre (above); everywhere in play |
 | `passthrough` | void and fade as alpha: eye image alpha = 1 - fade, colour premultiplied; the projection layer gets `BLEND_TEXTURE_SOURCE_ALPHA_BIT` and `xrEndFrame` `ALPHA_BLEND` (xr_loop.c) |
+
+The VR tab's Table Edge offers Off (`black`), Fade and Passthrough, and switches between them while the game runs
+(`edge_set_mode`): the next eye is drawn in the new mode, and each set of eye images carries its mode, so the projection
+layer's alpha flag and the blend mode follow the images. `fog` and `gradient` can only be set from the environment.
 
 Other variables:
 

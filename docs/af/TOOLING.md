@@ -43,6 +43,9 @@ Settings are `MOCK_XR_*` environment variables; the full list is the header comm
 | `MOCK_XR_INPUT="t0-t1:path[=v[,v]];..."` | Scripted controller input: that input path (`/user/hand/right/input/a/click`, `.../thumbstick=0,1`, `.../trigger/value=0.8`) is held from t0 to t1 seconds after `xrBeginSession`. Actions are checked like a runtime would (bindings only on the Frame profile's inputs, nothing changes after the attach, sync before state); haptic pulses and input changes go to the trace (`input <action> = ...`, `haptic hand=... amplitude=...`) and the summary counts them. Game side: `LARECOMP_XR_INPUT_LOG=1` logs each change, `LARECOMP_XR_YAW=<deg>` sets the table yaw, `LARECOMP_XR_HAPTIC_TEST=t0-t1` forces a rumble. |
 | `MOCK_XR_VK_MAX=1.3` | Highest Vulkan version offered; `1.2` is what SteamVR offers, and an instance above it is refused (`VK_ERROR_INCOMPATIBLE_DRIVER`), to test the 1.2 fallback. |
 | `MOCK_XR_BUSY_MS=<ms>` | At each release, wait for the app's queue to go idle and report a release that had to wait longer than this (work not finished when the image was released). |
+| `MOCK_XR_SHIFT=<file>`, `MOCK_XR_SHIFT_REF=30` | Image against pose. Per refresh (`disp`): the layer's eye-0 pose against the head's at the display time, and which release of each eye's swapchain it shows. Per new eye image (`img`): its centre is copied without stalling the loop (a fenced copy on the app's queue, read back later), and its shift against each eye's first image after `MOCK_XR_SHIFT_REF` seconds is measured by correlating gradient profiles, converted to degrees with the eye's focal length. `tools/xrmock/shift-report.py <file> [--axis pitch\|yaw] [--from s] [--to s]` compares the rotation the content was rendered for with the rotation its layer claims, per eye and between the eyes of a set. |
+| `MOCK_XR_SHIFT_DUMP=<dir>`, `MOCK_XR_SHIFT_DUMP_AT=a,b` | The probed images (luma, half size, centre 2/3) as PGM for display times a-b s. With a pose file of instant steps, `tools/xrmock/step-report.py <shift file> <dir>` compares each image of a hold with the hold's last one: content left over from the frame before the step (a pass reading an earlier frame, an eye with an older camera) shows as a larger difference in the first images. |
+| `MOCK_XR_COMPOSITOR=lead[,from]`, `MOCK_XR_COMPOSITOR_PRIO`, `MOCK_XR_COMPOSITOR_LOG` | A compositor's share of the GPU: a second VkDevice (its own kernel context, global priority realtime, else high, medium; `_PRIO` picks) submits two eye-sized blits `lead` ms before each vsync and waits for them. The summary gives the job's latency and how many finished after their vsync (counted from `from` s on); `_LOG` writes one line per refresh. |
 
 Checks, as `ERROR` lines in the trace and on stderr and a summary at `xrEndSession`: call order of
 wait / begin / end frame and acquire / wait / release; mip levels above 1 (SteamVR on the Frame
@@ -75,7 +78,7 @@ of the default checks. `test_client --bad-layout` must produce `VUID-vkCmdClearC
 (proves the layer is on); a clean run under gamescope shows two instance/device extension VUIDs
 from the WSI layer, which `VVL_NO_WSI=1` removes.
 
-## Log format for the app (what lane 3 should emit)
+## Log format for `xr_timing.log`
 
 One line per displayed frame, from the frame loop, in the app's log or a log of its own
 (`xr_timing.log`, in the data folder, previous session as `xr_timing.log.prev`). Times are

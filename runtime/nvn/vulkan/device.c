@@ -341,6 +341,8 @@ void vk_log_memory(const char *why) {
             (unsigned long long)(mp->memoryHeaps[i].size >> 20), (unsigned long long)(b[i].budget >> 20),
             (unsigned long long)(b[i].usage >> 20), (unsigned long long)(b[i].statistics.allocationBytes >> 20),
             b[i].statistics.allocationCount);
+    extern void vk_heap_lazy_log(void);
+    vk_heap_lazy_log();
 }
 
 // ---- pipeline cache file
@@ -769,6 +771,9 @@ static void create_device(void) {
         // Turnip: the kernel's msm driver maps a page of the heap that faults in again counted from the start of the VMA
         // it is in, not of the buffer (exec.c backend_guest_heap_prepare), so soft write tracking is never used over it
         g_vk.heap_no_split = drv.driverID == VK_DRIVER_ID_MESA_TURNIP;
+        // ... and made lazily there (exec.c heap_lazy_try): the whole 3.3 GB heap as one driver allocation was resident
+        // from the first GPU use, and an OOM kill ended the owner's game at its start (2026-11-06)
+        g_vk.heap_sparse = g_vk.heap_no_split && have.features.sparseBinding && have.features.sparseResidencyBuffer;
 #ifdef VK_EXT_graphics_pipeline_library
         if (gpl_ext)
             snprintf(gpl, sizeof gpl, "%s (fast linking %s, independent interpolation decoration %s)",
@@ -875,7 +880,7 @@ static void create_device(void) {
     if (xr_mode()) f12.shaderOutputViewportIndex = have12.shaderOutputViewportIndex, f12.shaderOutputLayer = have12.shaderOutputLayer;
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
                                             .storageBuffer16BitAccess = VK_TRUE, .pNext = &f12};
-    if (xr_mode() && vk_mv_on()) {  // (LARECOMP_MV: the stereo executor's multiview passes, docs/af/STEREO.md)
+    if (xr_mode() && vk_mv_wanted()) {  // (the stereo executor's multiview passes, docs/af/STEREO.md; LARECOMP_MV=0: off)
         VkPhysicalDeviceVulkan11Features h11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
         VkPhysicalDeviceFeatures2 hf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &h11};
         vkGetPhysicalDeviceFeatures2(g_vk.phys, &hf);
@@ -936,16 +941,34 @@ static void create_device(void) {
     }
     if (xr_mode()) fov_device_setup(g_vk.phys, fdm_ext, fsr_ext, ext, &n_ext, &f);
     float prio = 1.0f;
-    VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
-                                  .queueCount = 1, .pQueuePriorities = &prio};
-    VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = 1,
-                             .pQueueCreateInfos = &qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
+    VkDeviceQueueCreateInfo qi[2] = {{.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
+                                      .queueCount = 1, .pQueuePriorities = &prio}};
+    // The lazy heap's binds (exec.c heap_lazy_get) come from whichever thread first touches a part of the heap, while
+    // the render thread may hold the main queue: a sparse-only queue family's queue of their own where there is one
+    // (Turnip: family 1), else the main queue under its lock
+    uint32_t sparse_fam = UINT32_MAX;
+    if (g_vk.heap_sparse) {
+        b->sparseBinding = b->sparseResidencyBuffer = VK_TRUE;
+        uint32_t nq = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, NULL);
+        VkQueueFamilyProperties *qp = calloc(nq, sizeof *qp);
+        vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, qp);
+        for (uint32_t i = 0; i < nq && sparse_fam == UINT32_MAX; i++)
+            if (i != g_vk.qfam && (qp[i].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) && qp[i].queueCount) sparse_fam = i;
+        free(qp);
+        if (sparse_fam != UINT32_MAX)
+            qi[1] = (VkDeviceQueueCreateInfo){.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = sparse_fam,
+                                              .queueCount = 1, .pQueuePriorities = &prio};
+    }
+    VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = sparse_fam != UINT32_MAX ? 2 : 1,
+                             .pQueueCreateInfos = qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
 #ifdef LARECOMP_HAVE_XR
     if (xr_mode()) VK_CHECK(xr_vk_create_device(g_vk.phys, &di, &g_vk.dev));  // (the same create info, pNext chain intact)
     else
 #endif
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
+    if (sparse_fam != UINT32_MAX) vkGetDeviceQueue(g_vk.dev, sparse_fam, 0, &g_vk.sparse_queue);
     if (g_vk.vids) {
         g_vk.set_vertex_input = (PFN_vkCmdSetVertexInputEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetVertexInputEXT");
         if (!g_vk.set_vertex_input) g_vk.vids = false;
@@ -1381,7 +1404,7 @@ void vk_frame_end(const char *shot_path) {
     uint64_t seq;
 #ifdef LARECOMP_HAVE_XR
     if (xr_mode()) {
-        // VR mode: the stereo executor's eye outputs into the eye images (exec.c vk_stereo_eyes; lane 4); the eyes
+        // VR mode: the stereo executor's eye outputs into the eye images (exec.c vk_stereo_eyes); the eyes
         // nobody drew this set get the stub's clear colour; the HUD image stays in
         // COLOR_ATTACHMENT_OPTIMAL (the runtime's layout for a released image); no present: the XR thread releases the
         // set once this submission is done
@@ -1801,7 +1824,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         extern void widescreen_present_crop(uint64_t, double, float *, double *, double *, double *, double *);
         float crop[4];  // uv origin and size
         widescreen_present_crop(frame, shape, crop, &vx, &vy, &vw, &vh);
-        {   // (VR mode, stereo executor: lane 4) the scalable targets at the eye's size (each eye renders the scene
+        {   // (VR mode, stereo executor) the scalable targets at the eye's size (each eye renders the scene
             // into its twins: anisotropic scale for a square eye); the window image keeps the HUD, drawn by the game in
             // a centred 16:9 box (exec.c, the uniform part of the scale): that box fills the HUD image
             extern bool stereo_eye_size(uint32_t *w, uint32_t *h);
@@ -1811,9 +1834,12 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                 os.sy = os.ay = sy = (double)eh / t->height;
                 double u = fmin(sx, sy);
                 {   // (LARECOMP_VR_DYNRES=1) drawn at a factor of the eye size, scaled up into the eye images
-                    // (output_scale.c); budget: 14.5 ms at 60 fps (120 Hz), 87% of 33.3 at 30 (90 Hz)
+                    // (output_scale.c); budget: 10 ms at 60 fps (120 Hz), 87% of 33.3 at 30 (90 Hz). 10, not the
+                    // 14.5 that fits the frame: SteamVR's xrEndFrame waits behind the queue's backlog, and above ~11 ms
+                    // of GPU a game frame its frames came late, re-shown (docs/af/STEREO.md, Frame end).
+                    // LARECOMP_VR_HEADROOM=0: the old 14.5 ms.
                     static double b60 = -1;
-                    if (b60 < 0) b60 = getenv("LARECOMP_VR_DYNRES_MS") ? atof(getenv("LARECOMP_VR_DYNRES_MS")) : 14.5;
+                    if (b60 < 0) b60 = getenv("LARECOMP_VR_DYNRES_MS") ? atof(getenv("LARECOMP_VR_DYNRES_MS")) : vr_headroom() ? 10.0 : 14.5;
                     double f = output_scale_vr_factor(SDL_GetTicksNS() / 1e9, game_ms, xr_display_hz() < 100 && !pace_xr_free() ? 29.0 : b60, ew);
                     os.sx = sx = os.ax * f, os.sy = sy = os.ay * f;
                 }
