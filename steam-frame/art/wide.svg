@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="430" viewBox="0 0 920 430"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#101c33"/><stop offset="1" stop-color="#1f4a52"/></linearGradient><radialGradient id="glow" cx="0.5" cy="0.6" r="0.6"><stop offset="0" stop-color="#4fd1b5" stop-opacity="0.35"/><stop offset="1" stop-color="#4fd1b5" stop-opacity="0"/></radialGradient></defs><rect width="920" height="430" fill="url(#g)"/><rect width="920" height="430" fill="url(#glow)"/><polygon points="570.0,270.0 720.0,345.0 720.0,381.0 570.0,306.0" fill="#14352f"/>
+<polygon points="870.0,270.0 720.0,345.0 720.0,381.0 870.0,306.0" fill="#0d2420"/>
+<polygon points="570.0,270.0 720.0,195.0 870.0,270.0 720.0,345.0" fill="#3fae7a"/>
+<polygon points="631.5,266.2 664.5,282.8 664.5,252.8 631.5,236.2" fill="#c9b77f"/>
+<polygon points="664.5,282.8 697.5,266.2 697.5,236.2 664.5,252.8" fill="#a8975f"/>
+<polygon points="664.5,219.8 697.5,236.2 664.5,252.8 631.5,236.2" fill="#e8d9a8"/>
+<polygon points="753.0,271.5 780.0,285.0 780.0,267.0 753.0,253.5" fill="#aebcc8"/>
+<polygon points="780.0,285.0 807.0,271.5 807.0,253.5 780.0,267.0" fill="#8fa0ae"/>
+<polygon points="780.0,240.0 807.0,253.5 780.0,267.0 753.0,253.5" fill="#d9e3ea"/>
+<rect x="713.4" y="256.5" width="7.2" height="30.0" fill="#6b4a2b"/>
+<circle cx="717.0" cy="241.5" r="25.5" fill="#1f7a4d"/>
+<circle cx="711.0" cy="235.5" r="18.0" fill="#2b9a62"/><text x="50" y="215" font-family="DejaVu Sans, Helvetica, Arial, sans-serif" font-weight="bold" font-size="56" text-anchor="start" fill="#f4f7fa">Awakening<tspan fill="#6fe3c1">Frame</tspan></text><text x="50" y="245" font-family="DejaVu Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="start" fill="#b9c9d6" letter-spacing="2">A VR DIORAMA</text></svg>

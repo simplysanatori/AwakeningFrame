@@ -9,6 +9,7 @@
 #include "../paths.h"
 #include "../rt.h"
 #include "../nvn/pace.h"
+#include "xr_input.h"
 #include "xr_internal.h"
 
 void vi_external_vsync(uint64_t now_ns);  // runtime/hle/vi.c
@@ -232,6 +233,7 @@ static void *xr_thread(void *arg) {
                 locked = want;
             }
         }
+        xr_input_frame();  // the controllers, once per refresh, just before the game's vsync
         // The game's 60 Hz vsync from the display's refreshes: every second one at 120 Hz, two of three at 90 Hz (by
         // display time, so a missed refresh doesn't slow the game down). The frame starting now is shown two refreshes on.
         int64_t step = last_d ? fs.predictedDisplayTime - last_d : period;

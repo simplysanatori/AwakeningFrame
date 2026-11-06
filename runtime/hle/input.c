@@ -32,6 +32,8 @@ static uint8_t keys_down[SDL_SCANCODE_COUNT];
 static SDL_Gamepad *pad;
 static _Atomic int64_t sampling;
 static bool host_test;  // scripted runs must not vibrate the user's controller
+static _Atomic uint64_t xr_buttons;  // the Frame controllers (VR mode, runtime/xr/xr_input.c), as game buttons
+static _Atomic int32_t xr_lx, xr_ly;  // (written by input_xr_set only when the VR mode is built in)
 
 // Guest IPC threads publish values; only the UI thread touches SDL's pad.
 // The lock also makes paired value snapshots consistent with permission/reset.
@@ -116,6 +118,29 @@ void input_rumble_poll(void) {
     }
     rumble_last_lo = lo; rumble_last_hi = hi;
 }
+#ifdef LARECOMP_HAVE_XR
+// VR mode: the game's rumble as one strength for the Frame controllers' haptics (runtime/xr/xr_input.c, the XR thread, each
+// refresh). The mix and the gates of input_rumble_poll, except the gamepad and the window's focus: the headset has neither.
+float input_rumble_level(void) {
+    uint64_t now = SDL_GetTicks();
+    uint64_t last_frame = atomic_load(&rumble_frame_ms);
+    if ((now > last_frame && now - last_frame > 250) || !g_settings.rumble || menu_is_open()) return 0;
+    uint16_t lo = 0, hi = 0;
+    SDL_LockSpinlock(&rumble_lock);
+    if (rumble_allowed) rumble_mix(rumble_values, &lo, &hi);
+    SDL_UnlockSpinlock(&rumble_lock);
+    if (now < atomic_load(&rumble_pulse_until)) {
+        uint32_t p = atomic_load(&rumble_pulse_amp);
+        if ((p >> 16) > lo) lo = (uint16_t)(p >> 16);
+        if ((p & 0xFFFF) > hi) hi = (uint16_t)(p & 0xFFFF);
+    }
+    float a = (lo > hi ? lo : hi) / 65535.0f;
+    int pct = g_settings.rumble_strength;  // (Controls tab: Intensity)
+    if (pct > 0 && pct < 100) a = a * (float)pct / 100.0f;
+    return a;
+}
+#endif
+
 void input_rumble_stop(void) {  // UI thread: also called before normal app exit
     rumble_clear();
     atomic_store(&rumble_frame_ms, 0);
@@ -244,6 +269,46 @@ static void note_press(uint64_t down, uint64_t up) {
     }
 }
 
+// Events a test pushes (LARECOMP_HOST_INPUT type: / sdlkey: / sdlpad: / sdlaxis: / mouse:) carry this device id: they go the whole way, menu first.
+#define TEST_DEVICE 0x7E57u
+#ifdef LARECOMP_HAVE_XR
+// The Frame controllers (runtime/xr/xr_input.c, the XR thread, once per display refresh): the SDL gamepad buttons held
+// (host bits; bits PADB_LTRIGGER / PADB_RTRIGGER the triggers as ZL / ZR) and the left stick. The buttons go through the
+// player's controller bindings like a gamepad's (positionally: no label swap, the Frame's A is the east button as a
+// Switch pad's). Menus (the overlay, the start screen) take SDL gamepad events from the pad, so each change is also
+// pushed as one, from the test device's id (it goes the whole way, menu first, and is let through in a scripted run).
+void input_xr_set(uint32_t host, int32_t lx, int32_t ly) {
+    static uint32_t last_host;
+    static int32_t last_ax[2];
+    uint64_t b = 0;
+    for (int i = 0; i < BIND_PAD_COUNT; i++) {
+        int h = g_bind_pad[i];
+        if ((unsigned)h < PADB_HOST_COUNT && (host >> h & 1)) b |= 1ull << i;
+    }
+    uint64_t old = atomic_exchange(&xr_buttons, b);
+    note_press(b & ~old, old & ~b);
+    atomic_store(&xr_lx, lx), atomic_store(&xr_ly, ly);
+    uint32_t chg = host ^ last_host;
+    for (int h = 0; h < PADB_LTRIGGER; h++) {
+        if (!(chg >> h & 1)) continue;
+        SDL_Event e = {0};
+        e.type = (host >> h & 1) ? SDL_EVENT_GAMEPAD_BUTTON_DOWN : SDL_EVENT_GAMEPAD_BUTTON_UP;
+        e.gbutton.which = TEST_DEVICE, e.gbutton.button = (Uint8)h, e.gbutton.down = (host >> h & 1) != 0;
+        SDL_PushEvent(&e);
+    }
+    last_host = host;
+    int32_t ax[2] = {lx, -ly};  // (SDL's y is down)
+    for (int a = 0; a < 2; a++) {
+        if (ax[a] == last_ax[a] || (abs(ax[a] - last_ax[a]) < 1024 && ax[a] != 0)) continue;
+        SDL_Event e = {0};
+        e.type = SDL_EVENT_GAMEPAD_AXIS_MOTION;
+        e.gaxis.which = TEST_DEVICE, e.gaxis.axis = a ? SDL_GAMEPAD_AXIS_LEFTY : SDL_GAMEPAD_AXIS_LEFTX, e.gaxis.value = (Sint16)ax[a];
+        SDL_PushEvent(&e);
+        last_ax[a] = ax[a];
+    }
+}
+#endif
+
 // Forget held keys (the menu took focus); the gamepad is re-read on its next event.
 void input_reset(void) {
     press_unseen = 0, tap_buttons = 0;
@@ -255,8 +320,6 @@ void input_reset(void) {
 volatile int g_debug_frame_request;  // F9: dump the next frame's passes (build/pass_*.png) + draw log
 volatile int g_interp_ring_request;  // F10 or backslash (F10 can be a media key on a Mac): save frame interpolation's recent images (LARECOMP_INTERP_RING, metal.m)
 
-// Events a test pushes (LARECOMP_HOST_INPUT type: / sdlkey: / sdlpad: / sdlaxis: / mouse:) carry this device id: they go the whole way, menu first.
-#define TEST_DEVICE 0x7E57u
 static bool test_event(const SDL_Event *e) {
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: return e->key.which == TEST_DEVICE;
@@ -744,7 +807,7 @@ void input_frame(uint64_t frame) {
 extern bool menu_input_captured(void);  // runtime/ui/menu.mm: overlay menu or name entry up (it has the keys / pad)
 
 // Buttons held right now (keyboard, gamepad, test script), independent of whether the game polls (movies).
-uint64_t input_buttons_now(void) { return (menu_input_captured() ? 0 : key_buttons | pad_buttons) | script_buttons; }
+uint64_t input_buttons_now(void) { return (menu_input_captured() ? 0 : key_buttons | pad_buttons | xr_buttons) | script_buttons; }
 
 static int32_t clamp_axis(int32_t v) { return v > 32767 ? 32767 : v < -32767 ? -32767 : v; }
 
@@ -788,7 +851,7 @@ static void fill_state(Cpu *c) {
         LOG("[input] watching controller object %llx\n", c->x[1] - 8);
     }
     bool menu = menu_input_captured();  // the overlay menu / name entry has the controls (typing there isn't for the game)
-    uint64_t held = key_buttons | pad_buttons;
+    uint64_t held = key_buttons | pad_buttons | xr_buttons;
     atomic_fetch_and(&press_unseen, ~held);  // (the game sees these now)
     static uint64_t tap, tap_frame;  // (pressed and released since the last poll: held for the rest of this frame)
     {
@@ -806,7 +869,7 @@ static void fill_state(Cpu *c) {
         if (g_inject_plus > 0) { until = renderer_present_count() + 10; g_inject_plus = 0; }
         if (renderer_present_count() < until) b |= 1ull << BTN_PLUS;
     }
-    int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly) + script_ly);
+    int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx + xr_lx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly + xr_ly) + script_ly);
     int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry) + script_ry);
     if (!menu) {  // d-pad items (setting): the Items page assigns, play uses (runtime/hle/dpad_items.c; before mirroring:
         extern uint64_t dpad_items_input(uint64_t b);  // the d-pad as held)
@@ -822,7 +885,7 @@ static void fill_state(Cpu *c) {
     // d-pad / arrow keys walk (setting) while the stick is at rest. "At rest" has a dead zone: a controller's stick
     // never reads exactly 0 (a DualSense rests at a few hundred), which used to turn the d-pad off altogether.
     if (!menu && g_settings.dpad_mode == DPAD_MOVE && (int64_t)lx * lx + (int64_t)ly * ly < 8000ll * 8000) {
-        uint64_t d = key_buttons | pad_buttons | script_buttons;
+        uint64_t d = key_buttons | pad_buttons | xr_buttons | script_buttons;
         int dx = (int)((d >> BTN_RIGHT) & 1) - (int)((d >> BTN_LEFT) & 1);
         if (mirrored) dx = -dx;
         int dy = (int)((d >> BTN_UP) & 1) - (int)((d >> BTN_DOWN) & 1);
