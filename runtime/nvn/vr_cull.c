@@ -26,6 +26,7 @@ static struct {
     bool given_ex, given_tmax, given_ring;
 } C;
 static struct { bool have; float quad[4][2], floor_y, hlo, hhi, shrink[4]; } g_rect;  // the latest fit's floor quadrilateral (vr_cull_rect)
+static struct { bool have; float quad[4][2]; } g_drawn;  // where the fitted frustum meets the floor (vr_cull_drawn)
 static _Atomic float g_aspect, g_fs;   // the fitted culling aspect (absolute) and fovy scale; 0 = none yet
 static _Atomic float g_fovy_orig = 0;  // the game's own fovy field (radians or degrees, as it is)
 static _Atomic float g_aspect_orig = 0;
@@ -200,6 +201,12 @@ bool vr_cull_get(float *aspect, float *fovy_scale) {
     return true;
 }
 
+bool vr_cull_drawn(float quad[4][2]) {
+    if (!g_rect.have || !g_drawn.have) return false;  // (render thread, like vr_cull_fit)
+    memcpy(quad, g_drawn.quad, sizeof g_drawn.quad);
+    return true;
+}
+
 bool vr_cull_rect(float quad[4][2], float *floor_y, float *hlo, float *hhi) {
     if (!g_rect.have) return false;  // (render thread, like vr_cull_fit)
     memcpy(quad, g_rect.quad, sizeof g_rect.quad), *floor_y = g_rect.floor_y, *hlo = g_rect.hlo, *hhi = g_rect.hhi;
@@ -360,6 +367,21 @@ void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3],
     }
     float fs = atanf(ty) / atanf(ty0);
     atomic_store(&g_aspect, tx / ty), atomic_store(&g_fs, fs);
+    {   // (vr_cull_drawn) the floor the culling frustum takes in: its four corner rays to the floor (or the far plane)
+        static const int rg[4] = {0, 1, 3, 2};
+        float q[4][2], area = 0;
+        for (int i = 0; i < 4; i++) {
+            int c = rg[i];
+            float sx = c & 1 ? 1.0f : -1.0f, sy = c & 2 ? 1.0f : -1.0f, d[3];
+            for (int k = 0; k < 3; k++) d[k] = g->fwd[k] + sx * tx * g->right[k] + sy * ty * g->up[k];
+            float t = d[1] < -1e-3f ? (pivot[1] - g->eye[1]) / d[1] : tmax;
+            if (!(t > 0) || t > tmax) t = tmax;
+            q[i][0] = g->eye[0] + t * d[0], q[i][1] = g->eye[2] + t * d[2];
+        }
+        for (int i = 0; i < 4; i++) area += q[i][0] * q[(i + 1) % 4][1] - q[(i + 1) % 4][0] * q[i][1];
+        for (int i = 0; i < 4; i++) memcpy(g_drawn.quad[i], q[area >= 0 ? i : 3 - i], 8);
+        g_drawn.have = !behind;
+    }
     static uint64_t logged;
     if (getenv("LARECOMP_LOG_CULL") && l->frame >= logged + 120) {
         logged = l->frame;

@@ -21,6 +21,7 @@
 #include "../../rt.h"
 #include "../screen_filter.h"
 #include "../vr_cull.h"
+#include "foveation.h"
 #include "record.h"
 #include "stereo.h"
 #include "vk.h"
@@ -43,6 +44,8 @@ static struct {
     float radius, width;       // fade: clear within radius of the table's centre, black past radius + width (game units)
     float room_margin;         // fade in a room: the radius reaches at least this past the room's farthest corner
     float pivot_default;
+    bool smooth_off;           // LARECOMP_VR_EDGE_SMOOTH=0: the foveated passes' coarse blocks are left as they are
+    bool fit;                  // fade, overworld: fitted inside the floor the culling draws (LARECOMP_VR_EDGE_FIT=0: not)
 } cfg;
 
 // fade's defaults (game units; a screen is about 15 x 12, a tile 1.5; docs/af/EDGE.md "Fade")
@@ -95,6 +98,8 @@ static void cfg_init(void) {
     cfg.radius = (e = getenv("LARECOMP_VR_EDGE_RADIUS")) && atof(e) > 0 ? (float)atof(e) : FADE_RADIUS;
     cfg.width = (e = getenv("LARECOMP_VR_EDGE_WIDTH")) && atof(e) > 0 ? (float)atof(e) : FADE_WIDTH;
     cfg.room_margin = FADE_ROOM_MARGIN;
+    cfg.smooth_off = (e = getenv("LARECOMP_VR_EDGE_SMOOTH")) && atoi(e) == 0;
+    cfg.fit = !((e = getenv("LARECOMP_VR_EDGE_FIT")) && atoi(e) == 0);
     float s = (e = getenv("LARECOMP_VR_SCALE")) && atof(e) > 0 ? (float)atof(e) : 0.067f;
     float d = (e = getenv("LARECOMP_VR_DIST")) && atof(e) > 0 ? (float)atof(e) : 1.0f;
     cfg.pivot_default = d / s;
@@ -122,6 +127,11 @@ EdgeMode edge_mode(void) {
     return (EdgeMode)m;
 }
 bool edge_passthrough_wanted(void) { return edge_mode() == EDGE_PASSTHROUGH; }
+bool edge_woods_fog_hidden(void) {
+    static int keep = -1;
+    if (keep < 0) keep = getenv("LARECOMP_VR_WOODS_FOG") && atoi(getenv("LARECOMP_VR_WOODS_FOG")) > 0;
+    return !keep;
+}
 
 // The VR tab's Table Edge (runtime/vr_settings.c; VRS_EDGE_OFF / FADE / PASSTHROUGH = black, fade, passthrough).
 static _Atomic bool g_mode_changed;
@@ -158,6 +168,13 @@ void edge_set_mode(int vrs) {
     "  vec4 fd;    // fade: the table's centre (world), radius (units)\n"                                               \
     "  vec4 fw;    // fade: width (units), -, -, -\n"                                                                   \
     "  vec4 pf;    // the present's screen filter: mode, the rig's blink (screen_filter.h)\n"                         \
+    "  vec4 va;    // foveation (fov_shade): on, foci, r0, r1\n"                                                      \
+    "  vec4 vc;    // the foci in the colour image's pixels: x0 y0 x1 y1\n"                                            \
+    "  vec4 vb;    // the filled part w h, the middle ring's rate (log2 w, h)\n"                                       \
+    "  vec4 vd;    // the outer rate (log2 w, h), the colour image's size\n"                                           \
+    "  vec4 dq[2]; // fade: the floor the culling draws: x0 z0 x1 z1 / x2 z2 x3 z3 (counter-clockwise)\n"              \
+    "  vec4 dk;    // fade: that floor on, the fade band inside its edges, the margin (units)\n"                        \
+    "  vec4 ls;    // fade, foveated: the block-centre images' sizes (middle ring w h, outer w h)\n"                    \
     "} u;\n"                                                                                                           \
     "layout(set = 0, binding = 1) uniform sampler2D dt;\n"                                                             \
     "layout(set = 0, binding = 2) uniform sampler2D ct;\n"                                                             \
@@ -167,7 +184,34 @@ void edge_set_mode(int vrs) {
     "// the present's mapping from the output to the eye image (exec.c vk_stereo_eyes, present.vert)\n"                \
     "vec2 qmap(vec2 p) { return vec2(p.x, u.fl.y > 0.5 ? 1.0 - p.y : p.y); }\n"                                        \
     "float dsample(vec2 q) { return texture(dt, q * u.cc.zw).r; }\n"                                                   \
-    "bool is_geo(float d) { return d < 0.9999; }\n"
+    "bool is_geo(float d) { return d < 0.9999; }\n"                                                                  \
+    "// the shading rate (log2 w, h) the foveated passes gave the 8 px texel holding colour pixel sp (foveation.c)\n" \
+    "ivec2 vrs_rate(vec2 sp) {\n"                                                                                     \
+    "  vec2 x = (floor(sp / 8.0) + 0.5) * 8.0;\n"                                                                     \
+    "  if (x.x > u.vb.x + 8.0 || x.y > u.vb.y + 8.0) return ivec2(2);\n"                                              \
+    "  ivec2 r = ivec2(2);\n"                                                                                         \
+    "  for (int f = 0; f < 2; f++) {\n"                                                                               \
+    "    if (float(f) >= u.va.y) break;\n"                                                                            \
+    "    float d = length((x - (f == 0 ? u.vc.xy : u.vc.zw)) / (0.5 * u.vb.xy));\n"                                   \
+    "    r = min(r, d < u.va.z ? ivec2(0) : d < u.va.w ? ivec2(u.vb.zw) : ivec2(u.vd.xy));\n"                         \
+    "  }\n"                                                                                                           \
+    "  return r;\n"                                                                                                   \
+    "}\n"                                                                                                             \
+    "// the eye's colour at q, with the foveated passes' coarse blocks smoothed: where a block of b pixels was shaded\n" \
+    "// once, the colour is interpolated between the block centres (bilinear), so no block edges show\n"            \
+    "vec3 colour(vec2 q) {\n"                                                                                         \
+    "  vec2 uv = q * u.cc.xy;\n"                                                                                      \
+    "  if (u.va.x < 0.5) return texture(ct, uv).rgb;\n"                                                               \
+    "  vec2 sp = uv * u.vd.zw;\n"                                                                                     \
+    "  ivec2 lr = vrs_rate(sp);\n"                                                                                    \
+    "  if (lr.x + lr.y == 0) return texture(ct, uv).rgb;\n"                                                           \
+    "  vec2 b = vec2(float(1 << lr.x), float(1 << lr.y));\n"                                                          \
+    "  vec2 f = sp / b - 0.5, i0 = floor(f), t = f - i0;\n"                                                           \
+    "  vec2 c0 = (i0 + 0.5) * b / u.vd.zw, c1 = (i0 + 1.5) * b / u.vd.zw;\n"                                          \
+    "  vec3 a = mix(texture(ct, c0).rgb, texture(ct, vec2(c1.x, c0.y)).rgb, t.x);\n"                                   \
+    "  vec3 e = mix(texture(ct, vec2(c0.x, c1.y)).rgb, texture(ct, c1).rgb, t.x);\n"                                   \
+    "  return mix(a, e, t.y);\n"                                                                                      \
+    "}\n"
 
 static const char *vs_src =
     "#version 450\n"
@@ -231,16 +275,95 @@ static const char *tint_fs =
     "  o = vec4(u.top.w > 0.5 ? c : mix(prev.rgb, c, u.bot.w), 1.0);\n"
     "}\n";
 
+// (fade) how much of the pixel at output position p is kept: its point on the table (its depth, else where its ray
+// meets the floor) against the round fade, and against the edges of the floor the culling draws (nothing past them
+// is drawn, so the fade has ended before them: a cut never shows)
+// (fade) the treated pixel at output position p (a black pixel stays black: its depth is not read, and the void is
+// most of the eye)
+#define FADE_FUNCS \
+    "float fade_k(vec2 p, float d, bool geo) {\n" \
+    "  vec2 q = qmap(p);\n" \
+    "  vec2 nd = vec2(p.x * 2.0 - 1.0, 1.0 - 2.0 * q.y);\n" \
+    "  vec2 xy = vec2((nd.x + u.proj.z) / u.proj.x, (nd.y + u.proj.w) / u.proj.y);\n" \
+    "  float z = (d - u.zt.z) / u.zt.w;\n" \
+    "  if (u.fl.x > 0.5) z = z * 2.0 - 1.0;\n" \
+    "  float pd = u.zt.y / (z + u.zt.x);\n" \
+    "  vec3 E = -(u.vr[0].xyz * u.vr[0].w + u.vr[1].xyz * u.vr[1].w + u.vr[2].xyz * u.vr[2].w);\n" \
+    "  vec3 dw = u.vr[0].xyz * xy.x + u.vr[1].xyz * xy.y - u.vr[2].xyz;\n" \
+    "  float t = geo ? pd : (dw.y < -1e-5 ? (u.fd.y - E.y) / dw.y : -1.0);\n" \
+    "  if (t <= 0.0) return 0.0;\n" \
+    "  vec2 wp = E.xz + dw.xz * t;\n" \
+    "  float x = clamp((length(wp - u.fd.xz) - u.fd.w) / max(u.fw.x, 1e-3), 0.0, 1.0);\n" \
+    "  float k = 1.0 - x * x * x * (x * (x * 6.0 - 15.0) + 10.0);\n"  /* (smootherstep: no kink where it starts or ends) */ \
+    "  if (u.dk.x > 0.5)\n" \
+    "    for (int i = 0; i < 4; i++) {\n" \
+    "      vec2 a = i < 2 ? (i == 0 ? u.dq[0].xy : u.dq[0].zw) : (i == 2 ? u.dq[1].xy : u.dq[1].zw);\n" \
+    "      vec2 b = i == 3 ? u.dq[0].xy : (i == 0 ? u.dq[0].zw : (i == 1 ? u.dq[1].xy : u.dq[1].zw));\n" \
+    "      vec2 e = b - a, f = wp - a;\n" \
+    "      float y = clamp(((e.x * f.y - e.y * f.x) / max(length(e), 1e-4) - u.dk.z) / u.dk.y, 0.0, 1.0);\n" \
+    "      k *= y * y * (3.0 - 2.0 * y);\n" \
+    "    }\n" \
+    "  return k;\n" \
+    "}\n" \
+    "vec3 fade_px(vec2 p, out float k) {\n" \
+    "  vec2 q = qmap(p);\n" \
+    "  vec3 s = texture(ct, q * u.cc.xy).rgb;\n" \
+    "  k = 0.0;\n" \
+    "  if (max(s.r, max(s.g, s.b)) <= 0.0) return s;\n" \
+    "  float d = dsample(q);\n" \
+    "  k = fade_k(p, d, is_geo(d));\n" \
+    "  return s * k;\n" \
+    "}\n" \
+    "vec2 out_pos(vec2 sp) { return qmap(sp / (u.vd.zw * u.cc.xy)); }\n"  /* (colour pixel -> output position) */ \
+    ""
+
+// (fade, foveated) the treated colour (rgb) and fade factor (a) at the centre of each block of 2^fw.y x 2^fw.z pixels
+// (one texel per block): the main pass reads it bilinearly where the foveated passes shaded such blocks
+static const char *low_fs =
+    PRELUDE
+    FADE_FUNCS
+    "void main() {\n"
+    "  vec2 b = vec2(float(1 << int(u.fw.y)), float(1 << int(u.fw.z)));\n"
+    "  float k;\n"
+    "  vec3 c = fade_px(out_pos(gl_FragCoord.xy * b), k);\n"
+    "  o = vec4(c, k);\n"
+    "}\n";
+
 static const char *main_fs =
     PRELUDE
     "float ign(vec2 p, float s) { return fract(52.9829189 * fract(dot(p + 5.588238 * s, vec2(0.06711056, 0.00583715)))); }\n"
+    FADE_FUNCS
     "void main() {\n"
+    // fade, no debug view: where the foveated passes shaded blocks of pixels once, the treated colour is interpolated
+    // between the block centres, so neither the blocks nor the stairs they leave at a silhouette show
+    "  if (u.fl.z > 3.5 && u.mi.z < 0.5) {\n"
+    "    vec2 p = gl_FragCoord.xy / u.sz.xy, q = qmap(p);\n"
+    "    vec2 sp = q * u.cc.xy * u.vd.zw;\n"
+    "    ivec2 lr = u.va.x > 0.5 ? vrs_rate(sp) : ivec2(0);\n"
+    "    float k;\n"
+    "    vec3 c;\n"
+    "    if (lr.x + lr.y == 0) c = fade_px(p, k);\n"
+    "    else {\n"  // (the block-centre image of this rate, bilinear: mk the outer ring's, tn the middle ring's)
+    "      bool mid = lr == ivec2(u.vb.zw);\n"
+    "      vec2 b = vec2(float(1 << lr.x), float(1 << lr.y));\n"
+    "      vec4 v = mid ? texture(tn, sp / b / u.ls.xy) : texture(mk, sp / b / u.ls.zw);\n"
+    "      c = v.rgb, k = v.a;\n"
+    "    }\n"
+    // (dither: triangular, one 8-bit step, fixed to the pixel so it cannot crawl under head motion; only where darkened
+    // and not black, so the void stays exactly black)
+    "    float n2 = ign(gl_FragCoord.xy, 0.0) + ign(gl_FragCoord.yx + vec2(37.0, 11.0), 0.0) - 1.0;\n"
+    "    c += n2 / 255.0 * min((1.0 - k) * 8.0, 1.0) * min(max(c.r, max(c.g, c.b)) * 32.0, 1.0);\n"
+    "    { vec4 pf = u.pf;\n" SCREEN_FILTER_SRC("vec3") "  }\n"
+    "    o = vec4(c, 1.0);\n"
+    "    return;\n"
+    "  }\n"
     "  vec2 p = gl_FragCoord.xy / u.sz.xy;\n"
     "  int quad = 3;\n"
     "  if (abs(u.mi.z - 9.0) < 0.5) { quad = int(p.x * 2.0) + 2 * int(p.y * 2.0); p = fract(p * 2.0); }\n"  // (debug 9: 2x2 mosaic)
     "  vec2 q = qmap(p);\n"
-    "  vec4 s = texture(ct, q * u.cc.xy);\n"
-    "  float d = dsample(q);\n"
+    "  vec4 s = vec4(colour(q), 1.0);\n"
+    // (fade: a black pixel stays black whatever its depth says, so its depth is not read; void pixels are most of the eye)
+    "  float d = u.fl.z > 3.5 && max(s.r, max(s.g, s.b)) <= 0.0 ? 1.0 : dsample(q);\n"
     "  bool geo = is_geo(d);\n"
     // the pixel's ray in eye space (x / depth, y / depth), and its distance from the eye in game units
     "  vec2 nd = vec2(p.x * 2.0 - 1.0, 1.0 - 2.0 * q.y);\n"
@@ -293,8 +416,10 @@ static const char *main_fs =
     "  if (abs(u.fl.z - 3.0) < 0.5) { a = 1.0 - fade; c = s.rgb * a; }\n"  // (passthrough: premultiplied)
     "  float n = ign(gl_FragCoord.xy, u.fl.w) + ign(gl_FragCoord.xy + 17.0, u.fl.w + 3.0) - 1.0;\n"  // (triangular)
     "  if (u.fl.z > 3.5) {\n"  // (fade: toward black; dithered where darkened and not black already, so the void stays black)
+    // (the dither is fixed to the pixel, not drawn anew each frame: it cannot crawl or shimmer under head motion)
+    "    float n2 = ign(gl_FragCoord.xy, 0.0) + ign(gl_FragCoord.yx + vec2(37.0, 11.0), 0.0) - 1.0;\n"
     "    c = s.rgb * fk;\n"
-    "    c += n / 255.0 * min((1.0 - fk) * 8.0, 1.0) * min(max(s.r, max(s.g, s.b)) * 32.0, 1.0);\n"
+    "    c += n2 / 255.0 * min((1.0 - fk) * 8.0, 1.0) * min(max(s.r, max(s.g, s.b)) * 32.0, 1.0);\n"
     "  } else\n"
     "  c += n / 255.0 * min(fade * 8.0, 1.0);\n"  // (dither only where something was blended: the rest is untouched)
     "  { vec4 pf = u.pf;\n" SCREEN_FILTER_SRC("vec3") "  }\n"  // (the present's screen filter and the rig's blink)
@@ -330,7 +455,7 @@ static const char *main_fs =
 
 // ------------------------------------------------------------------------------------------------ GPU objects
 typedef struct { VkImage img; VmaAllocation mem; VkImageView view; VkFormat fmt; uint32_t w, h; } Img;
-enum { P_COV, P_BLUR, P_TINT, NPIPE };
+enum { P_COV, P_BLUR, P_TINT, P_LOW, NPIPE };
 static struct {
     int ok;  // -1 not tried, 0 failed, 1 ready
     VkShaderModule vs, fs[NPIPE + 1];
@@ -338,7 +463,7 @@ static struct {
     VkPipelineLayout pl;
     VkPipeline pipe[NPIPE];
     struct { VkFormat fmt; VkPipeline p; } main_pipe[4];
-    Img mask[2], tint[2];
+    Img mask[2], tint[2], low[2];  // (low: fade, foveated: the middle and outer rings' block-centre images)
     int tint_cur;
     bool tint_first;
     double t_last;
@@ -412,8 +537,9 @@ static bool init(void) {
     g.fs[P_COV] = compile(cov_fs, STAGE_FRAGMENT, "edge_cov.frag");
     g.fs[P_BLUR] = compile(blur_fs, STAGE_FRAGMENT, "edge_blur.frag");
     g.fs[P_TINT] = compile(tint_fs, STAGE_FRAGMENT, "edge_tint.frag");
+    g.fs[P_LOW] = compile(low_fs, STAGE_FRAGMENT, "edge_low.frag");
     g.fs[NPIPE] = compile(main_fs, STAGE_FRAGMENT, "edge_main.frag");
-    if (!g.vs || !g.fs[P_COV] || !g.fs[P_BLUR] || !g.fs[P_TINT] || !g.fs[NPIPE]) return false;
+    if (!g.vs || !g.fs[P_COV] || !g.fs[P_BLUR] || !g.fs[P_TINT] || !g.fs[P_LOW] || !g.fs[NPIPE]) return false;
     VkDescriptorSetLayoutBinding b[5];
     for (uint32_t i = 0; i < 5; i++)
         b[i] = (VkDescriptorSetLayoutBinding){i, i == 0 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
@@ -425,7 +551,8 @@ static bool init(void) {
     g.pipe[P_COV] = make_pipe(g.fs[P_COV], VK_FORMAT_R16_SFLOAT);
     g.pipe[P_BLUR] = make_pipe(g.fs[P_BLUR], VK_FORMAT_R16_SFLOAT);
     g.pipe[P_TINT] = make_pipe(g.fs[P_TINT], VK_FORMAT_R16G16B16A16_SFLOAT);
-    if (!g.pipe[P_COV] || !g.pipe[P_BLUR] || !g.pipe[P_TINT]) return false;
+    g.pipe[P_LOW] = make_pipe(g.fs[P_LOW], VK_FORMAT_R16G16B16A16_SFLOAT);
+    if (!g.pipe[P_COV] || !g.pipe[P_BLUR] || !g.pipe[P_TINT] || !g.pipe[P_LOW]) return false;
     g.ok = 1;
     return true;
 }
@@ -458,7 +585,7 @@ static void begin(VkCommandBuffer cb, VkImageView view, VkImageLayout layout, ui
     }
 }
 
-typedef struct { float proj[4], zt[4], fl[4], up[4], cc[4], sz[4], fog[4], top[4], bot[4], mi[4], vr[3][4], rq[2][4], rc[4], rb[4], sky[4], fd[4], fw[4], pf[4]; } UBlock;
+typedef struct { float proj[4], zt[4], fl[4], up[4], cc[4], sz[4], fog[4], top[4], bot[4], mi[4], vr[3][4], rq[2][4], rc[4], rb[4], sky[4], fd[4], fw[4], pf[4], va[4], vc[4], vb[4], vd[4], dq[2][4], dk[4], ls[4]; } UBlock;
 
 static VkDescriptorSet make_set(const UBlock *ub, VkImageView depth, VkImageView color, VkImageView mask, VkImageView tint) {
     VkSpan s = vk_transient_copy(ub, sizeof *ub, 256);
@@ -466,7 +593,7 @@ static VkDescriptorSet make_set(const UBlock *ub, VkImageView depth, VkImageView
     VkSampler nearest = vk_default_sampler(false), lin = vk_default_sampler(true);
     VkDescriptorBufferInfo bi = {s.buf, s.off, sizeof *ub};
     VkDescriptorImageInfo im[4] = {{nearest, depth, VK_IMAGE_LAYOUT_GENERAL}, {lin, color, VK_IMAGE_LAYOUT_GENERAL},
-                                   {lin, mask, VK_IMAGE_LAYOUT_GENERAL}, {nearest, tint, VK_IMAGE_LAYOUT_GENERAL}};
+                                   {lin, mask, VK_IMAGE_LAYOUT_GENERAL}, {lin, tint, VK_IMAGE_LAYOUT_GENERAL}};
     VkWriteDescriptorSet wr[5];
     for (uint32_t i = 0; i < 5; i++) {
         wr[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = i, .descriptorCount = 1};
@@ -539,6 +666,8 @@ static struct {
     TexBackend *color, *depth;
     uint32_t layer, depth_layer;  // (LARECOMP_MV: the eye's layer of each)
     float ax, ay, V[16], P[16], zn, zf;
+    bool vrs;       // the passes that made it were foveated (fov_shade): their coarse blocks are smoothed
+    FovShade sh;
 } noted[2];
 
 void stereo_eye_post(const StereoEyePost *e) {
@@ -549,6 +678,13 @@ void stereo_eye_post(const StereoEyePost *e) {
     n->have = e->depth && e->have_matrices;
     n->color = e->color, n->depth = e->depth, n->layer = e->layer, n->depth_layer = e->depth_layer, n->ax = e->ax, n->ay = e->ay, n->zn = e->zn, n->zf = e->zf;
     memcpy(n->V, e->V, 64), memcpy(n->P, e->P, 64);
+    n->vrs = fov_shade(&n->sh) && n->sh.w == e->width && n->sh.h == e->height;
+    {
+        static bool said_vrs;
+        FovShade sh;
+        if (!said_vrs && fov_shade(&sh) && !n->vrs)
+            LOG("[edge] foveated passes %ux%u, eye output %ux%u: their blocks are not smoothed\n", sh.w, sh.h, e->width, e->height), said_vrs = true;
+    }
     static bool said;
     if (!said && edge_mode() != EDGE_BLACK && (!e->depth || !e->have_matrices)) LOG("[edge] eye %d: no %s noted: the edge pass waits for it\n", e->eye, e->depth ? "matrices" : "depth"), said = true;
 }
@@ -563,6 +699,63 @@ typedef struct {
 extern uint32_t nvn_depth_mode(void);
 bool renderer_origin_lower_left(void);
 
+// (fade, overworld) The culling draws only the floor inside `drawn` (vr_cull_drawn: a trapezoid from the game camera,
+// widening away from it). With the circle about the table's centre at its old size (black past 25 units) the trapezoid's
+// slanted sides cut the table first, 10-14 units out: a straight-sided wedge of trees with black past it ("a triangle off
+// the trees"). So the circle is fitted to it: its centre moves (at most 8 units, preferring the table's centre) to where
+// it can be largest, and it is black by the sides and the far edge. The near edge (the shortest, under the game camera,
+// often only 2 units past the stock screen's) may cut up to FADE_NEAR_ALLOW into it: there the shader also fades to the
+// trapezoid's edges (FADE_CUT_BAND), so that edge is soft too. Width 40% of the black radius (3 units at least); black
+// at FADE_MIN_BLACK at the least and never past radius + width. Eye 0 fits, eye 1 uses the same; filtered over
+// FADE_FIT_TAU, so the edge glides when the culling changes with the head.
+#define FADE_CUT_BAND 2.0f
+#define FADE_CUT_MARGIN 0.25f
+#define FADE_FIT_MARGIN 0.5f
+#define FADE_NEAR_ALLOW 3.0f
+#define FADE_MIN_BLACK 10.0f
+#define FADE_FIT_TAU 0.4f
+static float drawn_dist(const float q[4][2], float x, float z, int near, float allow) {  // inside distance (negative: outside)
+    float m = 1e9f;
+    for (int i = 0; i < 4; i++) {
+        float ex = q[(i + 1) % 4][0] - q[i][0], ez = q[(i + 1) % 4][1] - q[i][1], el = sqrtf(ex * ex + ez * ez) + 1e-6f;
+        m = fminf(m, (ex * (z - q[i][1]) - ez * (x - q[i][0])) / el + (i == near ? allow : 0.0f));
+    }
+    return m;
+}
+static bool fade_fit(int eye, const float q[4][2], float c[3], float *r, float *w, bool *cut) {
+    static struct { bool ok; float off[2], rb, anchor[2]; double t; } f;
+    int near = 0;
+    float ln = 1e9f;
+    for (int i = 0; i < 4; i++) {
+        float l = hypotf(q[(i + 1) % 4][0] - q[i][0], q[(i + 1) % 4][1] - q[i][1]);
+        if (l < ln) ln = l, near = i;
+    }
+    if (eye == 0) {
+        float best = -1e9f, bo[2] = {0, 0}, bin = 0;
+        for (int j = -16; j <= 16; j++)
+            for (int i = -16; i <= 16; i++) {
+                float ox = i * 0.5f, oz = j * 0.5f, m = drawn_dist(q, c[0] + ox, c[2] + oz, near, FADE_NEAR_ALLOW);
+                float sc = m - 0.25f * sqrtf(ox * ox + oz * oz);
+                if (sc > best) best = sc, bo[0] = ox, bo[1] = oz, bin = m;
+            }
+        float rb = fmaxf(fminf(cfg.radius + cfg.width, bin - FADE_FIT_MARGIN), FADE_MIN_BLACK);
+        double now = plat_now_ns() / 1e9;
+        float jump = hypotf(c[0] - f.anchor[0], c[2] - f.anchor[1]);
+        if (!f.ok || now - f.t > 0.5 || jump > 3.0f) f.off[0] = bo[0], f.off[1] = bo[1], f.rb = rb;  // (a new place: no glide)
+        else {
+            float a = 1.0f - expf(-(float)(now - f.t) / FADE_FIT_TAU);
+            f.off[0] += (bo[0] - f.off[0]) * a, f.off[1] += (bo[1] - f.off[1]) * a, f.rb += (rb - f.rb) * a;
+        }
+        f.ok = true, f.t = now, f.anchor[0] = c[0], f.anchor[1] = c[2];
+    }
+    if (!f.ok) return false;
+    c[0] += f.off[0], c[2] += f.off[1];
+    *w = fminf(fmaxf(f.rb * 0.4f, 3.0f), cfg.width);
+    *r = fmaxf(f.rb - *w, 0.5f);
+    *cut = drawn_dist(q, c[0], c[2], -1, 0) < f.rb + 0.5f * FADE_FIT_MARGIN;  // (the circle reaches past the drawn floor: fade to its edges too)
+    return true;
+}
+
 static bool g_tint_restart;
 bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uint32_t w, uint32_t h) {
     EdgeMode mode = edge_mode();
@@ -572,12 +765,16 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
     extern int game_level_overworld(void);  // (widescreen.c) 1 the overworld, 0 another level, -1 not in play
     int ow = game_level_overworld();
     if (mode == EDGE_FADE ? ow < 0 : !cfg.indoors && ow != 1) return false;  // (fade: everywhere in play)
-    float fade_c[3] = {0}, fade_r = cfg.radius;  // (fade) the table's centre and the clear radius
+    float fade_c[3] = {0}, fade_r = cfg.radius, fade_w = cfg.width;  // (fade) the table's centre, the clear radius, the width
+    float drawn[4][2];
+    bool fitted = false, cut = false;
     // (scene: the overworld drawn further out, the VR tab's Surroundings) the fade ends at the drawn box's nearer side
-    // instead of radius + width out, unless LARECOMP_VR_EDGE_RADIUS says otherwise
+    // instead of radius + width out, unless LARECOMP_VR_EDGE_RADIUS says otherwise; with a reach the culling frustum is
+    // opened wide and the box limits what is drawn, so the fit to the frustum's floor is left out
     static int r_given = -1;
     if (r_given < 0) r_given = getenv("LARECOMP_VR_EDGE_RADIUS") != NULL;
-    if (!r_given) fade_r = fmaxf(fade_r, vr_cull_scene_reach() - cfg.width);
+    float reach = vr_cull_scene_reach();
+    if (!r_given) fade_r = fmaxf(fade_r, reach - cfg.width);
     if (mode == EDGE_FADE) {
         float lo[3], hi[3];
         bool room, zone;
@@ -589,6 +786,7 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
                 float dx = (i & 1 ? hi[0] : lo[0]) - fade_c[0], dz = (i & 2 ? hi[2] : lo[2]) - fade_c[2];
                 fade_r = fmaxf(fade_r, sqrtf(dx * dx + dz * dz) + cfg.room_margin);
             }
+        if (ow == 1 && cfg.fit && !(reach > 0) && vr_cull_drawn(drawn)) fitted = fade_fit(eye, drawn, fade_c, &fade_r, &fade_w, &cut);
     }
     EdgeEye ein = {.eye = eye};
     const EdgeEye *in = &ein;
@@ -667,13 +865,26 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
         }
     }
     memcpy(u.sky, cfg.sky, sizeof cfg.sky), u.sky[3] = cfg.skymix;
-    memcpy(u.fd, fade_c, sizeof fade_c), u.fd[3] = fade_r, u.fw[0] = cfg.width;
-    screen_filter_params(u.pf);  // (the present's screen filter and the rig's blink, as the present draw would apply them)
+    memcpy(u.fd, fade_c, sizeof fade_c), u.fd[3] = fade_r, u.fw[0] = fade_w;
+    if (fitted && cut) {
+        memcpy(u.dq, drawn, sizeof drawn);
+        u.dk[0] = 1, u.dk[1] = FADE_CUT_BAND, u.dk[2] = FADE_CUT_MARGIN;
+    }
+    screen_filter_params(u.pf);
+    if (noted[eye].vrs && !(cfg.smooth_off)) {  // (the foveated passes' shading: edge.c colour())
+        const FovShade *sh = &noted[eye].sh;
+        u.va[0] = 1, u.va[1] = (float)sh->nfoci, u.va[2] = sh->r0, u.va[3] = sh->r1;
+        u.vc[0] = sh->c[0][0], u.vc[1] = sh->c[0][1], u.vc[2] = sh->c[1][0], u.vc[3] = sh->c[1][1];
+        u.vb[0] = sh->fw, u.vb[1] = sh->fh, u.vb[2] = (float)sh->mid[0], u.vb[3] = (float)sh->mid[1];
+        u.vd[0] = (float)sh->out[0], u.vd[1] = (float)sh->out[1], u.vd[2] = (float)sh->w, u.vd[3] = (float)sh->h;
+    }  // (the present's screen filter and the rig's blink, as the present draw would apply them)
     {
         static float said_r = -1;
-        if (mode == EDGE_FADE && fabsf(fade_r - said_r) > 0.5f)
-            LOG("[edge] fade: centre (%.1f %.1f %.1f), clear to %.1f units, black past %.1f\n", fade_c[0], fade_c[1], fade_c[2], fade_r,
-                fade_r + cfg.width), said_r = fade_r;
+        static double said_t;
+        double tn = plat_now_ns() / 1e9;
+        if (mode == EDGE_FADE && fabsf(fade_r - said_r) > 0.5f && tn - said_t > 2.0 && (said_t = tn))
+            LOG("[edge] fade: centre (%.1f %.1f %.1f), clear to %.1f units, black past %.1f%s\n", fade_c[0], fade_c[1], fade_c[2], fade_r,
+                fade_r + fade_w, fitted ? " (fitted inside the floor the culling draws)" : ""), said_r = fade_r;
     }
     u.mi[0] = cfg.desat, u.mi[1] = cfg.bright, u.mi[2] = (float)cfg.debug, u.mi[3] = cfg.fixed_colours ? 1.0f : 0.0f;
 
@@ -713,9 +924,42 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
     rec_CmdEndRendering(cb);
     vk_full_barrier(cb);
     }
+    // (fade, foveated) the block-centre images of the middle and outer rings
+    VkImageView mk_view = g.mask[0].view, tn_view = g.tint[cur].view;
+    if (fade && u.va[0] > 0) {
+        const FovShade *sh = &noted[eye].sh;
+        int rl[2][2] = {{sh->mid[0], sh->mid[1]}, {sh->out[0], sh->out[1]}};
+        bool ok = true;
+        for (int i = 0; i < 2 && ok; i++) {
+            uint32_t lw = (sh->w + (1u << rl[i][0]) - 1) >> rl[i][0], lh = (sh->h + (1u << rl[i][1]) - 1) >> rl[i][1];
+            ok = img_make(&g.low[i], VK_FORMAT_R16G16B16A16_SFLOAT, lw, lh);
+            u.ls[i * 2] = (float)lw, u.ls[i * 2 + 1] = (float)lh;
+        }
+        if (ok) {
+            for (int i = 0; i < 2; i++) {
+                UBlock ul = u;
+                ul.fw[1] = (float)rl[i][0], ul.fw[2] = (float)rl[i][1];
+                VkDescriptorSet ls = make_set(&ul, in->depth, in->color, g.mask[0].view, g.tint[cur].view);
+                begin(cb, g.low[i].view, VK_IMAGE_LAYOUT_GENERAL, g.low[i].w, g.low[i].h);
+                if (i == 0 && sh->r1 > 0) {  // (the middle ring's image is only read inside the ring: its box about the foci)
+                    float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f, rx = sh->r1 * 0.5f * sh->fw + 8, ry = sh->r1 * 0.5f * sh->fh + 8;
+                    for (int f = 0; f < sh->nfoci; f++)
+                        x0 = fminf(x0, sh->c[f][0] - rx), x1 = fmaxf(x1, sh->c[f][0] + rx), y0 = fminf(y0, sh->c[f][1] - ry), y1 = fmaxf(y1, sh->c[f][1] + ry);
+                    int bx0 = (int)fmaxf(floorf(x0 / (float)(1 << rl[0][0])) - 1, 0), by0 = (int)fmaxf(floorf(y0 / (float)(1 << rl[0][1])) - 1, 0);
+                    int bx1 = (int)fminf(ceilf(x1 / (float)(1 << rl[0][0])) + 1, (float)g.low[0].w), by1 = (int)fminf(ceilf(y1 / (float)(1 << rl[0][1])) + 1, (float)g.low[0].h);
+                    VkRect2D sc = {{bx0, by0}, {(uint32_t)(bx1 > bx0 ? bx1 - bx0 : 0), (uint32_t)(by1 > by0 ? by1 - by0 : 0)}};
+                    rec_CmdSetScissor(cb, 0, 1, &sc);
+                }
+                fullscreen(cb, g.pipe[P_LOW], ls);
+                rec_CmdEndRendering(cb);
+            }
+            vk_full_barrier(cb);
+            tn_view = g.low[0].view, mk_view = g.low[1].view;
+        } else u.va[0] = 0;  // (no images: the blocks stay)
+    }
     // the eye image
     u.fl[3] = fl3;
-    set = make_set(&u, in->depth, in->color, g.mask[0].view, g.tint[cur].view);
+    set = make_set(&u, in->depth, in->color, mk_view, tn_view);
     begin(cb, target, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, w, h);
     if (!(bench & 4)) fullscreen(cb, mp, set);
     rec_CmdEndRendering(cb);
