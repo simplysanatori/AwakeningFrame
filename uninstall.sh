@@ -5,11 +5,29 @@
 # Environment: AWAKENINGFRAME_APP, LARECOMP_DATA_ROOT, AWAKENINGFRAME_SKIP_STEAM, AF_CEF_PORT, AF_STEAM_DIR as in install.sh.
 # If Steam is not running the shortcut stays; run this again with Steam up, or remove it in Steam.
 # SteamVR's per-app settings for the entry are left alone.
+# Run from an unpacked release (how Frametanium removes it) it removes only a release install: the one in
+# ~/Games/AwakeningFrame/app (with the Steam entry), or the one beside a source install in ~/Games/AwakeningFrame/release
+# (without: that entry is the source install's). A build from source is never removed from there.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOOLS=$HERE/steam-frame
 [ -d "$TOOLS" ] || TOOLS=$HERE
 DEST=${AWAKENINGFRAME_APP:-$HOME/Games/AwakeningFrame/app}
+SKIP_STEAM=${AWAKENINGFRAME_SKIP_STEAM:-}
+is_release() { grep -q '^release ' "$1/.af-install" 2> /dev/null; }
+if [ -x "$HERE/lasrecomp" ] && [ -d "$HERE/lasgen" ] && [ -f "$HERE/VERSION" ] && [ -z "${AWAKENINGFRAME_APP:-}" ]; then
+  BESIDE_DIR=$(dirname "$DEST")/release
+  if is_release "$DEST"; then
+    :   # (the release in the usual place, with the Steam entry)
+  elif is_release "$BESIDE_DIR"; then
+    echo "removing the release beside the build from source; the build from source in $DEST and its Steam entry stay"
+    DEST=$BESIDE_DIR
+    SKIP_STEAM=1
+  else
+    echo "no release install found ($DEST is $([ -d "$DEST" ] && echo "a build from source, left as it is" || echo "not there")); nothing to remove"
+    exit 0
+  fi
+fi
 DATA=${LARECOMP_DATA_ROOT:-$HOME/.local/share/lasrecomp}
 CEFPORT=${AF_CEF_PORT:-8080}
 STEAM=${AF_STEAM_DIR:-$HOME/.local/share/Steam}
@@ -19,8 +37,8 @@ case "$1" in --purge) PURGE=1 ;; "") ;; *) echo "usage: $0 [--purge]" >&2; exit 
 [ -f "$TOOLS/steam-cef.py" ] || TOOLS=$DEST
 if pgrep -f "^$DEST/lasrecomp" > /dev/null 2>&1; then echo "the game is running; quit it first" >&2; exit 1; fi
 
-if [ -n "$AWAKENINGFRAME_SKIP_STEAM" ]; then
-  echo "AWAKENINGFRAME_SKIP_STEAM set: Steam left alone"
+if [ -n "$SKIP_STEAM" ]; then
+  echo "Steam left alone"
 elif curl -s --max-time 3 "127.0.0.1:$CEFPORT/json" > /dev/null; then
   CEF="python3 -I $TOOLS/steam-cef.py"
   ID=$($CEF "(() => { for (const a of (appStore.allApps || [])) { if (a.display_name === '$NAME' && a.app_type === 1073741824) return a.appid; } return 0; })()" 2> /dev/null || echo 0)

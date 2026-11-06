@@ -2000,6 +2000,8 @@ extern "C" void launcher_run(const char *root) {
                 // (the descriptions put together here in the menus' language: the row finds no English for them)
                 std::string src_d = L("Pick the folder with your extracted exefs and romfs from The Legend of Zelda: Link's "
                                       "Awakening for Switch. LAS Recomp doesn't include the game.");
+                // AwakeningFrame: the launch wrapper's own help, where its setup looks for the game (AF_SETUP_HINT)
+                if (const char *h = getenv("AF_SETUP_HINT"); h && *h && src.empty()) src_d += std::string("\n\n") + h;
                 if (!src.empty()) src_d += std::string("\n\n") + L("Chosen:") + " " + src;
                 // the step that's running / its result, under the rows and in the Set up row's explanation
                 const std::string &job_line = job;

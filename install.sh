@@ -15,10 +15,18 @@
 #                   (~/.local/share/lasrecomp-smoketest/save, or LARECOMP_SMOKE_SAVE) and waits while the headset is in
 #                   use. A failed or interrupted warm-up changes nothing else: run tools/warm_shaders.sh again.
 #                   Without it the program prepares the shaders it already knows at each start (seconds once warm).
-# From an unpacked release (a top-level lasrecomp and lasgame.so next to this script: how Frametanium runs it)
-# the program is copied as it is and nothing is built.
-# The game files are a separate step (steam-frame/prepare-game.sh) and stay in ~/.local/share/lasrecomp
-# (the data folder): they, and the keys, are never copied anywhere else.
+# From an unpacked release (lasrecomp, lasgen/ and VERSION next to this script: how Frametanium and FrameDrop run
+# it) nothing is compiled from source: the program is copied as it is, with the generator (lasgen/) and the compiler
+# (zig/) it builds the game code with. Then setup-game.sh looks for your game in the usual places (~/Downloads,
+# ~/Documents, ~/Games/AwakeningFrame/game-files, ...), extracts it into the data folder and builds the game code
+# from it, for as long as the time budget allows (AF_INSTALL_BUDGET; under Frametanium 13 minutes of its 15, counted
+# from the start of this script). Whatever is left is finished by the first launch, on the start screen.
+#   --replace-source  (a release) install over a source install in ~/Games/AwakeningFrame/app and point its Steam
+#                     entry at the release. Without it a source install there is left alone: the release goes to
+#                     ~/Games/AwakeningFrame/release and Steam's library is not touched (the entry stays the source
+#                     install's: no second entry).
+# From a source tree the game files are a separate step (steam-frame/prepare-game.sh). They stay in
+# ~/.local/share/lasrecomp (the data folder); the keys are never copied anywhere.
 #
 # For a trial install (tests, packaging checks) these environment variables redirect it:
 #   AWAKENINGFRAME_APP=DIR        where the program goes (default ~/Games/AwakeningFrame/app)
@@ -28,11 +36,18 @@
 #   AF_CEF_PORT=N                 Steam's debugging port (default 8080)
 #   AF_VRCMD=FILE                 SteamVR's vrcmd (default /opt/steamvr/bin/linuxarm64/vrcmd)
 #   AF_HEADSET_FLAG=FILE          the headset-in-use marker (default ~/.cache/headset-in-use)
+#   AF_INSTALL_BUDGET=SECONDS     (a release) how long the whole install may take, game code build included (0: no limit)
+#   AF_GAME_SETUP=0               (a release) no game files step (FrameDrop's run.sh: the launch does it, with the start screen)
+#   AF_GAME_SEARCH=dir:dir        (a release) where setup-game.sh looks for the game, instead of the usual places
+#   AF_REPLACE_SOURCE=1           as --replace-source
 set -e
+T_START=$(date +%s)
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOOLS=$HERE/steam-frame
 [ -d "$TOOLS" ] || TOOLS=$HERE
 DEST=${AWAKENINGFRAME_APP:-$HOME/Games/AwakeningFrame/app}
+DEST_GIVEN=${AWAKENINGFRAME_APP:+1}
+REPLACE_SOURCE=${AF_REPLACE_SOURCE:-}
 DATA=${LARECOMP_DATA_ROOT:-$HOME/.local/share/lasrecomp}
 SRC=${AWAKENINGFRAME_SRC:-$HOME/Games/AwakeningFrame/src}
 SKIP_STEAM=${AWAKENINGFRAME_SKIP_STEAM:-}
@@ -54,8 +69,9 @@ while [ $# -gt 0 ]; do
     --skip-steam) SKIP_STEAM=1; shift ;;
     --no-art) ART=0; shift ;;
     --warm) WARM=1; shift ;;
+    --replace-source) REPLACE_SOURCE=1; shift ;;
     -h | --help) sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
-    *) echo "usage: $0 [--src DIR] [--no-build] [--skip-steam] [--no-art] [--warm]" >&2; exit 2 ;;
+    *) echo "usage: $0 [--src DIR] [--no-build] [--skip-steam] [--no-art] [--warm] [--replace-source]" >&2; exit 2 ;;
   esac
 done
 
@@ -65,6 +81,23 @@ headset_check() {
     exit 75
   fi
 }
+
+# ---- an unpacked release, or a source tree
+UNPACKED=
+[ -x "$HERE/lasrecomp" ] && [ -d "$HERE/lasgen" ] && [ -f "$HERE/VERSION" ] && UNPACKED=$HERE
+VERSION=
+[ -n "$UNPACKED" ] && VERSION=$(head -n 1 "$HERE/VERSION" | tr -d '\r')
+# A program installed from a source tree (no release marker): the owner's or a developer's build. A release leaves it
+# as it is unless asked (--replace-source): it goes next to it, and the Steam entry stays the source install's.
+is_source_install() { [ -x "$1/lasrecomp" ] && ! grep -q '^release ' "$1/.af-install" 2> /dev/null; }
+BESIDE=
+if [ -n "$UNPACKED" ] && [ -z "$DEST_GIVEN" ] && [ -z "$REPLACE_SOURCE" ] && is_source_install "$DEST"; then
+  BESIDE=$DEST
+  DEST=$(dirname "$DEST")/release
+  SKIP_STEAM=1
+  echo "$BESIDE holds a build from source: left as it is, with its Steam entry. This release goes to $DEST"
+  echo "(no Steam entry of its own; install.sh --replace-source puts it in $BESIDE and points the entry at it)."
+fi
 
 if [ -z "$SKIP_STEAM" ]; then
   curl -s --max-time 3 "127.0.0.1:$CEFPORT/json" > /dev/null || {
@@ -78,11 +111,9 @@ if pgrep -f "^$DEST/lasrecomp" > /dev/null 2>&1; then
 fi
 
 # ---- where the program comes from
-UNPACKED=
-[ -x "$HERE/lasrecomp" ] && [ -f "$HERE/lasgame.so" ] && UNPACKED=$HERE
 if [ -n "$UNPACKED" ]; then
   FROM=$UNPACKED
-  echo "installing the unpacked release in $UNPACKED"
+  echo "installing AwakeningFrame $VERSION from $UNPACKED"
 else
   [ -f "$SRC/Makefile" ] && [ -d "$SRC/runtime" ] || { echo "$SRC is not a LAS Recomp source tree (--src DIR)" >&2; exit 1; }
   SRC=$(cd "$SRC" && pwd)
@@ -113,15 +144,30 @@ else
   [ -x "$FROM/lasrecomp" ] || { echo "$FROM/lasrecomp is not built" >&2; exit 1; }
   [ -f "$FROM/lasgame.so" ] || { echo "$FROM/lasgame.so is not built (make gen, then make)" >&2; exit 1; }
 fi
-grep -q LARECOMP_XR_HZ "$FROM/lasrecomp" || { echo "$FROM/lasrecomp has no VR mode (built without the OpenXR headers: tools/fetch_openxr.sh, then make)" >&2; exit 1; }
+grep -aq LARECOMP_XR_HZ "$FROM/lasrecomp" || { echo "$FROM/lasrecomp has no VR mode (built without the OpenXR headers: tools/fetch_openxr.sh, then make)" >&2; exit 1; }
 
 # ---- the program; each file is put in place in one step
 mkdir -p "$DEST"
-for f in lasrecomp lasgame.so lasgame.so.id; do
+for f in lasrecomp lasgame.so lasgame.so.id hactool icon.png; do
   [ -f "$FROM/$f" ] || continue
   cp "$FROM/$f" "$DEST/$f.new" && mv "$DEST/$f.new" "$DEST/$f"
 done
 chmod +x "$DEST/lasrecomp"
+if [ -n "$UNPACKED" ]; then
+  # what builds the game code on this machine: the generator, the compiler, the headers; each folder swapped whole
+  for d in lasgen zig gamelib-src; do
+    rm -rf "$DEST/.$d.new"
+    cp -a "$FROM/$d" "$DEST/.$d.new"
+    rm -rf "$DEST/.$d.old"
+    [ -e "$DEST/$d" ] && mv "$DEST/$d" "$DEST/.$d.old"
+    mv "$DEST/.$d.new" "$DEST/$d"
+    rm -rf "$DEST/.$d.old"
+  done
+  # a source install's game code next to the program would be loaded first: the release's is in the data folder
+  rm -f "$DEST/lasgame.so" "$DEST/lasgame.so.id"
+  cp "$FROM"/*-LICENSE.txt "$FROM/LICENSE" "$FROM/THIRD_PARTY_NOTICES.md" "$DEST/" 2> /dev/null || true
+  cp "$FROM/install.sh" "$FROM/uninstall.sh" "$FROM/VERSION" "$DEST/"
+fi
 # The bundled fonts, next to the program (the game looks for them by name there; without DejaVuSans.ttf it stops with
 # "no font for the game's text"). From a release: top-level *.ttf; from a source tree: third_party/fonts/*/.
 for f in "$FROM"/*.ttf "$FROM"/../third_party/fonts/*/*.ttf "$SRC"/third_party/fonts/*/*.ttf; do
@@ -129,7 +175,11 @@ for f in "$FROM"/*.ttf "$FROM"/../third_party/fonts/*/*.ttf "$SRC"/third_party/f
 done
 cp "$TOOLS/awakeningframe.sh" "$DEST/awakeningframe.sh"
 chmod +x "$DEST/awakeningframe.sh"
-cp "$TOOLS/steam-cef.py" "$TOOLS/set-art.py" "$DEST/"
+cp "$TOOLS/steam-cef.py" "$TOOLS/set-art.py" "$TOOLS/setup-game.sh" "$TOOLS/prepare-game.sh" "$DEST/"
+chmod +x "$DEST/setup-game.sh" "$DEST/prepare-game.sh"
+for f in "$TOOLS/versions.h" "$SRC/runtime/game_addresses/versions.h" "$HERE/runtime/game_addresses/versions.h"; do
+  [ -f "$f" ] && { cp "$f" "$DEST/versions.h"; break; }   # (the supported game versions' build IDs, for prepare-game.sh)
+done
 for f in "$UNPACKED/vrtiming.py" "$SRC/tools/vrtiming.py" "$HERE/tools/vrtiming.py"; do
   [ -f "$f" ] && { cp "$f" "$DEST/vrtiming.py"; break; }
 done
@@ -137,8 +187,14 @@ if [ -d "$TOOLS/art" ]; then
   mkdir -p "$DEST/art"
   cp "$TOOLS"/art/*.png "$DEST/art/" 2> /dev/null || true
 fi
+# what is installed here: a release or a build from source (a release never replaces a source install unasked)
+if [ -n "$UNPACKED" ]; then
+  echo "release $VERSION" > "$DEST/.af-install"
+else
+  echo "source $(git -C "$SRC" rev-parse --short HEAD 2> /dev/null || echo unknown)" > "$DEST/.af-install"
+fi
 echo "installed the program in $DEST"
-[ -f "$DATA/extracted/exefs/main" ] || echo "note: no game files in $DATA/extracted yet (steam-frame/prepare-game.sh)"
+[ -n "$UNPACKED" ] || [ -f "$DATA/extracted/exefs/main" ] || echo "note: no game files in $DATA/extracted yet (steam-frame/prepare-game.sh)"
 
 # ---- the Steam library entry and SteamVR's per-app settings
 APPID=none
@@ -175,6 +231,28 @@ if [ -z "$SKIP_STEAM" ]; then
   fi
 fi
 
+# ---- a release: your game files and the game code (never fatal: the first launch picks up where this stops)
+GAME=skipped
+if [ -n "$UNPACKED" ] && [ "${AF_GAME_SETUP:-1}" != 0 ]; then
+  BUDGET=${AF_INSTALL_BUDGET:-}
+  if [ -z "$BUDGET" ]; then
+    case "$HERE" in */frametanium/apps/*) BUDGET=780 ;; *) BUDGET=0 ;; esac   # (Frametanium stops an install at 15 min)
+  fi
+  LEFT=0
+  if [ "$BUDGET" -gt 0 ]; then
+    LEFT=$((BUDGET - ($(date +%s) - T_START)))
+    [ "$LEFT" -ge 60 ] || LEFT=60
+  fi
+  rc=0
+  LARECOMP_DATA_ROOT=$DATA AF_HEADSET_FLAG=$FLAG bash "$DEST/setup-game.sh" --app "$DEST" --data "$DATA" --budget "$LEFT" || rc=$?
+  case $rc in
+    0) GAME=ready ;;
+    3) GAME=missing ;;
+    4) GAME=files ;;
+    *) GAME=error ;;
+  esac
+fi
+
 # ---- optional: warm the shader caches (tools/warm_shaders.sh), last, so a long run never holds up the rest
 if [ "$WARM" = 1 ]; then
   WARMSH=
@@ -187,6 +265,23 @@ if [ "$WARM" = 1 ]; then
   fi
 fi
 
+if [ -n "$UNPACKED" ]; then
+  case $GAME in
+    ready) G="Game files found and game code built: launch it from your library." ;;
+    files) G="Game files found. The first launch finishes building the game code, with a progress bar." ;;
+    missing) G="No game files found: put your NSP or XCI and prod.keys in Downloads, then launch it." ;;
+    error) G="Setting up the game files did not work. Launching it tries again." ;;
+    *) G="The first launch sets up your game files." ;;
+  esac
+  # (the last two lines are what Frametanium shows when it is done)
+  echo
+  echo "Program: $DEST. Game files, saves and settings: $DATA."
+  [ -z "$SKIP_STEAM" ] && echo "Steam library entry \"$NAME\" (appid $APPID) runs $DEST/awakeningframe.sh."
+  [ -n "$BESIDE" ] && echo "The Steam entry still runs the build from source in $BESIDE."
+  echo "AwakeningFrame $VERSION is installed."
+  echo "$G"
+  exit 0
+fi
 cat << MSG
 
 Installed in $DEST.

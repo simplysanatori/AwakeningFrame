@@ -47,7 +47,7 @@ typedef struct {
     uint8_t *ptr;
     VkDeviceSize pitch;
     uint64_t used_seq;  // the pending submission of the last pass that named it
-    uint32_t key;       // what it holds (map_key)
+    uint64_t key;       // what it holds (fov_pass's key: the focus, the filled part, the ramp, the level)
 } FovSlot;
 typedef struct {
     int eye;
@@ -66,7 +66,7 @@ typedef struct {
     VmaAllocation mem;
     VkImageView view;
     bool init;
-    uint32_t key;
+    uint64_t key;
     uint64_t seq;       // the submission of its last update (one update per submission)
 } VrsMap;
 
@@ -178,21 +178,31 @@ static bool setup_fdm(VkPhysicalDevice phys, bool have_ext, const char **ext, ui
     return true;
 }
 
+// Off at the start still enables the extension (when the device has it), so the VR tab can turn foveation on while the game
+// runs: with the level off no pass gets a map (fov_pass), the pipelines' rate is 1x1. Only LARECOMP_VR_FOVEATION=off from
+// the launch environment (the tab's row then greyed out: vr_opt_overridden) leaves it out of the device, as before.
+extern bool vr_opt_overridden(int o) __attribute__((weak));  // (runtime/vr_settings.c; VrOpt)
+#define VRO_FOVEATION_ 9                                       // (vr_settings.h VRO_FOVEATION)
 void fov_device_setup(VkPhysicalDevice phys, bool fdm_ext, bool fsr_ext, const char **ext, uint32_t *n_ext, VkPhysicalDeviceFeatures2 *f) {
     cfg();
-    if (F.level == LV_OFF) { LOG("[fov] foveation off (LARECOMP_VR_FOVEATION)\n"); return; }
+    if (F.level == LV_OFF && (!vr_opt_overridden || vr_opt_overridden(VRO_FOVEATION_))) {
+        LOG("[fov] foveation off (LARECOMP_VR_FOVEATION)\n");
+        return;
+    }
+    if (F.level == LV_OFF) LOG("[fov] foveation off for now: the device gets the extension so the VR tab can turn it on\n");
     F.dev_ok = F.vrs ? setup_vrs(phys, fsr_ext, ext, n_ext, f) : setup_fdm(phys, fdm_ext, ext, n_ext, f);
 }
 
 bool fov_on(void) { return F.dev_ok && g_vk.dev; }
 
-// The VR tab's live hook (runtime/vr_settings.c; VRS_FOV_OFF..HIGH = off, low, medium, high). Off at start leaves the
-// extension out of the device, so turning it on then waits for a restart.
+// The VR tab's live hook (runtime/vr_settings.c; VRS_FOV_OFF..HIGH = off, low, medium, high): the next eye pass draws
+// at the new level (the level is in the map's key). Without the extension (no device support, or off from the launch
+// environment) there is nothing to turn on.
 void fov_set_level(int level) {
     cfg();
     if (level < LV_OFF || level > LV_HIGH) return;
     if (!F.dev_ok) {
-        if (level != LV_OFF) LOG("[fov] foveation %s: applies after a restart (it was off when the game started)\n", k_names[level]);
+        if (level != LV_OFF) LOG("[fov] foveation %s: unavailable on this device\n", k_names[level]);
         return;
     }
     if (level != F.level) LOG("[fov] foveation %s (VR settings)\n", k_names[level]);
@@ -355,7 +365,7 @@ static void slot_fill(FovMap *m, FovSlot *s, float cx, float cy, float hw, float
 // VRS mode: the shading-rate map of eye `eye`'s w x h passes, brought up to date (one copy per submission at most)
 // eye 2 (a multiview pass, both eyes): one map, each texel at the finer rate of the two eyes' (Turnip's shading-rate
 // attachments have one layer: layeredShadingRateAttachments is false); c[1] is eye 1's focus then
-static const void *vrs_pass(int eye, uint32_t w, uint32_t h, const float c[2][2], float fw, float fh, uint32_t key) {
+static const void *vrs_pass(int eye, uint32_t w, uint32_t h, const float c[2][2], float fw, float fh, uint64_t key) {
     VrsMap *m = NULL;
     for (int i = 0; i < F.nvmaps && !m; i++)
         if (F.vmaps[i].eye == eye && F.vmaps[i].w == w && F.vmaps[i].h == h) m = &F.vmaps[i];
@@ -456,7 +466,8 @@ const void *fov_pass(int eye, bool per_eye, uint32_t w, uint32_t h, float fx, fl
         key = e ? key ^ ((((k ^ key) & 0xFFFFFu) * 2654435761u) & 0x1FFFFFFFu) : k;
     }
     float cx = c[0][0], cy = c[0][1];
-    if (F.vrs) return vrs_pass(eye, w, h, (const float (*)[2])c, fw, fh, key);
+    uint64_t key64 = key | (uint64_t)F.level << 32;  // (the level: a change from the VR tab redraws the map)
+    if (F.vrs) return vrs_pass(eye, w, h, (const float (*)[2])c, fw, fh, key64);
     if (eye == 2) return NULL;  // (density maps: none in multiview passes)
     FovMap *m = NULL;
     for (int i = 0; i < F.nmaps && !m; i++)

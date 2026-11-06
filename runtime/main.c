@@ -5,12 +5,19 @@
 #include <string.h>
 
 #include "game_addresses.h"
+#include "gamebuild.h"
 #include "gamelib.h"
 #include "paths.h"
 #include "settings.h"
 #include "hle.h"
 #include "kernel.h"
 #include "rando.h"
+
+#ifndef _WIN32
+#include <signal.h>
+#include <stdio.h>
+#include <unistd.h>
+#endif
 
 const char *g_romfs_dir;
 
@@ -203,7 +210,69 @@ static void log_startup_info(void) {
             si.cpu[0] ? si.cpu : "unknown CPU", cores, ram, si.package ? ", " : "", si.package ? si.package : "");
 }
 
+#ifndef _WIN32
+// AwakeningFrame: `lasrecomp --build-game-code [game dir]` builds the game code library from the game files in the
+// data root (extracted/), without a window: the start screen's setup step, for steam-frame/setup-game.sh at install
+// time. Progress goes to stdout ("build 42% Compiling..."). SIGTERM / SIGINT stop it the way Cancel does: the finished
+// pieces stay, and the next build (this, or the start screen, which resumes by itself) continues from them.
+// LARECOMP_BUILD_JOBS sets the number of compilers at once. Exit status 0: built (or already up to date), 1: failed,
+// 2: stopped. `lasrecomp --game-code-status` only says whether a library for the game files there is ready (exit 0)
+// or not (exit 1), without loading it: what the launch wrapper checks before it starts the game.
+static volatile sig_atomic_t g_build_stop;
+static FILE *g_build_out;  // the caller's stdout, kept before plat_init sends stdout and stderr to the log file
+static void build_stop_signal(int sig) { (void)sig; g_build_stop = 1; }
+static bool build_cli_cancelled(void) { return g_build_stop != 0; }
+static void build_cli_progress(double f, const char *step) {
+    static int last = -1;
+    static char last_step[128];
+    int pct = (int)(f * 100 + 0.5);
+    if (pct == last && step && !strncmp(step, last_step, sizeof last_step - 1)) return;
+    last = pct;
+    snprintf(last_step, sizeof last_step, "%s", step ? step : "");
+    fprintf(g_build_out, "build %d%% %s\n", pct, last_step);
+    fflush(g_build_out);
+}
+static void cli_keep_stdout(int argc, char **argv) {
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--build-game-code") || !strcmp(argv[i], "--game-code-status")) {
+            int fd = dup(STDOUT_FILENO);
+            if (fd >= 0) g_build_out = fdopen(fd, "w");
+            break;
+        }
+}
+static int build_game_code_cli(const char *root) {
+    if (!g_build_out) g_build_out = stdout;
+    signal(SIGTERM, build_stop_signal);
+    signal(SIGINT, build_stop_signal);
+    long cores = sysconf(_SC_NPROCESSORS_ONLN);
+    long ram_gb = (long)((double)sysconf(_SC_PHYS_PAGES) * (double)sysconf(_SC_PAGESIZE) / (1024.0 * 1024 * 1024));
+    int jobs = (int)(cores < ram_gb - 2 ? cores : ram_gb - 2 > 1 ? ram_gb - 2 : 1);  // (as the start screen's setup)
+    const char *e = getenv("LARECOMP_BUILD_JOBS");
+    if (e && atoi(e) > 0) jobs = atoi(e);
+    if (jobs < 1) jobs = 1;
+    if (gamelib_present(root)) {
+        fprintf(g_build_out, "build up to date\n");
+        return 0;
+    }
+    if (!gamebuild_available()) {
+        fprintf(g_build_out, "build failed: the game code builder (lasgen/, zig/, gamelib-src/) is not next to the program\n");
+        return 1;
+    }
+    GameBuildOpts o = {build_cli_progress, jobs, build_cli_cancelled};
+    char why[256] = "";
+    bool ok = gamebuild_run(root, &o, why, sizeof why);
+    if (ok) fprintf(g_build_out, "build done\n");
+    else if (g_build_stop) fprintf(g_build_out, "build stopped: the finished pieces are kept\n");
+    else fprintf(g_build_out, "build failed: %s\n", why);
+    fflush(g_build_out);
+    return ok ? 0 : g_build_stop ? 2 : 1;
+}
+#endif
+
 int main(int argc, char **argv) {
+#ifndef _WIN32
+    cli_keep_stdout(argc, argv);
+#endif
     plat_init();
     log_startup_info();
     if (getenv("LARECOMP_REEXEC")) {  // (reserve_guest_space started this process again)
@@ -226,12 +295,25 @@ int main(int argc, char **argv) {
     bool skip_launcher = no_launcher || getenv("LARECOMP_INPUT");  // tests boot straight in
     if (getenv("LARECOMP_FORCE_LAUNCHER")) skip_launcher = false;  // (test: the start screen, then the scripted input)
     static char arg_root[1024];
+    bool build_only = false, status_only = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--play")) skip_launcher = true;
+        else if (!strcmp(argv[i], "--build-game-code")) build_only = true;
+        else if (!strcmp(argv[i], "--game-code-status")) status_only = true;
         else if (argv[i][0] != '-' && !realpath(argv[i], arg_root)) root = argv[i];  // (relative to where we started)
         else if (argv[i][0] != '-') root = arg_root;
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
+#ifndef _WIN32
+    if (build_only) return build_game_code_cli(root);
+    if (status_only) {
+        bool ready = gamelib_present(root);
+        FILE *o = g_build_out ? g_build_out : stdout;
+        fprintf(o, "game code %s\n", ready ? "ready" : "not built for these game files");
+        fflush(o);
+        return ready ? 0 : 1;
+    }
+#endif
     if (getenv("LARECOMP_MENU_SFX_TEST")) {  // (test: the menu sounds loaded now, each logged)
         extern void menu_sfx_set_game_dir(const char *dir);
         extern void menu_sfx_load_now(void);

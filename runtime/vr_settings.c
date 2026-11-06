@@ -48,6 +48,8 @@ extern void edge_set_mode(int mode) WEAK;                 // VRS_EDGE_*: edge.c 
 extern void fov_set_level(int level) WEAK;                // VRS_FOV_*: the foveation lane
 extern void diet_set_dynres(int on) WEAK;                 // the diet lane's dynamic eye resolution
 extern void xr_input_set_layout(int comfort) WEAK;        // xr_input.c S.comfort (VRS_LAYOUT_COMFORT: 1)
+extern void xr_set_game_fps(int fps) WEAK;                // the game's rate at the display's: 60 (the 90 Hz test) or 0 (xr_loop.c)
+extern float xr_display_hz(void) WEAK;                    // the display's rate now (0: no session yet)
 // Provided here, in runtime/xr/vrui_hook.c (XR builds only): the HUD / menu panel's place, read by xr_loop.c every frame.
 extern void vrui_set_hud_quad(float dist_m, float width_m) WEAK;
 
@@ -99,6 +101,7 @@ void vr_settings_save(FILE *f) {
 
 // ---------------------------------------------------------------------------------------------------------------------
 static bool g_given[VRO_COUNT];  // the variable was in the environment before settings were applied
+static bool g_fps_given;         // LARECOMP_XR_FPS was (session.env's AF_FPS through the wrapper): the game's rate is the environment's
 static const char *const k_env[VRO_COUNT] = {
     [VRO_REFRESH] = "LARECOMP_XR_HZ", [VRO_LAYOUT] = "LARECOMP_XR_LAYOUT", [VRO_TURN] = "LARECOMP_VR_TURN", [VRO_FOLLOW] = "LARECOMP_VR_FOLLOW",
     // (height, size and tilt: the rig's, vr_rig.ini; LARECOMP_VR_TABLE / _PITCH / _SCALE are its base and the player's values
@@ -132,6 +135,7 @@ void vr_settings_apply_env(void) {
     if (done) return;
     done = true;
     for (int i = 0; i < VRO_COUNT; i++) g_given[i] = k_env[i][0] && getenv(k_env[i]);
+    g_fps_given = getenv("LARECOMP_XR_FPS") != NULL;
     // (a value is passed on only when it is not what the code behind the variable does without it: refresh 120, layout
     // switch, turn smooth, follow smooth, edge off; foveation and dynamic resolution are passed on always, for the code's own
     // defaults (medium, off) are not the tab's (high, on))
@@ -166,7 +170,14 @@ void vr_settings_sync_rig(void) {
 
 bool vr_opt_live(VrOpt o) {
     switch (o) {
-    case VRO_REFRESH: return false;  // SteamVR's per-app rate is set by the launch wrapper: a relaunch
+    case VRO_REFRESH: {
+        // SteamVR's per-app rate is set by the launch wrapper (the runtime refuses xrRequestDisplayRefreshRateFB): a change of
+        // the display's rate needs a relaunch. The game's rate at the display's rate is ours: between the two 90 Hz choices
+        // (30 FPS, 60 FPS test) the change is live, when the display runs at 90 Hz now and LARECOMP_XR_FPS isn't set.
+        float hz = xr_display_hz ? xr_display_hz() : 0;
+        int want = VR.refresh == VRS_REFRESH_120 ? 120 : 90;
+        return xr_set_game_fps && !g_fps_given && hz > 0 && fabsf(hz - (float)want) < 2.0f && want == 90;
+    }
     case VRO_LAYOUT: return xr_input_set_layout != NULL;
     case VRO_TURN: return xr_rig_set_turn_mode != NULL;
     case VRO_FOLLOW: return stereo_set_follow != NULL;
@@ -185,6 +196,7 @@ bool vr_opt_live(VrOpt o) {
 void vr_settings_changed(VrOpt o) {
     if (vr_opt_overridden(o)) return;  // (greyed out in the tab: can't get here, but the environment wins)
     switch (o) {
+    case VRO_REFRESH: if (vr_opt_live(o)) xr_set_game_fps(VR.refresh == VRS_REFRESH_90_60 ? 60 : 0); break;
     case VRO_LAYOUT: if (xr_input_set_layout) xr_input_set_layout(VR.layout == VRS_LAYOUT_COMFORT); break;
     case VRO_TURN: if (xr_rig_set_turn_mode) xr_rig_set_turn_mode(VR.turn == VRS_TURN_SNAP); break;
     case VRO_FOLLOW: if (stereo_set_follow) stereo_set_follow(VR.follow); break;
