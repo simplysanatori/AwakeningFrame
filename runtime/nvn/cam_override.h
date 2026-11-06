@@ -31,6 +31,7 @@ void cam_override_frame(uint64_t frame);
 // Published by widescreen.c each frame while the probe is on: Link's position (game units), the camera zone's box.
 void cam_override_set_link(const float pos[3]);
 void cam_override_set_zone(const float lo[3], const float hi[3]);
+bool cam_override_zone(float lo[3], float hi[3]);  // the latest zone box (false: none)
 // The frame's main camera: called per draw with the vertex stage's slot-5 range (exec.c, next to
 // widescreen_scene_ubo); the first perspective 320-byte buffer of a frame is latched (address, original matrices).
 void cam_override_latch(const float *u, uint64_t addr, uint64_t size, uint64_t frame);

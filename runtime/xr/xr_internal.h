@@ -55,11 +55,28 @@ typedef struct {
     uint32_t hud;           // image indices
     uint32_t eye[2];
     bool has_eye[2];
-    XrView views[2];        // latched (xr_latch_views)
+    XrView views[2];        // the projection layer's (xr_set_views: the ones its eye images were rendered with)
     bool views_ok;
     XrSpace space;          // the app space the views were located in
     uint64_t made_ns;       // when it was submitted (stats)
+    // (pose check) what the eye images were rendered with, as the stereo executor reports it; rendered: reported
+    bool exec_eyes;         // the executor drew its eye images (xr_set_views was called)
+    bool rendered;
+    XrEyeView rview[2];
+    uint64_t rid[2];        // the latch each eye's image came from (xr_latch_views_id)
+    uint64_t latch_ns;      // plat_now_ns() of that latch (prediction: latch -> display)
+    XrTime vtime;           // the display time its views were located for
 } XrSet;
+
+// xr_latch_views_id's latches: the poses each frame's eyes were rendered with, kept until a set names them
+#define XR_LATCHES 16
+typedef struct {
+    uint64_t id;            // 0: free
+    XrView views[2];
+    XrSpace space;
+    XrTime time;            // the display time they were located for
+    uint64_t made_ns;
+} XrLatch;
 
 typedef struct {
     // instance / system
@@ -93,9 +110,8 @@ typedef struct {
     pthread_mutex_t mu;
     pthread_cond_t cv;
     XrSet building;         // the presenting thread's, between xr_set_begin and xr_set_submit (no lock: its own)
-    XrView early_views[2];  // xr_latch_views_early: for the next set (render thread, as the presenting thread in game)
-    XrSpace early_space;
-    bool early_ok;
+    XrLatch latch[XR_LATCHES];  // xr_latch_views_id (render thread); ring by id
+    uint64_t latch_next;
     bool in_set;
     XrSet pending;          // submitted, not yet released (XR thread releases it)
     XrSet shown;            // the latest released: the layers name it
@@ -105,6 +121,9 @@ typedef struct {
     volatile bool stop;
     bool thread_on;
     _Atomic int64_t target_time;  // XrTime the latest vsync's game frame is predicted for
+    _Atomic int64_t xr_minus_plat; // XrTime - plat_now_ns() (the clocks' offset, from the latest refresh)
+    _Atomic int64_t lat_ns;        // smoothed latch -> first display of the sets (0: not measured yet)
+    int predict;                   // LARECOMP_XR_PREDICT: 1 measured (default), 0 vsync (the latest vsync's time)
     float quad_dist, quad_width;
 } XrCore;
 extern XrCore g_xr;
@@ -127,6 +146,8 @@ void xr_chain_release(XrChain *c);
 bool xr_thread_start(void);
 void xr_thread_stop(void);
 void xr_release_completed(void);  // (XR thread) the pending set, once its GPU work finished
+// xr_vk.c: the layer's poses are the ones the set's eye images were rendered with (the pose check)
+bool xr_layer_matches_render(const XrSet *s);
 
 // record.c: the queue's external synchronisation
 void vk_queue_lock(void);

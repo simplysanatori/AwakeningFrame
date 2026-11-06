@@ -525,7 +525,33 @@ static void twc_add(NvnTexture *t) {
     if (g_ntwc == g_cap_twc) { g_cap_twc = g_cap_twc ? g_cap_twc * 2 : 256; g_twc = realloc(g_twc, g_cap_twc * sizeof *g_twc); }
     g_twc[g_ntwc++] = t;
 }
+// (stereo) shared textures eye 0 wrote from a twin (vk_stereo_twin_add): twinned from the next eye-1 run on, their
+// twin first filled with eye 0's image (a copy into part of it keeps the rest)
+static NvnTexture *g_twinit[64];
+static int g_ntwinit;
+bool vk_stereo_twin_add(NvnTexture *t) {
+    TexBackend *b = t ? t->backend : NULL;
+    if (!b || b->twin || b->is_twin || b->presented || !b->image) return false;
+    for (int i = 0; i < g_ntwc; i++) if (g_twc[i] == t) return false;
+    twc_add(t);
+    if (g_ntwinit < 64) g_twinit[g_ntwinit++] = t;
+    return true;
+}
+static void twin_init_copy(NvnTexture *t, TexBackend *b, TexBackend *w) {
+    int k = 0;
+    while (k < g_ntwinit && g_twinit[k] != t) k++;
+    if (k == g_ntwinit) return;
+    g_twinit[k] = g_twinit[--g_ntwinit];
+    if (w->width != b->width || w->height != b->height || w->format != b->format) return;
+    VkCommandBuffer cb = vk_cmd();
+    vk_full_barrier(cb);
+    VkImageCopy c = {.srcSubresource = {b->aspect, 0, 0, b->layers ? b->layers : 1}, .dstSubresource = {b->aspect, 0, 0, b->layers ? b->layers : 1},
+                     .extent = {b->width, b->height, 1}};
+    rec_CmdCopyImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, w->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    vk_full_barrier(cb);
+}
 static void twc_remove(NvnTexture *t) {
+    for (int i = 0; i < g_ntwinit; i++) if (g_twinit[i] == t) { g_twinit[i] = g_twinit[--g_ntwinit]; break; }
     for (int i = 0; i < g_ntwc; i++) if (g_twc[i] == t) { g_twc[i] = g_twc[--g_ntwc]; break; }
     for (int i = 0; i < g_nsw; i++) if (g_sw[i] == t) { g_sw[i] = g_sw[--g_nsw]; break; }
 }
@@ -557,9 +583,10 @@ int vk_stereo_swap(bool eye1) {
             w->twin = b;
             w->reg = b->reg;
             b->twin = w;
+            twin_init_copy(t, b, w);
             if (made++ < 64)
                 LOG("[stereo] twin %ux%u fmt %#x (image %ux%u%s)\n", t->width, t->height, t->format, w->width, w->height,
-                    w->scalable ? "" : ", guest-sized AO");
+                    w->scalable ? "" : twin_candidate(t, b) ? ", guest-sized AO" : ", a copy's destination");
         }
         if (g_nsw == g_cap_sw) { g_cap_sw = g_cap_sw ? g_cap_sw * 2 : 256; g_sw = realloc(g_sw, g_cap_sw * sizeof *g_sw); }
         g_sw[g_nsw++] = t;
