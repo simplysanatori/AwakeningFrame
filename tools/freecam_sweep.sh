@@ -13,8 +13,9 @@
 #   --only <text> just the spots whose name contains <text> (case-insensitive)
 #   --plan        print the spots, camera steps and frames, then exit (no game files needed)
 #   --dry-run     check the setup, print the exact command, then exit
-# tools/freecam_sweep.sh --identity-check: two runs of one spot, without and with LARECOMP_FREECAM=identity, same warp,
-#   same frame; the images must match pixel for pixel (a game that is not deterministic frame to frame shows noise here).
+# tools/freecam_sweep.sh --identity-check: one run, identity and off alternating in blocks of 8 frames, a shot of every
+#   frame; the mean difference of consecutive shots must be the same in both modes and across a switch (the game is not
+#   deterministic between runs, so a pixel-for-pixel comparison of two runs is not possible).
 # Needs extracted/ (steam-frame/prepare-game.sh), the built game code (make gen; make), build/lasrecomp, and a test save:
 # $LARECOMP_SMOKE_SAVE (default ~/.local/share/lasrecomp-smoketest/save, a folder holding save_0/; made by starting a new
 # game once and copying the data folder's save/ there; never written to). Refuses to run while ~/.cache/headset-in-use exists.
@@ -131,7 +132,7 @@ run_game() {  # <log> <window shot frame> <extra env...>: one session from a scr
     until mkdir build/.freecam.lock 2>/dev/null; do sleep 1; done
     trap 'rmdir build/.freecam.lock 2>/dev/null' EXIT
     env LARECOMP_NO_LAUNCHER=1 LARECOMP_NO_AUDIO=1 LARECOMP_NO_UPDATE_CHECK=1 LARECOMP_SETTINGS="$O/settings.ini" LARECOMP_SAVE_DIR="$O/save" \
-        LARECOMP_BLUR_REMOVAL=1 LARECOMP_INPUT="$IN" LARECOMP_WINDOW_SHOT="$last" LARECOMP_SHOT_PATH="$O/window_last.png" LARECOMP_EXIT_AFTER_SHOT=1 \
+        LARECOMP_BLUR_REMOVAL=1 LARECOMP_CHEATS=hearts LARECOMP_INPUT="$IN" LARECOMP_WINDOW_SHOT="$last" LARECOMP_SHOT_PATH="$O/window_last.png" LARECOMP_EXIT_AFTER_SHOT=1 \
         "$@" ./build/lasrecomp extracted > "$log" 2>&1 &
     local p=$!
     local t
@@ -143,32 +144,40 @@ run_game() {  # <log> <window shot frame> <extra env...>: one session from a scr
 }
 
 if [ $MODE = identity ]; then
+    # One session, 8-frame blocks alternating identity / off over 128 consecutive frames at the first spot, a shot of every
+    # frame. The game is not deterministic from run to run (the warp lands on another frame, the world moves all the time),
+    # so two runs never match pixel for pixel: instead the mean abs difference of consecutive shots is compared by kind
+    # (off-off, identity-identity, across a switch); identity is fine when all three agree. The log line says whether the
+    # rebuilt P*V reproduced the game's VP bit for bit (then identity binds the game's exact 320 bytes).
     mkdir -p "$O"
     s=${SPOTS[0]}; IFS='|' read -r name lvl loc <<< "$s"
-    F=$((START + SETTLE)); LASTF=$((F + 120))
-    echo "freecam_sweep: identity check at $name, frame $F"
-    for v in off identity; do
-        extra=(LARECOMP_WARP_ON_LOAD="$lvl:$loc" LARECOMP_SHOT_AT="$F" LARECOMP_FREECAM_LOG=1)
-        [ $v = identity ] && extra+=(LARECOMP_FREECAM=identity)
-        run_game "$O/identity_$v.log" $LASTF "${extra[@]}" || fail "the $v run failed (see $O/identity_$v.log)"
-        cp "build/frames/frame_$(printf '%05d' $F).png" "$O/identity_$v.png" || fail "no screenshot from the $v run"
-    done
-    "$PY" -I - "$O/identity_off.png" "$O/identity_identity.png" <<'PYEOF'
-import sys
-from PIL import Image, ImageChops
-a, b = (Image.open(p).convert('RGB') for p in sys.argv[1:3])
-if a.size != b.size: print('IDENTITY CHECK FAIL: sizes differ', a.size, b.size); sys.exit(1)
-d = ImageChops.difference(a, b)
-bbox = d.getbbox()
-r, g, bl = d.split()
-m = ImageChops.lighter(ImageChops.lighter(r, g), bl).tobytes()
-n = sum(1 for p in m if p)
-if bbox is None: print('IDENTITY CHECK PASS: bit-identical (%dx%d)' % a.size); sys.exit(0)
-print('IDENTITY CHECK FAIL: %d pixels differ (%.4f%%), box %s, max channel delta %d' % (n, 100.0 * n / (a.size[0] * a.size[1]), bbox, max(m)))
-sys.exit(1)
+    F=$((START + SETTLE + 20)); N=144
+    echo "freecam_sweep: identity check at $name, frames $F..$((F + N - 1))"
+    AT=; SH=
+    for i in $(seq 0 15); do f=$((F + 4 + i * 8)); [ $((i % 2)) = 0 ] && AT+="$f:identity/stock," || AT+="$f:off/stock,"; done
+    SH=$(seq -s, "$F" $((F + N - 1)))
+    run_game "$O/identity.log" $((F + N + 20)) LARECOMP_WARP_ON_LOAD="$lvl:$loc" LARECOMP_SHOT_AT="$SH" LARECOMP_FREECAM_LOG=1 LARECOMP_FREECAM=off \
+        LARECOMP_FREECAM_AT="${AT%,}" || fail "the run failed (see $O/identity.log)"
+    mkdir -p "$O/identity" && rm -f "$O/identity"/*.png && cp build/frames/frame_*.png "$O/identity/"
+    "$PY" -I - "$O/identity" "$F" $((F + N - 1)) $((F + 4)) <<'PYEOF'
+import sys, statistics as st
+from PIL import Image, ImageChops, ImageStat
+d, f0, f1, at = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+ims = {f: Image.open('%s/frame_%05d.png' % (d, f)).convert('L') for f in range(f0, f1 + 1)}
+def mode(f): return 'off' if f < at else 'identity' if ((f - at) // 8) % 2 == 0 else 'off'
+res = {'off-off': [], 'identity-identity': [], 'across a switch': []}
+for a in range(f0, f1):
+    v = ImageStat.Stat(ImageChops.difference(ims[a], ims[a + 1])).mean[0]
+    ma, mb = mode(a), mode(a + 1)
+    res['off-off' if ma == mb == 'off' else 'identity-identity' if ma == mb else 'across a switch'].append(v)
+m = {k: st.mean(v) for k, v in res.items()}
+for k, v in res.items(): print('%-18s %3d pairs: mean %.3f median %.3f max %.3f' % (k, len(v), m[k], st.median(v), max(v)))
+ok = abs(m['identity-identity'] - m['off-off']) <= 0.15 * m['off-off'] + 0.03 and abs(m['across a switch'] - m['off-off']) <= 0.15 * m['off-off'] + 0.03
+print('IDENTITY CHECK %s (differences between modes within noise: %s)' % ('PASS' if ok else 'FAIL', 'yes' if ok else 'no'))
+sys.exit(0 if ok else 1)
 PYEOF
     rc=$?
-    grep -m3 'rebuilt P\*V' "$O/identity_identity.log" || true
+    grep 'rebuilt P\*V' "$O/identity.log" | tail -1 || true
     exit $rc
 fi
 
