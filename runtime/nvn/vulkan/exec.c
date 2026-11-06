@@ -149,13 +149,20 @@ static bool overlap_on(void) {
     if (on < 0) {
         const char *e = getenv("LARECOMP_GPU_OVERLAP"), *w = getenv("LARECOMP_OVERLAP_WATCH");
         uint32_t g;
-        if (!e && gmir_on()) {  // (the GPU's stores reach guest memory only at the fence waits: the game must wait)
+        // Shader global memory as copies (gmir_on: no heap import - Turnip on the Steam Frame): the GPU reads nothing
+        // of the game's memory in place - every range is copied at translation, which the game's SyncWait still waits
+        // for (rq_wait_item) - and its stores reach guest memory as each submission completes (gmir_writeback, also on
+        // a deferred SyncWait). So the overlap needs no storage snapshots there (snap_on). On by default in the VR mode
+        // (stereo_wanted), where the GPU's wait was the frame's critical path; flat mode keeps the full wait.
+        bool copies = gmir_on();
+        if (!e && copies && !stereo_wanted()) {
             on = 0;
-            LOG("[vk] GPU overlap off: shader global memory goes through copies here\n");
+            LOG("[vk] GPU overlap off: shader global memory goes through copies here (on in the VR mode; LARECOMP_GPU_OVERLAP=1 forces it)\n");
             return on;
         }
         bool tracked = (!w || atoi(w) != 0) && pages_cpu_written(TRACK_PROBE_PAGE, 4096, 0, &g) >= 0;
         if (e) on = atoi(e) != 0;
+        else if (copies) on = 1;  // (the VR mode: see above; no page write tracking needed)
 #ifdef __linux__
         else if (VK_OVERLAP_DEFAULT && !tracked && gmem_mprotect_broken) on = 1;  // (driver memory without page
                                                                                   //  protection: the hash probe)
@@ -167,7 +174,8 @@ static bool overlap_on(void) {
             return on;
         } else on = VK_OVERLAP_DEFAULT;
         LOG("[vk] GPU overlap %s (the game's frame fence waited one frame late; LARECOMP_GPU_OVERLAP=%d: %s%s)\n", on ? "on" : "off",
-            !on, on ? "off" : "on", on && !tracked ? "; forced without page write tracking: the hash probe instead of the write watch" : "");
+            !on, on ? "off" : "on", on && copies ? "; shader global memory as copies: no storage snapshots unless LARECOMP_OVERLAP_SNAP=1"
+                                    : on && !tracked ? "; forced without page write tracking: the hash probe instead of the write watch" : "");
     }
     return on;
 }
@@ -714,6 +722,8 @@ void renderer_wait_seq(uint64_t seq) {
             wait_why = NULL;
             cq_resolve_done(done);  // (the game reads its timing counters now: what is complete so far)
             gw_inval_done(done);
+            gmir_writeback();  // (copies: what the completed submissions' GPU stored, in guest memory each frame - not
+                               //  only at a real wait, which the overlap now rarely makes)
             return;
         }
         seq = w;
@@ -3132,8 +3142,11 @@ static bool snap_on(void) {
     if (snap_state >= 0) return snap_state;
     uint64_t heap = kernel_heap_size();
     if (!heap) return false;  // (not decided yet)
+    // (shader global memory as copies: no snapshots by default - the copies are taken at translation already, and the
+    // write watch would take the copies' merges into guest memory for the CPU's writes: BowWow's skinning outputs
+    // copied, the dispatch storing into the copy while the CPU reads the frozen original - overlap_on)
     const char *e = getenv("LARECOMP_OVERLAP_SNAP");
-    snap_state = (!e || atoi(e) != 0) && overlap_on();
+    snap_state = (e ? atoi(e) != 0 : !gmir_on()) && overlap_on();
     if (snap_state) {
         snap_base = (heap + 0xFFFF) & ~0xFFFFull;  // (minImportedHostPointerAlignment: 64 KB at most)
         if (snap_base + SNAP_RING > HEAP_MAX) {

@@ -68,13 +68,16 @@ decide_harness = r'''
 #include <stdlib.h>
 #include <string.h>
 #define HEAP_BASE 0x7240000000ull
+#define HEAP_MAX (64ull << 30)
 #define LOG(...) fprintf(stderr, __VA_ARGS__)
 static int tracking = 1;
+static bool stereo_wanted(void) { return getenv("TEST_VR") != NULL; }  // (the VR mode)
 static int pages_cpu_written(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) {
-    assert(addr == HEAP_BASE && size == 4096 && !since); *now = 1; return tracking ? 0 : -1;
+    assert(addr == HEAP_BASE + HEAP_MAX - 4096 && size == 4096 && !since); *now = 1; return tracking ? 0 : -1;  // (TRACK_PROBE_PAGE)
 }
 static const char *heap_tracking_reason(void) { return "the guest heap is driver memory (dma-buf), which the OS can't track"; }
 ''' + decide + r'''
+static bool gmir_on(void) { return getenv("TEST_COPIES") != NULL; }  // (shader global memory as copies: no heap import)
 int main(int argc, char **argv) {
     assert(argc == 3);
     tracking = !strcmp(argv[1], "tracked");
@@ -133,6 +136,7 @@ static int pages_cpu_written(uint64_t addr, uint64_t size, uint32_t since, uint3
 }
 static bool userptr;
 static bool overlap_on(void) { return true; }
+static bool gmir_on(void) { return false; }  // (the heap imported: snapshots on with the overlap)
 static uint64_t completed, pending = 1, issued, waited;
 static uint64_t vk_completed_seq(void) { return completed; }
 static uint64_t vk_pending_seq(void) { return pending; }
@@ -788,6 +792,14 @@ with tempfile.TemporaryDirectory(prefix='vulkan-overlap-') as temporary:
             subprocess.run([str(exe), 'untracked', 'on'], check=True, timeout=10, env=dict(env, LARECOMP_GPU_OVERLAP='1'))
             subprocess.run([str(exe), 'tracked', 'off'], check=True, timeout=10, env=dict(env, LARECOMP_GPU_OVERLAP='0'))
             subprocess.run([str(exe), 'tracked', 'off'], check=True, timeout=10, env=dict(env, LARECOMP_OVERLAP_WATCH='0'))
+            # shader global memory as copies (no heap import): off in flat mode, on in the VR mode with or without
+            # tracking, both as asked when forced
+            copies = dict(env, TEST_COPIES='1')
+            subprocess.run([str(exe), 'tracked', 'off'], check=True, timeout=10, env=copies)
+            subprocess.run([str(exe), 'untracked', 'on'], check=True, timeout=10, env=dict(copies, TEST_VR='1'))
+            subprocess.run([str(exe), 'tracked', 'on'], check=True, timeout=10, env=dict(copies, TEST_VR='1'))
+            subprocess.run([str(exe), 'tracked', 'off'], check=True, timeout=10, env=dict(copies, TEST_VR='1', LARECOMP_GPU_OVERLAP='0'))
+            subprocess.run([str(exe), 'untracked', 'on'], check=True, timeout=10, env=dict(copies, LARECOMP_GPU_OVERLAP='1'))
             continue
         if name == 'snap':  # the hash probe (watch off), the write watch, no tracking
             subprocess.run([str(exe)], check=True, timeout=10, env=dict(env, LARECOMP_OVERLAP_WATCH='0'))

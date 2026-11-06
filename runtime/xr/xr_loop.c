@@ -257,6 +257,7 @@ static void *xr_thread(void *arg) {
             int want = g_xr.display_hz < 100 ? 30 : 0;
             if (want != locked) {
                 pace_xr_lock(want);
+                pace_xr_frame_ms(want ? 0 : 2e3 / g_xr.display_hz);
                 LOG("[xr] display at %.0f Hz: the game %s\n", g_xr.display_hz, want ? "held at 30 fps (3 refreshes a frame)" : "at 60 fps (2 refreshes a frame)");
                 locked = want;
             }
