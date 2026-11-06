@@ -7,6 +7,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "rt.h"
 #include "settings.h"
 
 #define VR g_settings.vr
@@ -43,7 +44,7 @@ extern void xr_rig_set_size_pct(float pct) WEAK;          // table size: percent
 extern void xr_rig_set_tilt_deg(float deg) WEAK;          // table tilt: degrees from the default view (positive: toward the player)
 extern void xr_rig_recentre(void) WEAK;                   // put the table in front of the player again (xr_rig.c)
 extern void xr_rig_set_turn_mode(int snap) WEAK;          // VRS_TURN_SNAP: 1, VRS_TURN_SMOOTH: 0 (xr_rig_settings.c)
-extern void edge_set_mode(int mode) WEAK;                 // VRS_EDGE_*: edge.c cfg.mode
+extern void edge_set_mode(int mode) WEAK;                 // VRS_EDGE_*: edge.c (the mode, read per eye)
 extern void fov_set_level(int level) WEAK;                // VRS_FOV_*: the foveation lane
 extern void diet_set_dynres(int on) WEAK;                 // the diet lane's dynamic eye resolution
 extern void xr_input_set_layout(int comfort) WEAK;        // xr_input.c S.comfort (VRS_LAYOUT_COMFORT: 1)
@@ -200,4 +201,43 @@ void vr_settings_changed(VrOpt o) {
 
 void vr_settings_recentre(void) {
     if (xr_rig_recentre) xr_rig_recentre();
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// LARECOMP_VR_SET_AT (vr_settings.h): a scripted run's way through the same path as the tab.
+void vr_settings_test_tick(uint64_t frame) {
+    static const char *next;
+    static bool init;
+    if (!init) init = true, next = getenv("LARECOMP_VR_SET_AT");
+    while (next && *next) {
+        long at;
+        char key[40], val[40], k2[48];
+        if (sscanf(next, "%ld:%39[^=]=%39[^,]", &at, key, val) != 3) { next = NULL; return; }
+        if ((long)frame < at) return;
+        next = strchr(next, ',');
+        if (next) next++;
+        const char *k = !strcmp(key, "edge") ? "edge_style" : !strcmp(key, "dynres") ? "dynamic_resolution" : key;
+        VrOpt o = VRO_COUNT;
+        if (!strcmp(key, "label")) {
+            g_settings.face_by_label = atoi(val) != 0;
+            LOG("[vr settings] test: frame %llu label=%s\n", (unsigned long long)frame, val);
+            settings_save();
+            continue;
+        }
+        static const struct { const char *k; VrOpt o; } map[] = {
+            {"edge_style", VRO_EDGE}, {"foveation", VRO_FOVEATION}, {"dynamic_resolution", VRO_DYNRES}, {"follow", VRO_FOLLOW},
+            {"layout", VRO_LAYOUT}, {"turn", VRO_TURN}, {"panel_distance", VRO_HUD_DIST}, {"panel_width", VRO_HUD_WIDTH},
+            {"refresh", VRO_REFRESH}, {"fps", VRO_REFRESH}};
+        for (size_t i = 0; i < sizeof map / sizeof *map; i++)
+            if (!strcmp(k, map[i].k)) o = map[i].o;
+        snprintf(k2, sizeof k2, "vr_%s", k);
+        if (o == VRO_COUNT || !vr_settings_parse(k2, val)) {
+            LOG("[vr settings] test: frame %llu %s=%s unknown\n", (unsigned long long)frame, key, val);
+            continue;
+        }
+        LOG("[vr settings] test: frame %llu %s=%s (%s)\n", (unsigned long long)frame, k, val,
+                vr_opt_overridden(o) ? "set by the environment: ignored" : vr_opt_live(o) ? "live" : "after a restart");
+        settings_save();
+        vr_settings_changed(o);
+    }
 }

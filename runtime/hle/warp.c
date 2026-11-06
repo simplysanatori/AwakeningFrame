@@ -250,6 +250,7 @@ void warp_frame(uint64_t frame) {
     shots_test(frame);
     { extern void shader_tour_tick(uint64_t); shader_tour_tick(frame); }
     warp_test(frame);
+    { extern void vr_settings_test_tick(uint64_t); vr_settings_test_tick(frame); }  // (LARECOMP_VR_SET_AT: vr_settings.c)
     warp_on_load(frame);
     mem_dump_test(frame);
     if (ENV("LARECOMP_LOG_WARPAVAIL") && frame % 300 == 0) {

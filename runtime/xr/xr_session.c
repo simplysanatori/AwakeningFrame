@@ -151,6 +151,15 @@ bool xr_session_create(void) {
     g_xr.app = ref_space(XR_REFERENCE_SPACE_TYPE_LOCAL, identity);
     if (!g_xr.local || !g_xr.view || !g_xr.app) return false;
     xr_input_attach();
+    {   // Passthrough (Table Edge) needs ALPHA_BLEND; a runtime without it keeps OPAQUE (the void then shows black)
+        PFN_xrEnumerateEnvironmentBlendModes eb = NULL;
+        XrEnvironmentBlendMode bm[8];
+        uint32_t nb = 0;
+        p_xrGetInstanceProcAddr(g_xr.inst, "xrEnumerateEnvironmentBlendModes", (PFN_xrVoidFunction *)&eb);
+        if (eb && XR_SUCCEEDED(eb(g_xr.inst, g_xr.sys, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 8, &nb, bm)))
+            for (uint32_t i = 0; i < nb && i < 8; i++) g_xr.has_alpha_blend |= bm[i] == XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND;
+        LOG("[xr] environment blend modes: %u, alpha blend %s\n", nb, g_xr.has_alpha_blend ? "yes (Passthrough)" : "no (Passthrough shows black)");
+    }
     const char *q = getenv("LARECOMP_XR_QUAD");  // "distance,width" in metres
     g_xr.quad_dist = 2.0f, g_xr.quad_width = 2.2f;
     if (q) sscanf(q, "%f,%f", &g_xr.quad_dist, &g_xr.quad_width);
