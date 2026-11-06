@@ -34,7 +34,7 @@ LAS Recomp runs in a window on Windows, macOS and Linux. I added a VR mode and t
 
 ## Status
 
-AwakeningFrame is an early preview. There is no release yet: you build it on the Frame from this repository.
+AwakeningFrame is an early preview.
 
 Known issues:
 
@@ -43,15 +43,36 @@ Known issues:
 
 ## Requirements
 
-- A Steam Frame with SteamOS and SteamVR, and about 12 GB free.
+- A Steam Frame with SteamOS and SteamVR, and about 14 GB free while the game is extracted (about 8 GB after).
 - Your own copy of Link's Awakening for the Switch: the base game, version 1.0.0 (title ID 01006BB00C6F0000), as an NSP or XCI.
 - `prod.keys` from your own Switch.
-- A terminal on the Frame: SSH, or Konsole from desktop mode.
-- Steam running on the Frame while you install, so the installer can add the library entry.
+- [Frametanium](https://github.com/Cogential/frametanium) or [FrameDrop](https://framedropvr.com) to install a release. To build from source instead: a terminal on the Frame (SSH, or Konsole from desktop mode).
 
 The game files are never included. You extract them from your own copy.
 
 ## Install
+
+### Install with Frametanium
+
+1. Put your game on the Frame: your NSP or XCI of the base game and your `prod.keys`, both in `~/Downloads`. `~/Documents` and `~/Games/AwakeningFrame/game-files` work too, and so do the extracted `exefs` and `romfs` folders instead of an NSP.
+2. In [Frametanium](https://github.com/Cogential/frametanium), add `simplysanatori/AwakeningFrame` and install it.
+3. Put the headset on and launch **AwakeningFrame** from your Steam library.
+
+The installer copies the program to `~/Games/AwakeningFrame/app` and adds **AwakeningFrame** to your library, with its art and SteamVR's per-app settings: 120 Hz, no throttling, no motion smoothing. It finds your game, extracts it into `~/.local/share/lasrecomp/extracted` with your keys, and builds the game code from it. This takes up to 15 minutes. If the build isn't done by then, the first launch finishes it on the start screen, with a progress bar.
+
+The keys are only read where they are. They are not copied anywhere.
+
+If you install before your game is on the Frame, put it in `~/Downloads` and launch **AwakeningFrame**. It looks in the same places.
+
+To update, install the new version in Frametanium. Your game files, saves, settings and the library entry stay. To remove it, remove it in Frametanium. Your data folder stays.
+
+### Install with FrameDrop
+
+[Install with FrameDrop](https://framedropvr.com/install?manifest=https%3A%2F%2Fgithub.com%2Fsimplysanatori%2FAwakeningFrame%2Freleases%2Flatest%2Fdownload%2Fawakeningframe.framedrop.json), and put your game in `~/Downloads` as in step 1 above. FrameDrop adds its own library entry. The first launch installs the program, extracts your game and builds the game code on the start screen, with a progress bar.
+
+### Build from source
+
+You need a terminal on the Frame (SSH, or Konsole in desktop mode) and Steam running.
 
 1. Get the repository:
 
@@ -67,9 +88,7 @@ The game files are never included. You extract them from your own copy.
    steam-frame/prepare-game.sh /path/to/LinksAwakening.nsp /path/to/prod.keys
    ```
 
-   It refuses updates, DLC and compressed `.nsz` or `.xcz` files. A retail NSP carries its own ticket; for a dump without one, add your `title.keys` as a third argument. The keys are only read for the run and are not copied anywhere.
-
-   If you already have the extracted `exefs` and `romfs` folders, put them in `~/.local/share/lasrecomp/extracted` instead.
+   It refuses updates, DLC and compressed `.nsz` or `.xcz` files. A retail NSP carries its own ticket; for a dump without one, add your `title.keys` as a third argument. If you already have the extracted `exefs` and `romfs` folders, give their folder instead: `steam-frame/prepare-game.sh /path/to/folder`.
 
 3. Set up the Python tools the game code generator uses:
 
@@ -83,13 +102,13 @@ The game files are never included. You extract them from your own copy.
    ./install.sh
    ```
 
-   The first time, it recompiles the game code from your files, which takes a few minutes, and then builds the program. It installs it to `~/Games/AwakeningFrame/app` and adds **AwakeningFrame** to your Steam library, with its own library art. It sets SteamVR's per-app settings for that entry: 120 Hz, no throttling, no motion smoothing. The script talks to Steam through its local debugging port, which SteamOS has on by default.
+   The first time, it recompiles the game code from your files, which takes a few minutes, and then builds the program. It installs it to `~/Games/AwakeningFrame/app` and adds **AwakeningFrame** to your library, as above. The script talks to Steam through its local debugging port, which SteamOS has on by default.
 
-5. Put the headset on and launch **AwakeningFrame** from your Steam library.
+To update, pull the repository and run `./install.sh` again. To remove it, run `./uninstall.sh`. `./uninstall.sh --purge` also removes the logs and the data folder, which holds your game files and saves.
 
-To update, pull the repository and run `./install.sh` again. The library entry, your game files, saves and settings stay where they are.
+A release never replaces a build from source. If `~/Games/AwakeningFrame/app` holds one, Frametanium puts the release in `~/Games/AwakeningFrame/release` and leaves the library entry alone. To switch the entry to the release, run `install.sh --replace-source` from `~/.local/share/frametanium/apps/awakeningframe`.
 
-To remove it, run `./uninstall.sh`. It removes the library entry, its art and the program. `./uninstall.sh --purge` also removes the logs and the data folder, which holds your game files and saves.
+To build by hand, see [docs/af/BUILD-frame.md](docs/af/BUILD-frame.md): `steam-frame/fetch-vma.sh` and `tools/fetch_openxr.sh` fetch the headers SteamOS doesn't have, then `make gen` recompiles the game code from your files and `make` builds the program, both with `DEPS=$PWD/build/linux/aarch64/deps`. `steam-frame/build.sh` makes the release archives.
 
 ## First run
 
@@ -97,7 +116,7 @@ The game starts straight away, without LAS Recomp's start screen. It prepares it
 
 The table appears in front of you, below eye height. If it is not where you want it, click both thumbsticks to reset the view, or open the VR tab and change Height, Size and Tilt.
 
-If you see LAS Recomp's start screen instead of the game, it did not find your game files or the game code. Check that `~/.local/share/lasrecomp/extracted` holds `exefs` and `romfs`, and run `./install.sh` again.
+If you see LAS Recomp's start screen instead of the game, it is either finishing the game code, with a progress bar, or it did not find your game. In the second case, put your NSP or XCI and `prod.keys` in `~/Downloads` and launch **AwakeningFrame** again.
 
 ## Controls
 
@@ -173,16 +192,17 @@ The technical side is in [docs/TECHNICAL.md](docs/TECHNICAL.md).
 | What | Where |
 |---|---|
 | Program and launch wrapper | `~/Games/AwakeningFrame/app` |
-| Game files, saves, settings, shader caches | `~/.local/share/lasrecomp` (`extracted/`, `larecomp.ini`, `vr_rig.ini`, `cache/`) |
+| Game files, game code, saves, settings, shader caches | `~/.local/share/lasrecomp` (`extracted/`, `extracted/lasgame.so`, `larecomp.ini`, `vr_rig.ini`, `cache/`) |
 | Logs | `~/Games/AwakeningFrame/logs`: `run-<time>.log` (the launch and the game's output), `lasrecomp-<time>.log` (the game's log) and timing logs, for the last 12 launches |
 | One launch's settings | `~/Games/AwakeningFrame/session.env`, `NAME=value` lines read at start |
-| hactool | `~/Games/AwakeningFrame/tools-bin/hactool` |
+| hactool | `~/Games/AwakeningFrame/app/hactool` (a release), `~/Games/AwakeningFrame/tools-bin/hactool` (from source) |
 
 ## Troubleshooting
 
+- **Frametanium says no game files were found.** Put your NSP or XCI and `prod.keys` in `~/Downloads` and launch **AwakeningFrame**. `run-<time>.log` lists where it looked and what it found.
 - **`install.sh` says Steam's debugging port is not reachable.** Start Steam and run it again.
-- **`install.sh` says there is no game code and no game files.** Run `steam-frame/prepare-game.sh` first (Install, step 2).
-- **`install.sh` says `tools/venv` is missing.** Run the command in Install, step 3.
+- **`install.sh` says there is no game code and no game files.** Run `steam-frame/prepare-game.sh` first (Build from source, step 2).
+- **`install.sh` says `tools/venv` is missing.** Run the command in Build from source, step 3.
 - **`prepare-game.sh` refuses the package.** It needs the base game. Updates, DLC and compressed files are refused.
 - **The start screen shows instead of the game.** The game files or the game code are missing. See [First run](#first-run).
 - **Motion is uneven, or the picture ghosts when you turn your head.** Check that SteamVR runs the game at the refresh rate you chose, with motion smoothing off. The launch wrapper sets these at every start, but only while SteamVR is running. `run-<time>.log` shows what it set.
@@ -196,10 +216,6 @@ Open an [issue](https://github.com/simplysanatori/AwakeningFrame/issues) with wh
 These logs hold file paths under your home folder and the Steam shortcut's app id. Read them before you attach them.
 
 If the problem also happens in LAS Recomp's own build, report it [upstream](https://github.com/peiikai/LASRecomp/issues) instead. Never attach game files or keys.
-
-## Build from source
-
-`./install.sh` builds everything. To build by hand, see [docs/af/BUILD-frame.md](docs/af/BUILD-frame.md): `steam-frame/fetch-vma.sh` and `tools/fetch_openxr.sh` fetch the headers SteamOS doesn't have, then `make gen` recompiles the game code from your files and `make` builds the program, both with `DEPS=$PWD/build/linux/aarch64/deps`.
 
 ## Support
 
