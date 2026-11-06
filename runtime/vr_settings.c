@@ -14,14 +14,14 @@ const char *const g_vr_refresh_names[VRS_N_REFRESH] = {"120 Hz (60 FPS)", "90 Hz
 const char *const g_vr_layout_names[VRS_N_LAYOUT] = {"Switch", "Comfort"};
 const char *const g_vr_follow_names[VRS_N_FOLLOW] = {"Smooth", "Room", "Fixed"};
 const char *const g_vr_edge_names[VRS_N_EDGE] = {"Fog", "Gradient", "Black", "Passthrough"};
-const char *const g_vr_fov_names[VRS_N_FOV] = {"Default", "Off", "Low", "Medium", "High", "Fixed"};
+const char *const g_vr_fov_names[VRS_N_FOV] = {"Off", "Low", "Medium", "High"};
 const char *const g_vr_cull_names[VRS_N_CULL] = {"Fit", "Wide", "Stock"};
 
 // larecomp.ini words; the environment variables take the same ones (LARECOMP_VR_EDGE=fog, ...)
 static const char *const k_layout[] = {"switch", "comfort"};
 static const char *const k_follow[] = {"smooth", "room", "fixed"};
 static const char *const k_edge[] = {"fog", "gradient", "black", "passthrough"};
-static const char *const k_fov[] = {"default", "off", "low", "medium", "high", "fixed"};
+static const char *const k_fov[] = {"off", "low", "medium", "high"};
 static const char *const k_cull[] = {"fit", "wide", "stock"};
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -64,7 +64,7 @@ bool vr_settings_parse(const char *key, const char *val) {
     else if (!strcmp(key, "table_size")) VR.size_pct = clampi(atoi(val), 50, 200);
     else if (!strcmp(key, "table_tilt")) VR.tilt_deg = clampi(atoi(val), -30, 30);
     else if (!strcmp(key, "edge")) VR.edge = pick(k_edge, VRS_N_EDGE, val, VRS_EDGE_FOG);
-    else if (!strcmp(key, "foveation")) VR.foveation = pick(k_fov, VRS_N_FOV, val, VRS_FOV_DEFAULT);
+    else if (!strcmp(key, "foveation")) VR.foveation = pick(k_fov, VRS_N_FOV, val, VRS_FOV_MEDIUM);
     else if (!strcmp(key, "dynamic_resolution")) VR.dynres = atoi(val) != 0;
     else if (!strcmp(key, "culling")) VR.cull = pick(k_cull, VRS_N_CULL, val, VRS_CULL_FIT);
     else if (!strcmp(key, "panel_distance")) VR.hud_dist = clampf((float)atof(val), 0.8f, 4.0f);
@@ -128,7 +128,7 @@ void vr_settings_apply_env(void) {
         put("LARECOMP_VR_SCALE", b);
     }
     if (!g_given[VRO_EDGE] && VR.edge != VRS_EDGE_FOG) put("LARECOMP_VR_EDGE", k_edge[VR.edge]);
-    if (!g_given[VRO_FOVEATION] && VR.foveation != VRS_FOV_DEFAULT) put("LARECOMP_VR_FOVEATION", k_fov[VR.foveation]);
+    if (!g_given[VRO_FOVEATION] && VR.foveation != VRS_FOV_MEDIUM) put("LARECOMP_VR_FOVEATION", k_fov[VR.foveation]);
     if (!g_given[VRO_DYNRES] && VR.dynres) put("LARECOMP_VR_DYNRES", "1");  // off by default (owner), so only On is passed on
     if (!g_given[VRO_CULL] && VR.cull != VRS_CULL_FIT) put("LARECOMP_VR_CULL", k_cull[VR.cull]);
     if (!g_given[VRO_HUD_DIST] && (VR.hud_dist != 2.0f || VR.hud_width != 2.2f)) {

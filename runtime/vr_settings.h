@@ -11,8 +11,8 @@
 enum { VRS_LAYOUT_SWITCH, VRS_LAYOUT_COMFORT, VRS_N_LAYOUT };               // LARECOMP_XR_LAYOUT
 enum { VRS_FOLLOW_SMOOTH, VRS_FOLLOW_ROOM, VRS_FOLLOW_FIXED, VRS_N_FOLLOW };  // LARECOMP_VR_FOLLOW
 enum { VRS_EDGE_FOG, VRS_EDGE_GRADIENT, VRS_EDGE_BLACK, VRS_EDGE_PASSTHROUGH, VRS_N_EDGE };  // LARECOMP_VR_EDGE
-// LARECOMP_VR_FOVEATION (VRS_FOV_DEFAULT: the variable is left alone, the foveation lane's own default)
-enum { VRS_FOV_DEFAULT, VRS_FOV_OFF, VRS_FOV_LOW, VRS_FOV_MEDIUM, VRS_FOV_HIGH, VRS_FOV_FIXED, VRS_N_FOV };
+// LARECOMP_VR_FOVEATION: eye-tracked only (no fixed mode); without gaze the foveation lane renders full density
+enum { VRS_FOV_OFF, VRS_FOV_LOW, VRS_FOV_MEDIUM, VRS_FOV_HIGH, VRS_N_FOV };
 enum { VRS_CULL_FIT, VRS_CULL_WIDE, VRS_CULL_STOCK, VRS_N_CULL };            // LARECOMP_VR_CULL
 enum { VRS_REFRESH_120, VRS_REFRESH_90, VRS_N_REFRESH };                    // AF_REFRESH_HZ / LARECOMP_XR_HZ (60 / 30 FPS)
 
@@ -32,7 +32,7 @@ typedef struct {
 } VrSettings;
 
 #define VR_DEFAULTS {.refresh = VRS_REFRESH_120, .layout = VRS_LAYOUT_SWITCH, .follow = VRS_FOLLOW_SMOOTH, .height_cm = 0, \
-                     .size_pct = 100, .tilt_deg = 0, .edge = VRS_EDGE_FOG, .foveation = VRS_FOV_DEFAULT, .dynres = false, \
+                     .size_pct = 100, .tilt_deg = 0, .edge = VRS_EDGE_FOG, .foveation = VRS_FOV_MEDIUM, .dynres = false, \
                      .cull = VRS_CULL_FIT, .hud_dist = 2.0f, .hud_width = 2.2f}
 
 #ifdef __cplusplus
