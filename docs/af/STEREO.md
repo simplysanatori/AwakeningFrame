@@ -85,7 +85,11 @@ and it works in both of Turnip's modes (sysmem and GMEM).
 - **Log:** `[fov] eye gaze in N of M game frames ... ; X of Y eye passes foveated` every 10 s.
   `LARECOMP_VR_FOVEATION_LOG=1` logs each pass decision (the first 400).
 
-## v1 diorama (fixed table; lane 6 replaces it)
+## Diorama placement
+
+The rig (`runtime/xr/xr_rig.c`, docs/af/RIG.md) now places the table: per-area anchoring, the player's snap turn,
+tilt, height, size and recentre, and the blink. What follows is the v1 placement it grew from; the switches below
+still apply (`LARECOMP_VR_FOLLOW` set: the comfort follow instead of the rig's per-area anchoring).
 
 `app = A + s * Ry(yaw) * (world - pivot)`:
 
