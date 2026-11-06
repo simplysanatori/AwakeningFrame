@@ -17,3 +17,6 @@ void pace_settings_changed(const char *what);
 // any thread: the VR mode's lock (runtime/xr): 30 holds the game in its 30 fps mode for good (90 Hz displays), 0 / 60
 // leaves the choice to the pacer
 void pace_xr_lock(int fps);
+// any thread: the VR mode at 100 Hz and up: a game frame at 60 is ms long (two refreshes); 0 otherwise. The way back
+// from a 30 fps hold then takes the GPU fitting that frame (pace.c PACE_VR_GPU)
+void pace_xr_frame_ms(double ms);

@@ -69,6 +69,15 @@
 // Max at 5120x1440: back at 13.8 ms, slow motion at once; at 10-13 ms (5.2-6.7 in light scenes) a steady 60.
 #define PACE_GPU_LATE_MS 13.0
 #define PACE_GPU_LATE_BACKOFF_MS 10.0
+// The VR mode at 120 Hz (pace_xr_frame_ms: two refreshes a game frame) has no window image: the eye images and the HUD
+// are the runtime's swapchains, and with the GPU a frame behind the game (exec.c overlap) a frame fits when the GPU's
+// part of it does. So a hold - late frames or busy ones - ends on the GPU fitting PACE_VR_GPU of the game frame (15.0 ms
+// at 120 Hz: the desktop's limit for frames held by busy time) and PACE_VR_GPU_BACKOFF once a return failed (14.0);
+// the CPU limits are the desktop's, scaled to the frame (the same at 120 Hz). Measured on the Frame (Turnip, xrmock
+// 1728x1728, the overlap on): Mabe Village at 15.4 ms GPU showed 296-299 of 300 sets in 5 s at 60; the 13 ms late-hold
+// limit kept the forest, 14.2 ms, at 30 for good.
+#define PACE_VR_GPU 0.90
+#define PACE_VR_GPU_BACKOFF 0.84
 #define PACE_GRACE_NS 1000000000ull
 extern __thread uint64_t g_blocked_ns;  // kernel.c: this thread's time blocked in waits / sleeps
 static bool pace_slow;
@@ -79,6 +88,7 @@ static uint64_t stat_pace_over;
 // Returns whether the game is held (not when it allows no 30 fps mode itself: its most, +0x4e3, is 0).
 #define FW_MIN_EXTRA_VSYNCS 0x4e2  // (+0x4e3: the most, 1 - its 30 fps mode; +0x4e0 / +0x4e1: the current choice)
 static int xr_lock_fps;  // pace_xr_lock
+static int xr_frame_us;  // pace_xr_frame_ms (0: not the VR mode's 60)
 static bool hold_30(bool on) {
     if (__atomic_load_n(&xr_lock_fps, __ATOMIC_RELAXED) == 30) on = true;  // (the VR mode's 30/90: held for good)
     static bool held;
@@ -152,6 +162,8 @@ void pace_settings_changed(const char *what) {
 // so the game runs in its 30 fps mode for good - two world steps per frame, 33.3 ms apart, each frame shown for three
 // refreshes. 0 or 60: back to the pacer's own choice.
 void pace_xr_lock(int fps) { __atomic_store_n(&xr_lock_fps, fps, __ATOMIC_RELAXED); }
+// The VR mode at 100 Hz and up: a game frame at 60 is ms long (two refreshes); 0: not that mode (see PACE_VR_GPU)
+void pace_xr_frame_ms(double ms) { __atomic_store_n(&xr_frame_us, (int)(ms * 1000), __ATOMIC_RELAXED); }
 
 bool pace_is_slow(void) { return pace_slow; }
 uint64_t pace_frames_over(void) {
@@ -349,14 +361,16 @@ void pace_frame(void) {
         // (no GPU timer: -1, CPU only. Held for frames shown late, the GPU must fit with more room: those frames' busy
         // time was short, so what made them late was the GPU's frame and the window's image - and their CPU headroom
         // here says nothing: PACE_GPU_LATE_MS, PACE_GPU_LATE_BACKOFF_MS once a return to 60 failed.)
-        bool gpu_fits = gpu_avg < (!late_hold ? PACE_GPU_MS : backoff > 1 ? PACE_GPU_LATE_BACKOFF_MS : PACE_GPU_LATE_MS);
+        double vf = __atomic_load_n(&xr_frame_us, __ATOMIC_RELAXED) / 1000.0, k = vf > 0 ? vf / (1000.0 / 60) : 1;  // (CPU limits: scaled)
+        bool gpu_fits = gpu_avg < (vf > 0 ? vf * (backoff > 1 ? PACE_VR_GPU_BACKOFF : PACE_VR_GPU)
+                                   : !late_hold ? PACE_GPU_MS : backoff > 1 ? PACE_GPU_LATE_BACKOFF_MS : PACE_GPU_LATE_MS);
         int clear_n = 60 * (backoff < 4 ? backoff : 4);
-        cpu_clear = sc && avg < 11.0 && peak < 14.5f ? cpu_clear + 1 : 0;
+        cpu_clear = sc && avg < 11.0 * k && peak < 14.5 * k ? cpu_clear + 1 : 0;
         if (cpu_clear == clear_n && !gpu_fits && !gpu_said++)
             LOG("[pace] %d gameplay frames with clear CPU headroom (%.1f ms a frame at 60 on average), but the GPU takes %.1f ms "
                 "a frame: staying at 30\n", cpu_clear, avg, gpu_avg);
         clear = gpu_fits && cpu_clear ? clear + 1 : 0;
-        calm = sc && gpu_fits && med < 13.5f && nover <= 4 ? calm + 1 : 0;
+        calm = sc && gpu_fits && med < 13.5 * k && nover <= 4 ? calm + 1 : 0;
         if (clear >= clear_n || calm >= 150 * backoff) {
             char g[32];
             if (gpu_avg >= 0) snprintf(g, sizeof g, ", gpu %.1f ms", gpu_avg);
