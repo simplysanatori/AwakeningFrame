@@ -875,7 +875,7 @@ static void create_device(void) {
     if (xr_mode()) f12.shaderOutputViewportIndex = have12.shaderOutputViewportIndex, f12.shaderOutputLayer = have12.shaderOutputLayer;
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
                                             .storageBuffer16BitAccess = VK_TRUE, .pNext = &f12};
-    if (xr_mode() && vk_mv_on()) {  // (LARECOMP_MV: the stereo executor's multiview passes, docs/af/STEREO.md)
+    if (xr_mode() && vk_mv_wanted()) {  // (the stereo executor's multiview passes, docs/af/STEREO.md; LARECOMP_MV=0: off)
         VkPhysicalDeviceVulkan11Features h11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
         VkPhysicalDeviceFeatures2 hf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &h11};
         vkGetPhysicalDeviceFeatures2(g_vk.phys, &hf);

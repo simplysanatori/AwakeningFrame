@@ -9344,6 +9344,7 @@ static void exec_list(uint64_t handle, int depth) {
                 // (a shared target made from a twin: eye 1 would see eye 0's) the destination is twinned from now on, so
                 // eye 1 runs this copy into its own image (filled with eye 0's first: vk_stereo_twin_add)
                 NvnTexture *s_ = (NvnTexture *)(uintptr_t)t[0].tex, *d_ = (NvnTexture *)(uintptr_t)dst->tex;
+                vk_end_pass();  // (multiview: the twin add copies the image into its eye-1 layer now, outside a pass)
                 vk_tex(d_, true);
                 bool added = vk_stereo_twin_add(d_);
                 static int n;
