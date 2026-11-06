@@ -31,6 +31,7 @@
 #include "../cam_override.h"
 #include "stereo.h"
 #include "vr_diet.h"
+#include "foveation.h"
 
 // ---- stereo executor (VR mode, stereo.h; docs/af/STEREO.md): the eye being executed (-1: not in stereo). In eye 1 a
 // draw, clear or copy runs only when a target is twinned (vk_tex_twinned); compute, counters and read-backs run in
@@ -40,6 +41,12 @@ static uint64_t st_skipped[2], st_ran1;  // (stats) eye 1: skipped / run draws+c
 static bool st_mixed_logged;
 static bool eye1_skip_rt(void);           // (below the state) eye 1 and no twinned attachment
 static void gw_save(uint64_t addr, uint64_t size);  // eye 0: the old bytes of a guest write
+// (stereo) the list's fence syncs, signalled once both eyes ran (stereo_execute). Signalled in eye 0 (as before), a
+// flush later in eye 0 or 1 let the game see its fence done and write the next frame's uniforms while this frame's
+// draws still read them: eye 0 got the next frame's scene blocks, which the camera patch did not match (the game's own
+// camera in eye 0 = one eye flat while the camera moves).
+static uint64_t st_fence[64];
+static int st_fence_n;
 
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 // (the guest heap for shaders in chunks: with the heap import below)
@@ -1662,6 +1669,20 @@ static void begin_pass(void) {
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = 1,
                           .colorAttachmentCount = pass_ncolor, .pColorAttachments = pass_ncolor ? ca : NULL,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
+    if (g_eye >= 0 && fov_on()) {  // (VR foveation: eye passes into per-eye scalable targets get a rate / density map)
+        bool per_eye = !placed && (pass_ncolor || has_d || has_s);
+        TexBackend *fb = NULL;
+        for (int i = 0; i < st.rt.ncolor && per_eye; i++) {
+            NvnTexture *t = st.rt.color[i];
+            if (!t || !ca[i].imageView) continue;
+            per_eye = vk_tex_twinned(t) && ((TexBackend *)t->backend)->scalable;
+            if (!fb) fb = t->backend;
+        }
+        if (per_eye && (has_d || has_s)) per_eye = vk_tex_twinned(st.rt.depth) && ((TexBackend *)st.rt.depth->backend)->scalable;
+        if (!fb && (has_d || has_s)) fb = st.rt.depth->backend;
+        float fx = fb && fb->ax > 0 ? fb->sx / fb->ax : 1, fy = fb && fb->ay > 0 ? fb->sy / fb->ay : 1;
+        ri.pNext = fov_pass(g_eye, per_eye && fb, minw, minh, fx, fy);
+    }
     // LARECOMP_VK_LOG_PASSES=<n> (default 300 with =1): each of the first n passes before it begins - an Intel crash
     // inside vkCmdBeginRendering (issues #8, #46) ends the log on the pass the driver choked on
     static long log_passes = -1;
@@ -1847,13 +1868,15 @@ static VkPipeline clear_pipeline(int index, int kind, uint32_t mask, bool depth,
     fullscreen_vertex_dyn(dyn, &ndyn, NDYN + 1);
     VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
                                            .dynamicStateCount = ndyn, .pDynamicStates = dyn};
-    VkPipelineRenderingCreateInfo rinfo = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = pass_ncolor,
+    VkPipelineRenderingCreateInfo rinfo = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .pNext = fov_pipeline_chain(),
+                                           .colorAttachmentCount = pass_ncolor,
                                            .pColorAttachmentFormats = pass_color, .depthAttachmentFormat = pass_depth,
                                            .stencilAttachmentFormat = pass_stencil};
     VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &rinfo, .stageCount = 2,
                                        .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vs,
                                        .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
-                                       .pColorBlendState = &cb, .pDynamicState = &dy, .layout = pc_layout()};
+                                       .pColorBlendState = &cb, .pDynamicState = &dy, .layout = pc_layout(),
+                                       .flags = fov_pipeline_flags()};
     VkPipeline p = VK_NULL_HANDLE;
     if (vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p) != VK_SUCCESS) LOG("[vk] clear pipeline failed\n");
     clear_tab[slot].key = key;
@@ -2603,14 +2626,15 @@ static void pipe_ci_fill(PipeCI *c, const PipeKey *k) {
     if (g_vk.vids) c->dyn[NDYN] = VK_DYNAMIC_STATE_VERTEX_INPUT_EXT;
     c->dy = (VkPipelineDynamicStateCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
                                                .dynamicStateCount = NDYN + g_vk.vids, .pDynamicStates = c->dyn};
-    c->ri = (VkPipelineRenderingCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = k->ncolor,
+    c->ri = (VkPipelineRenderingCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .pNext = fov_pipeline_chain(),
+                                            .colorAttachmentCount = k->ncolor,
                                             .pColorAttachmentFormats = k->color, .depthAttachmentFormat = k->depth,
                                             .stencilAttachmentFormat = k->stencil};
     c->pi = (VkGraphicsPipelineCreateInfo){.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &c->ri, .stageCount = 2,
                                            .pStages = c->stages, .pVertexInputState = g_vk.vids ? NULL : &c->vi,
                                            .pInputAssemblyState = &c->ia, .pViewportState = &c->vs, .pRasterizationState = &c->rs,
                                            .pMultisampleState = &c->ms, .pDepthStencilState = &c->ds, .pColorBlendState = &c->cb,
-                                           .pDynamicState = &c->dy, .layout = k->prog->layout};
+                                           .pDynamicState = &c->dy, .layout = k->prog->layout, .flags = fov_pipeline_flags()};
 }
 
 static void build_pipeline(void *arg) {
@@ -8624,6 +8648,11 @@ static void exec_list(uint64_t handle, int depth) {
             if (fence_flush < 0) fence_flush = getenv("LARECOMP_FENCE_FLUSH") ? 1 : 0;
             if (fence_flush) renderer_flush();
             extern void nvn_sync_set_seq(uint64_t guest, uint64_t seq);
+            if (g_eye >= 0) {  // (stereo: signalled after eye 1, stereo_execute; eye 0 must not let the game write early)
+                if (g_eye == 0 && r->x[1] && st_fence_n < (int)(sizeof st_fence / sizeof *st_fence)) st_fence[st_fence_n++] = r->x[1];
+                else if (g_eye == 0 && r->x[1]) nvn_sync_set_seq(r->x[1], renderer_fence_seq());
+                break;
+            }
             if (r->x[1]) nvn_sync_set_seq(r->x[1], renderer_fence_seq());
             break;
         }
@@ -8846,6 +8875,12 @@ static void stereo_execute(uint64_t handle) {
     cam_override_set_eye(0);
     st.rt_dirty = true;
     gw_n = 0, gw_used = 0;
+    if (st_fence_n) {  // (the list's fences: done once both eyes' work is, the submission after this)
+        extern void nvn_sync_set_seq(uint64_t guest, uint64_t seq);
+        uint64_t seq = renderer_fence_seq();
+        for (int i = 0; i < st_fence_n; i++) nvn_sync_set_seq(st_fence[i], seq);
+        st_fence_n = 0;
+    }
 }
 
 // (device.c vk_frame_end, VR mode, between xr_set_begin and xr_set_submit, outside any rendering) each eye's output

@@ -15,6 +15,8 @@ void xr_input_attach(void);
 void xr_input_frame(void);
 // Before xrDestroySession.
 void xr_input_shutdown(void);
+// The eye gaze's direction (unit, `base` space) at t; false: none (xr_vk.c xr_latch_gaze).
+bool xr_input_gaze(XrSpace base, XrTime t, float dir[3]);
 
 // runtime/hle/input.c (built with the VR mode: LARECOMP_HAVE_XR)
 // The Frame controllers' state: `host` has bit n set for SDL_GamepadButton n held (bits 26, 27: the left / right

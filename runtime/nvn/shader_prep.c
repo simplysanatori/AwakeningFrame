@@ -522,6 +522,7 @@ static double ms_now(void) {
     return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
 }
 
+static volatile bool prep_done_once;  // (a full, not cancelled run finished in this process: shader_prep_boot)
 static bool prep_run_locked(const char *romfs, void (*progress)(int done, int total), const volatile int *cancel);
 bool shader_prep_run(const char *romfs, void (*progress)(int done, int total), const volatile int *cancel) {
     static pthread_mutex_t one = PTHREAD_MUTEX_INITIALIZER;  // (one run at a time: the index, the translator)
@@ -614,13 +615,39 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
     free(files);
     free(list);
     free(seen);
+    if (!(cancel && *cancel)) prep_done_once = true;
     LOG("[shader] prepared %d + %d seen before, not found %d%s%s (%d failed; index %zu shaders in %.0f ms, total %.0f ms)\n",
         prepared, prepared_seen, missing, cancel && *cancel ? ", " : "", cancel && *cancel ? "skipped" : "", failed, idx_n, t_idx, ms_now() - t0);
     return true;
 }
 
+// At game start, before the game's first frame. On by default when the game starts without the start screen (--play:
+// how the Steam Frame shortcut runs it - the start screen's own background preparation never happens there), off for
+// scripted test runs (LARECOMP_NO_LAUNCHER); LARECOMP_SHADER_PREP=1 / 0 forces it either way. Not again when the start
+// screen already did it in this process. It never holds the start for long: after LARECOMP_SHADER_PREP_BUDGET seconds
+// (default 20) it stops where it is (the rest compile as the game needs them, and what was built is in the pipeline
+// cache for the next start, which gets further). Warm, the whole list takes a few seconds.
+// Logs "[shader] preparing: N %" about every 10 %.
+static double boot_t0;
+static volatile int boot_cancel;
+static double boot_budget_ms;
+static void boot_progress(int done, int total) {
+    static int last = -1;
+    int pct = total > 0 ? (int)((long long)done * 100 / total) : 0;
+    if (last < 0 || pct / 10 != last / 10) LOG("[shader] preparing: %d %%\n", pct);
+    last = pct;
+    if (!boot_cancel && ms_now() - boot_t0 > boot_budget_ms) {
+        boot_cancel = 1;
+        LOG("[shader] preparing: out of time after %.0f s at %d %%; the rest compiles as the game needs it\n", boot_budget_ms / 1e3, pct);
+    }
+}
 void shader_prep_boot(const char *romfs) {
     const char *e = getenv("LARECOMP_SHADER_PREP");
-    if (!e || !atoi(e)) return;
-    shader_prep_run(romfs, NULL, NULL);
+    if (e && *e ? !atoi(e) : getenv("LARECOMP_NO_LAUNCHER") != NULL) return;
+    if (prep_done_once) return;
+    const char *b = getenv("LARECOMP_SHADER_PREP_BUDGET");
+    boot_budget_ms = (b && *b ? atof(b) : 20.0) * 1e3;
+    boot_t0 = ms_now();
+    boot_cancel = 0;
+    shader_prep_run(romfs, boot_progress, &boot_cancel);
 }
