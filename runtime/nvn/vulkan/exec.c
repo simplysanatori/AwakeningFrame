@@ -2740,8 +2740,8 @@ static void build_pipeline(void *arg) {
     if (g_shader_stats) {  // (LARECOMP_VK_SHADER_STATS: the shaders by code address and the fs hash the GPU profile shows)
         uint64_t fa = k->prog->code[1];
         uint64_t fh = k->prog->fs_rt_hash ? k->prog->fs_rt_hash : fa ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(fa + 0x30), 0x200) : 0;
-        snprintf(g_stats_label, sizeof g_stats_label, "vs %llx fs %llx fsh %016llx", (unsigned long long)k->prog->code[0],
-                 (unsigned long long)fa, (unsigned long long)fh);
+        snprintf(g_stats_label, sizeof g_stats_label, "vs %llx fs %llx fsh %016llx%s%s", (unsigned long long)k->prog->code[0],
+                 (unsigned long long)fa, (unsigned long long)fh, k->view_mask ? " multiview" : "", k->prog->vkey.mv ? " mv-program" : "");
     }
     VkResult r = vk_create_graphics_pipeline(&c.pi, &pp->pipe);
     SLOW_FEEDBACK_HIT();
@@ -6216,6 +6216,8 @@ static void prep_job(void (*fn)(void *), void *arg) {
 static _Atomic int prep_pipe_dups;  // records whose pipeline another record already made
 bool renderer_prepare_begin(void) { return g_vk.dev != VK_NULL_HANDLE; }
 int renderer_prepare_pending(void) { return prep_pending; }
+// (shader_prep.h) the multiview records (SR_MV / SR_MVP) can be built and are what this run's eye passes draw
+bool renderer_prepare_multiview(void) { return mv_passes_on(); }
 static void gpl_probe(void);
 static void gpl_probe_note(Pipe *pp);
 void renderer_prepare_end(void) {
@@ -7224,6 +7226,9 @@ static bool ring_early(CmdRec *r, bool indexed) {
 // variant (ShaderKey.mv: per-view cbufs, both eyes' layers of the twins it samples). Sets g_mv_bits, g_tex_amask and
 // g_mvp. NULL: the variant is still building (the draw is skipped, as any first use).
 static Prog *mv_program(Prog *pr, const ShaderKey *vkey, const ShaderKey *fkey) {
+    static int prog_on = -1;  // LARECOMP_MV_PROG=0 (cost tests only): the base programs everywhere - eye 1 gets eye 0's camera
+    if (prog_on < 0) prog_on = !getenv("LARECOMP_MV_PROG") || atoi(getenv("LARECOMP_MV_PROG")) != 0;
+    if (!prog_on) return pr;
     uint32_t amask = 0, bits[2] = {0, 0};
     for (int i = 0; i < pr->fi->ntex; i++) {
         NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
