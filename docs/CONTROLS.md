@@ -36,11 +36,11 @@ these reach the game.
 | Steam Frame | The table |
 |---|---|
 | Right stick left / right | Turn the table. Pushing right takes the view round the table to the right. Turning is smooth and faster the further you push; with *Turning* on Snap, a flick turns it 45 degrees behind a short blink |
-| Right stick up / down | Tilt the table. Up lifts the far edge toward you, from -20 to +50 degrees |
+| Right stick up / down | Tilt the table. Up lifts the far edge toward you, from 0 to +50 degrees |
 | Left grip + D-pad up / down | Raise and lower the table, from 50 cm lower to 40 cm higher |
 | Left grip + D-pad right / left | Make the table bigger and smaller, from 40% to 300% |
-| Click both thumbsticks | Reset the view |
-| Left grip + right stick click | Reset the view, the same |
+| Click both thumbsticks | Reset the view. Hold for 2 seconds to reset everything |
+| Left grip + right stick click | The same, with the same hold times |
 | SteamVR's recentre | Put the table in front of you again, keeping its turn |
 
 The right stick turns or tilts, never both: the direction you first push it
@@ -50,10 +50,17 @@ table.
 **Reset the view.** Click both thumbsticks together and hold them for a
 moment. Behind a blink, the table turns back to the game's own angle (you see
 it from where the game's camera looks) and goes in front of you again.
-Height, size and tilt stay as you set them. "View Reset" shows on the panel
-for a moment. A single stick click still goes to the game.
+Height, distance, size and tilt stay as you set them. "View Reset" shows on
+the panel for a moment. A single stick click still goes to the game.
 
-**Height, size and tilt** are saved to `vr_rig.ini` in the data folder a
+**Reset everything.** Keep both thumbsticks down for 2 seconds. The view
+resets again behind a blink, and the table's height, distance, size and tilt
+go back to the defaults: 1.2 m away, 15 degrees below eye level, tilted 30
+degrees toward you, so that Link is about where you look when you face
+forward. "Full View Reset" shows on the panel. Left grip + a right stick click
+has the same two steps.
+
+**Height, distance, size and tilt** are saved to `vr_rig.ini` in the data folder a
 moment after you stop, and are the same rows as on the VR tab. The turn is
 not saved: each start faces the game's own angle.
 

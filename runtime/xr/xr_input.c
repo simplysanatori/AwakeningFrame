@@ -96,7 +96,8 @@ static const int8_t k_bool_ctl[A_GRIP_L] = {[A_A] = C_A, [A_B] = C_B, [A_X] = C_
                                            [A_BUMP_L] = C_BUMP_L, [A_BUMP_R] = C_BUMP_R, [A_CLICK_L] = C_CLICK_L,
                                            [A_CLICK_R] = C_CLICK_R, [A_TRIG_L] = C_TRIG_L, [A_TRIG_R] = C_TRIG_R};
 
-#define RESET_HOLD_NS 100000000ull  // both sticks clicked together this long: reset the view
+#define RESET_HOLD_NS 100000000ull    // both sticks clicked together this long: reset the view
+#define RESET_FULL_NS 2000000000ull   // ... and held this long from the press: reset tilt, height, size and distance too
 
 #define XRIN_FUNCS(F)                                                                                                 \
     F(xrStringToPath) F(xrCreateActionSet) F(xrDestroyActionSet) F(xrCreateAction) F(xrSuggestInteractionProfileBindings) \
@@ -127,11 +128,13 @@ static struct {
     int dom;                   // the right stick's dominant axis: 0 none, 1 sideways (turn), 2 up / down (tilt)
     uint64_t both_ns;          // when both stick clicks went down together (0: not both down)
     bool both_fired;           // the reset for this press was sent
+    uint64_t rs_ns;            // when the reset hold began (both stick clicks, or the left grip and the right click): 0 = none
+    bool rs_short, rs_full;    // the short / full reset for this hold was sent
 } S = {.snap_armed = true};
 
 static _Atomic float g_yaw;
 static _Atomic int g_snap;                // -1 / +1 pending, 0 none
-static _Atomic bool g_reset;
+static _Atomic bool g_reset, g_reset_full;
 static _Atomic float g_tilt, g_turn, g_height, g_size;
 static _Atomic bool g_modifier;
 
@@ -142,6 +145,7 @@ void xr_input_rig(XrRigInput *out) {
 }
 int xr_input_take_snap(void) { return atomic_exchange(&g_snap, 0); }
 bool xr_input_take_reset_view(void) { return atomic_exchange(&g_reset, false); }
+bool xr_input_take_reset_full(void) { return atomic_exchange(&g_reset_full, false); }
 
 // ---- set-up
 static XrPath path(const char *s) {
@@ -411,17 +415,29 @@ void xr_input_frame(void) {
     bool rig_ctl[C_COUNT] = {0};
     if (mod) rig_ctl[C_DUP] = rig_ctl[C_DDOWN] = rig_ctl[C_DLEFT] = rig_ctl[C_DRIGHT] = rig_ctl[C_CLICK_R] = true;
     atomic_store(&g_modifier, mod);
+    uint64_t now = plat_now_ns();
     {
-        uint64_t now = plat_now_ns();
         if (S.down[C_CLICK_L] && S.down[C_CLICK_R]) {
             if (!S.both_ns) S.both_ns = now, S.both_fired = false;
             if (now - S.both_ns >= RESET_HOLD_NS) {
-                if (!S.both_fired) S.both_fired = true, atomic_store(&g_reset, true);
+                S.both_fired = true;
                 rig_ctl[C_CLICK_L] = rig_ctl[C_CLICK_R] = true;  // (the reset's: the game sees neither until both are let go)
             }
         } else if (S.both_fired && (S.down[C_CLICK_L] || S.down[C_CLICK_R])) {
             rig_ctl[C_CLICK_L] = rig_ctl[C_CLICK_R] = true;      // (one let go, the other still down: still not a click of the game's)
         } else S.both_ns = 0, S.both_fired = false;
+    }
+    // the view reset: both stick clicks held RESET_HOLD, or the left grip and a click of the right stick (an alias), send the short
+    // reset once; the same hold, 2 s from the press, sends the full one once (it includes the short one's yaw and recentre, so the
+    // short one is not sent again). Let go of the hold (or of the sticks, both and the alias ending) and a new press starts over.
+    {
+        bool both = S.down[C_CLICK_L] && S.down[C_CLICK_R], hold = both || (mod && S.down[C_CLICK_R]);
+        if (!hold) S.rs_ns = 0, S.rs_short = S.rs_full = false;
+        else {
+            if (!S.rs_ns) S.rs_ns = both ? S.both_ns : now, S.rs_short = S.rs_full = false;  // (both: from the first click's press)
+            if (!S.rs_short && now - S.rs_ns >= RESET_HOLD_NS) S.rs_short = true, atomic_store(&g_reset, true);
+            if (!S.rs_full && now - S.rs_ns >= RESET_FULL_NS) S.rs_full = true, atomic_store(&g_reset_full, true);
+        }
     }
     // the right stick: sideways turns the table, up / down tilts it; the axis it was first pushed along wins until the other
     // is clearly bigger (1.4 times), so a thumb that wanders does not tilt a turn or turn a tilt
@@ -434,9 +450,6 @@ void xr_input_frame(void) {
     atomic_store(&g_turn, S.dom == 1 ? sr[0] : 0.0f);
     atomic_store(&g_height, mod ? (float)(S.down[C_DUP] - S.down[C_DDOWN]) : 0.0f);
     atomic_store(&g_size, mod ? (float)(S.down[C_DRIGHT] - S.down[C_DLEFT]) : 0.0f);
-    static bool click_was;  // (left grip + a click of the right stick: the same reset as both sticks)
-    if (mod && S.down[C_CLICK_R] && !click_was) atomic_store(&g_reset, true);
-    click_was = mod && S.down[C_CLICK_R];
     if (ax < 0.35f) S.snap_armed = true;
     else if (ax > 0.7f && S.snap_armed && S.dom == 1) S.snap_armed = false, atomic_store(&g_snap, sr[0] > 0 ? 1 : -1);
 

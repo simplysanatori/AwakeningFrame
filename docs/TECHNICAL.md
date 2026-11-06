@@ -163,7 +163,7 @@ The VR tab's rows map onto environment variables the VR code reads, and are
 saved in `larecomp.ini`. A variable set in the launch environment
 (`~/Games/AwakeningFrame/session.env`, `NAME=value` lines) wins and greys
 its row out. The refresh rate is applied by the launch wrapper before the
-game starts, so it takes a relaunch. Height, size and tilt belong to the rig
+game starts, so it takes a relaunch. Height, distance, size and tilt belong to the rig
 and are saved in `vr_rig.ini`. The full list is in
 [af/VR_SETTINGS.md](af/VR_SETTINGS.md).
 

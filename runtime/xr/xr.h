@@ -148,7 +148,9 @@ void xr_input_set_yaw(float yaw_radians);
 //   both stick clicks held 0.1 s, or the left grip and a click of the right stick: xr_input_take_reset_view() (the view back
 //                               to the game's own angle and the table in front of the player again), consumed by the call.
 //                               Until both clicks are let go the game sees neither; a single click (or both for under 0.1 s)
-//                               goes to the game as the stick-click buttons.
+//                               goes to the game as the stick-click buttons. The same hold, 2 s from the press:
+//                               xr_input_take_reset_full() (the view reset and tilt, height, size and distance back to the
+//                               defaults), once per hold, consumed by the call.
 typedef struct {
     float tilt, turn;
     float height, size;
@@ -157,6 +159,7 @@ typedef struct {
 void xr_input_rig(XrRigInput *out);
 int xr_input_take_snap(void);
 bool xr_input_take_reset_view(void);
+bool xr_input_take_reset_full(void);
 
 // (the rig, runtime/xr/xr_rig.c) the app's space put at the head and turned to where it faces, as after SteamVR's own
 // recentre (xr_session.c: the next refresh makes the new space; the table, placed relative to it, is in front again).

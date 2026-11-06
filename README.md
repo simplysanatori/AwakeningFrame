@@ -114,7 +114,7 @@ To build by hand, see [docs/af/BUILD-frame.md](docs/af/BUILD-frame.md): `steam-f
 
 The game starts straight away, without LAS Recomp's start screen. It prepares its shaders first, which takes longer the first time.
 
-The table appears in front of you, below eye height. If it is not where you want it, click both thumbsticks to reset the view, or open the VR tab and change Height, Size and Tilt.
+The table appears in front of you, a little below eye height, with Link about where you look when you face forward. If it is not where you want it, click both thumbsticks to reset the view, hold them for 2 seconds to put everything back to the defaults, or open the VR tab and change Height, Distance, Size and Tilt.
 
 If you see LAS Recomp's start screen instead of the game, it is either finishing the game code, with a progress bar, or it did not find your game. In the second case, put your NSP or XCI and `prod.keys` in `~/Downloads` and launch **AwakeningFrame** again.
 
@@ -141,11 +141,11 @@ The game sees a Switch Pro Controller. The Frame controllers map to it by positi
 | Right stick up / down | | Tilt the table |
 | Left grip + D-pad up / down | | Table height |
 | Left grip + D-pad right / left | | Table size |
-| Click both thumbsticks | | Reset the view |
+| Click both thumbsticks | | Reset the view. Hold for 2 seconds to reset the table's height, distance, size and tilt too |
 
 Turning is smooth by default. With Turning set to Snap, a flick of the right stick turns the table 45 degrees behind a blink.
 
-Resetting the view turns the table back to the game's own angle and puts it in front of you again. Height, size and tilt stay as you set them. "View Reset" shows on the panel for a moment.
+Resetting the view turns the table back to the game's own angle and puts it in front of you again. Height, distance, size and tilt stay as you set them. "View Reset" shows on the panel for a moment. If you keep both thumbsticks down for 2 seconds, the view resets again, and the height, distance, size and tilt go back to the defaults too. "Full View Reset" shows on the panel. Left grip + a right stick click does the same, with the same hold times.
 
 With Buttons Match Labels on, A, B, X and Y work as printed on the Frame controllers instead of by position. The Comfort layout puts the sword on the right trigger and the shield on the left trigger.
 
@@ -163,8 +163,9 @@ Press **View** and **Menu** together to open the game's menu. The VR tab is next
 | Buttons Match Labels | Off, On | On: A, B, X and Y work as printed on the controllers |
 | Follow Mode | Smooth, Room, Fixed | How the table follows the game. Smooth holds each room still and follows Link in the overworld. Room holds still until the camera changes room. Fixed never moves |
 | Height | -50 to +40 cm | How high the table stands |
+| Distance | 60 to 300 cm | How far away the table stands |
 | Size | 40% to 300% | How big the table is |
-| Tilt | -20 to +50 degrees | How far the table leans toward you |
+| Tilt | 0 to +50 degrees | How far the table leans toward you |
 | Recentre Table | | Puts the table in front of you again |
 | Table Edge | Off, Fade, Passthrough | What fills the space past the world in the overworld. Fade softens the edge of the world, Passthrough shows your room |
 | Foveation | Off, Low, Medium, High | Follows your eyes and draws what you aren't looking at in less detail. Higher levels save more GPU time |
@@ -172,9 +173,9 @@ Press **View** and **Menu** together to open the game's menu. The VR tab is next
 | Panel Distance | 0.8 to 4.0 m | How far away the HUD and menus float |
 | Panel Width | 0.6 to 4.0 m | How wide the HUD and menus are |
 
-The first choice is the default. Height, Size and Tilt start at 0, 100% and 0. Panel Distance starts at 2.0 m and Panel Width at 2.2 m. Foveation is High and Dynamic Resolution is On.
+The first choice is the default. Height, Distance, Size and Tilt start at 0, 120 cm, 100% and 30 degrees. Panel Distance starts at 2.0 m and Panel Width at 2.2 m. Foveation is High and Dynamic Resolution is On.
 
-Every row but Refresh Rate applies at once. The settings are saved in `larecomp.ini`, and the table's height, size and tilt in `vr_rig.ini`, both in `~/.local/share/lasrecomp`.
+Every row but Refresh Rate applies at once. The settings are saved in `larecomp.ini`, and the table's height, distance, size and tilt in `vr_rig.ini`, both in `~/.local/share/lasrecomp`.
 
 ## Performance
 
@@ -206,7 +207,7 @@ The technical side is in [docs/TECHNICAL.md](docs/TECHNICAL.md).
 - **`prepare-game.sh` refuses the package.** It needs the base game. Updates, DLC and compressed files are refused.
 - **The start screen shows instead of the game.** The game files or the game code are missing. See [First run](#first-run).
 - **Motion is uneven, or the picture ghosts when you turn your head.** Check that SteamVR runs the game at the refresh rate you chose, with motion smoothing off. The launch wrapper sets these at every start, but only while SteamVR is running. `run-<time>.log` shows what it set.
-- **The table is in an odd place.** Click both thumbsticks to reset the view.
+- **The table is in an odd place.** Click both thumbsticks to reset the view, or hold them for 2 seconds to put the height, distance, size and tilt back to the defaults.
 - **To check something without the headset**, run `~/Games/AwakeningFrame/app/awakeningframe.sh --flat`. It opens the game in an ordinary window.
 
 ## Reporting a problem
