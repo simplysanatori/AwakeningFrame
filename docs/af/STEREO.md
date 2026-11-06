@@ -118,7 +118,7 @@ still apply (`LARECOMP_VR_FOLLOW` set: the comfort follow instead of the rig's p
 - **s:** `LARECOMP_VR_SCALE` (0.067 m per unit). `LARECOMP_VR_YAW` sets the yaw.
 - **Depth:** the eye projections keep the game's depth terms. `LARECOMP_VR_NEAR=<units>` overrides them.
 
-## Multiview (`LARECOMP_MV=1`; off by default)
+## Multiview (on where the device has multiview; `LARECOMP_MV=0`: off)
 
 One run of a list draws both eyes (VK_KHR_multiview, `viewMask` 3) instead of running the list once per eye.
 
@@ -197,7 +197,7 @@ One run of a list draws both eyes (VK_KHR_multiview, `viewMask` 3) instead of ru
 | `LARECOMP_VR_DYNRES=1`, `_MIN` / `_MAX` / `_MS` | dynamic eye resolution (off by default; docs/af/PASSES.md) |
 | `LARECOMP_GPU_OVERLAP=0\|1` | the CPU / GPU overlap (VR default on, flat off on Turnip; docs/af/PASSES.md) |
 | `LARECOMP_VR_FOVEATION=off\|low\|medium\|high` | eye-tracked foveation of the eye passes (above) |
-| `LARECOMP_MV=1` | multiview stereo: twins as layer 1, one run per list (above) |
+| `LARECOMP_MV=0\|1` | multiview stereo (default: on where the device has multiview): twins as layer 1, one run per list (above); 0: stereo v1; 1: the layered twins even without multiview |
 | `LARECOMP_MV_PASSES=0` | with `LARECOMP_MV=1`: the layered twins, but each list still runs once per eye |
 
 Mock run: `XR_RUNTIME_JSON=build/xrmock/runtime.json LARECOMP_XR=1 MOCK_XR_EYE_SIZE=1728x1728
