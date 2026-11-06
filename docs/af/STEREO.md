@@ -49,7 +49,11 @@ layer. Design: `~/.claude/plans/awakeningframe-vr-design.md` sections 2-6. Code:
 - **Timing:** each eye run of a list is wrapped in timestamps. Results are summed per game frame. `[stereo] GPU per
   game frame` is logged every 2 s, and `xr_timing.log` gets `gpu0` / `gpu1`. Eye 0 includes the shared passes.
 
-## v1 diorama (fixed table; lane 6 replaces it)
+## Diorama placement
+
+The rig (`runtime/xr/xr_rig.c`, docs/af/RIG.md) now places the table: per-area anchoring, the player's snap turn,
+tilt, height, size and recentre, and the blink. What follows is the v1 placement it grew from; the switches below
+still apply (`LARECOMP_VR_FOLLOW` set: the comfort follow instead of the rig's per-area anchoring).
 
 `app = A + s * Ry(yaw) * (world - pivot)`:
 
