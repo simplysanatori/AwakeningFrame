@@ -5,9 +5,13 @@
 //   LARECOMP_VR_CULL_MARGIN=<m>          the eye frusta widened by this in NDC (0.3), for head motion
 //   LARECOMP_VR_CULL_EYES=0              no eye clipping: the whole rectangle
 //   LARECOMP_LOG_CULL=1                  the fit every 120 frames ([vrcull])
+//   LARECOMP_VR_RING=<margin>            (lane ring, off) draws outside the fit's footprint grown by this are drawn in
+//                                        the eyes' colour passes only: no shadow casting, no depth pre-pass (exec.c)
+//   LARECOMP_VR_RING_CAST=<margin>       ring draws within this of the footprint still cast shadows (0: none)
 // LARECOMP_FREECAM_CULL=<aspect>:<fovy scale> still overrides all of this.
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "cam_override.h"
 
@@ -20,3 +24,9 @@ void vr_cull_note_game(float fovy_field, float aspect_field);
 void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3], const CamRef *eye0, const CamRef *eye1);
 // the fitted culling aspect (absolute) and fovy scale; false until the first fit
 bool vr_cull_get(float *aspect, float *fovy_scale);
+// (lane ring) the table fit's footprint as a world-axis box (y unbounded), before LARECOMP_VR_CULL_EXTENT; false: none
+bool vr_cull_core_box(float lo[3], float hi[3]);
+bool vr_ring_on(void);  // LARECOMP_VR_RING set
+// a draw with this world box: 0 core, 1 ring, 2 ring that still casts (LARECOMP_VR_RING_CAST); against the footprint
+// as it was at the first call of this frame (the executor's renderer_exec_frame)
+int vr_ring_class(const float lo[3], const float hi[3], uint64_t frame);
