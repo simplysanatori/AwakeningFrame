@@ -6,6 +6,7 @@
 #include <execinfo.h>
 #include <fcntl.h>
 #include <linux/userfaultfd.h>
+#include <poll.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
@@ -153,7 +154,97 @@ static bool soft_fault(uint64_t fa) {
     return soft_release((fa - g_soft_lo) / SOFT_PAGE);
 }
 
+// ---- the lazy range: a userfaultfd for missing pages (plat_lazy_range)
+// Registered in user-mode-only mode (no privileges: vm.unprivileged_userfaultfd=0), so the OS's own accesses to a
+// granule not made yet fail (EFAULT) instead of waiting: plat_os_write / plat_os_read make their granules first.
+// One handler thread reads the faults: it has the granule made (once: g_lz_state), then wakes every thread waiting in
+// it. The window's write-protect userfaultfd (above) must be closed first: a range has one userfaultfd at a time.
+static int g_lz_uffd = -1, g_lz_stop[2] = {-1, -1};
+static uint64_t g_lz_lo, g_lz_hi, g_lz_gran;
+static _Atomic uint8_t *g_lz_state;
+static pthread_mutex_t g_lz_mu = PTHREAD_MUTEX_INITIALIZER;
+static void (*g_lz_make)(uint64_t addr, uint64_t size);
+static pthread_t g_lz_thread;
+
+static void lz_get(uint64_t g) {
+    if (atomic_load_explicit(&g_lz_state[g], memory_order_acquire)) return;
+    pthread_mutex_lock(&g_lz_mu);
+    if (!atomic_load_explicit(&g_lz_state[g], memory_order_relaxed)) {
+        g_lz_make(g_lz_lo + g * g_lz_gran, g_lz_gran);
+        atomic_store_explicit(&g_lz_state[g], 1, memory_order_release);
+    }
+    pthread_mutex_unlock(&g_lz_mu);
+}
+
+static void *lz_thread(void *arg) {
+    (void)arg;
+    sigset_t all;
+    sigfillset(&all);
+    pthread_sigmask(SIG_BLOCK, &all, NULL);
+    for (;;) {
+        struct pollfd pf[2] = {{.fd = g_lz_uffd, .events = POLLIN}, {.fd = g_lz_stop[0], .events = POLLIN}};
+        if (poll(pf, 2, -1) < 0) continue;
+        if (pf[1].revents) break;
+        struct uffd_msg m;
+        if (read(g_lz_uffd, &m, sizeof m) != (ssize_t)sizeof m || m.event != UFFD_EVENT_PAGEFAULT) continue;
+        uint64_t a = m.arg.pagefault.address;
+        if (a < g_lz_lo || a >= g_lz_hi) continue;
+        uint64_t g = (a - g_lz_lo) / g_lz_gran;
+        lz_get(g);
+        struct uffdio_range r = {.start = g_lz_lo + g * g_lz_gran, .len = g_lz_gran};
+        ioctl(g_lz_uffd, UFFDIO_WAKE, &r);  // (the granule is no longer this userfaultfd's: its waiters retry there)
+    }
+    return NULL;
+}
+
+bool plat_lazy_range(uint64_t lo, uint64_t hi, uint64_t granule, void (*make)(uint64_t addr, uint64_t size)) {
+    if (g_lz_uffd >= 0 || g_uffd >= 0 || !granule || (hi - lo) % granule) return false;
+    int fd = (int)syscall(SYS_userfaultfd, O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY);
+    if (fd < 0) return false;
+    struct uffdio_api api = {.api = UFFD_API};
+    // nothing is there yet (boot, or the reboot's fresh pages): dropped all the same, a page left would never fault
+    madvise((void *)(uintptr_t)lo, hi - lo, MADV_DONTNEED);
+    struct uffdio_register rg = {.range = {.start = lo, .len = hi - lo}, .mode = UFFDIO_REGISTER_MODE_MISSING};
+    if (ioctl(fd, UFFDIO_API, &api) || ioctl(fd, UFFDIO_REGISTER, &rg) || pipe2(g_lz_stop, O_CLOEXEC)) {
+        fprintf(stderr, "[plat] lazy range: userfaultfd: %s\n", strerror(errno));
+        close(fd);
+        return false;
+    }
+    g_lz_state = calloc((hi - lo) / granule, 1);
+    g_lz_lo = lo, g_lz_hi = hi, g_lz_gran = granule, g_lz_make = make, g_lz_uffd = fd;
+    if (pthread_create(&g_lz_thread, NULL, lz_thread, NULL)) {
+        close(fd), close(g_lz_stop[0]), close(g_lz_stop[1]);
+        g_lz_uffd = g_lz_stop[0] = g_lz_stop[1] = -1;
+        free((void *)g_lz_state), g_lz_state = NULL;
+        return false;
+    }
+    return true;
+}
+
+void plat_lazy_touch(uint64_t addr, uint64_t size) {
+    if (!g_lz_state || !size || addr >= g_lz_hi || addr + size <= g_lz_lo) return;
+    uint64_t a = addr < g_lz_lo ? g_lz_lo : addr, b = addr + size > g_lz_hi ? g_lz_hi : addr + size;
+    for (uint64_t g = (a - g_lz_lo) / g_lz_gran; g <= (b - 1 - g_lz_lo) / g_lz_gran; g++) lz_get(g);
+}
+
+bool plat_lazy_made(uint64_t addr) {
+    if (!g_lz_state || addr < g_lz_lo || addr >= g_lz_hi) return true;
+    return atomic_load_explicit(&g_lz_state[(addr - g_lz_lo) / g_lz_gran], memory_order_acquire) != 0;
+}
+
+void plat_lazy_off(void) {
+    if (g_lz_uffd < 0) return;
+    if (write(g_lz_stop[1], "x", 1) != 1) {}
+    pthread_join(g_lz_thread, NULL);
+    close(g_lz_uffd), close(g_lz_stop[0]), close(g_lz_stop[1]);  // (closing it unregisters what is left of the range)
+    g_lz_uffd = g_lz_stop[0] = g_lz_stop[1] = -1;
+    free((void *)g_lz_state), g_lz_state = NULL;
+}
+
+void plat_os_read(uint64_t addr, uint64_t size) { plat_lazy_touch(addr, size); }
+
 void plat_os_write(uint64_t addr, uint64_t size) {
+    plat_lazy_touch(addr, size);
     if (!g_soft_state || !size || addr >= g_soft_hi || addr + size <= g_soft_lo) return;
     uint64_t a = addr < g_soft_lo ? g_soft_lo : addr, b = addr + size > g_soft_hi ? g_soft_hi : addr + size;
     for (uint64_t p = (a - g_soft_lo) / SOFT_PAGE; p <= (b - 1 - g_soft_lo) / SOFT_PAGE; p++)

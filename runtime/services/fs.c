@@ -878,6 +878,7 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
             LOG("[save] write %s off %lld size %lld <- guest %llx\n", f->path, (long long)off, (long long)size, (unsigned long long)a->addr);
         if (f->dropped) break;  // (reported when it was opened; the game is never told, see save_failed)
         int error = 0;
+        plat_os_read(a->addr, (uint64_t)size);  // (the lazy heap: what the OS reads there must exist)
         for (int64_t done = 0; done < size;) {  // (a short write goes on from where it stopped)
             ssize_t n = pwrite(f->fd, (void *)(uintptr_t)(a->addr + done), (size_t)(size - done), off + done);
             if (n < 0 && errno == EINTR) continue;
