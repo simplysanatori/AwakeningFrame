@@ -149,6 +149,10 @@ void xr_input_rig(XrRigInput *out);
 int xr_input_take_snap(void);
 bool xr_input_take_recentre(void);
 
+// (the rig, runtime/xr/xr_rig.c) the app's space put at the head and turned to where it faces, as after SteamVR's own
+// recentre (xr_session.c: the next refresh makes the new space; the table, placed relative to it, is in front again).
+void xr_recentre(void);
+
 #ifdef __cplusplus
 }
 #endif
