@@ -40,8 +40,11 @@ bool edge_passthrough_wanted(void);
 // failure (logged once): the caller draws the eye as before and nothing was recorded.
 bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uint32_t w, uint32_t h);
 
-// The Mysterious Woods' fog dome (fragment shader hash): a dome round the game camera drawn without a depth test, made
-// to fill the stock view from inside. From the diorama it is a big translucent disc with a hard rim over the table, so
-// the VR eyes leave it out (exec.c) unless LARECOMP_VR_FOG_DOME=1; the woods keep their mist sheets and light shafts.
+// The Mysterious Woods' fog (fragment shader hashes), made for the stock camera and wrong from the diorama, so the VR
+// eyes leave them out (exec.c) unless LARECOMP_VR_WOODS_FOG=1: the dome round the game camera, drawn without a depth test
+// (a big translucent disc with a hard rim over the table), and the blue mist curtain at the woods' edge, seen from the
+// fields beside them (a camera-facing sheet that fades against the scene's depth: a hard-edged blue slab from the side).
+// The woods keep their mist sheets and light shafts.
 #define FS_FOG_DOME 0xffad3b2d795231a7ull
-bool edge_fog_dome_hidden(void);
+#define FS_WOODS_CURTAIN 0x39ae199ddc1701dcull
+bool edge_woods_fog_hidden(void);

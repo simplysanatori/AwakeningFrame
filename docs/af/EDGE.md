@@ -94,15 +94,22 @@ everywhere: the overworld, interiors, dungeons, side views.
 | `LARECOMP_VR_EDGE_SMOOTH=0` | foveation's blocks left as they are |
 | `LARECOMP_VR_EDGE_DEBUG=6` | the factor in red, geometry in green, over the dimmed eye (unsmoothed, no fit's floor fade) |
 
-## The Mysterious Woods' fog dome
+## The Mysterious Woods' fog: the dome and the edge curtain
 
 The woods draw a fog dome round the game camera (fragment shader `ffad3b2d795231a7`, 1200 vertices, about 6.6 units
 across before its scale, no depth test, blended): from the stock camera, inside it, it is an even blue haze over the
 screen. From the diorama, outside it, it is a big translucent disc with a hard elliptical rim over the middle of the
-table ("a big circle of fog"). There is no way to make a camera-centred dome right for a viewer outside it, so the VR
-eyes leave it out (`exec.c`, `FS_FOG_DOME` in edge.h; any edge mode). The woods keep their atmosphere from what else
-they draw: three instanced mist sheets that fade against the scene's depth (`8605ce71f404bc10`), the light shafts
-(`d66b33b13b2eac29`, `1372d4fe34dd4bb4`) and the particles. `LARECOMP_VR_FOG_DOME=1` keeps the dome.
+table ("a big circle of fog"). There is no way to make a camera-centred dome right for a viewer outside it.
+
+From the fields beside the woods (Mabe Village's north edge, Field_09D, and the like) the game draws a blue cloudy mist
+curtain where the woods begin (`39ae199ddc1701dc`, one 18-index draw after the opaque scene, blended, fading against a
+copy of the scene's depth). In the stock view it is a haze along the top of the screen; from the diorama's side angles
+it is a tall hard-edged blue slab standing over the trees ("a fog rectangle"). It does not draw inside the woods.
+
+The VR eyes leave both out (`exec.c`, `FS_FOG_DOME` and `FS_WOODS_CURTAIN` in edge.h; any edge mode). The woods keep
+their atmosphere from what else they draw: three instanced mist sheets that fade against the scene's depth
+(`8605ce71f404bc10`), the light shafts (`d66b33b13b2eac29`, `1372d4fe34dd4bb4`) and the particles.
+`LARECOMP_VR_WOODS_FOG=1` keeps the dome and the curtain.
 
 ## Modes (`LARECOMP_VR_EDGE`)
 

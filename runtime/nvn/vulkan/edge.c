@@ -127,9 +127,9 @@ EdgeMode edge_mode(void) {
     return (EdgeMode)m;
 }
 bool edge_passthrough_wanted(void) { return edge_mode() == EDGE_PASSTHROUGH; }
-bool edge_fog_dome_hidden(void) {
+bool edge_woods_fog_hidden(void) {
     static int keep = -1;
-    if (keep < 0) keep = getenv("LARECOMP_VR_FOG_DOME") && atoi(getenv("LARECOMP_VR_FOG_DOME")) > 0;
+    if (keep < 0) keep = getenv("LARECOMP_VR_WOODS_FOG") && atoi(getenv("LARECOMP_VR_WOODS_FOG")) > 0;
     return !keep;
 }
 
