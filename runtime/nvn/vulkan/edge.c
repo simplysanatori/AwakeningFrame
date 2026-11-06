@@ -543,17 +543,19 @@ bool renderer_origin_lower_left(void);
 bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uint32_t w, uint32_t h) {
     if (!cfg.init) cfg_init();
     if (cfg.mode == EDGE_BLACK || eye < 0 || eye > 1 || !noted[eye].have) return false;
-    {   // outdoors only: an interior or a dungeon (or the title) keeps its dark void and the game's own glow, drawn by the present as before
-        extern int game_level_overworld(void);  // (widescreen.c) 1 the overworld, 0 another level, -1 not in play
-        int ow = game_level_overworld();
-        if (cfg.mode == EDGE_FADE ? ow < 0 : !cfg.indoors && ow != 1) return false;  // (fade: everywhere in play)
-    }
+    extern int game_level_overworld(void);  // (widescreen.c) 1 the overworld, 0 another level, -1 not in play
+    int ow = game_level_overworld();
+    // outdoors only: an interior or a dungeon (or the title) keeps its dark void and the game's own glow, drawn by the
+    // present as before (fade: everywhere in play)
+    if (cfg.mode == EDGE_FADE ? ow < 0 : !cfg.indoors && ow != 1) return false;
     float fade_c[3] = {0}, fade_r = cfg.radius;  // (fade) the table's centre and the clear radius
     if (cfg.mode == EDGE_FADE) {
         float lo[3], hi[3];
         bool room, zone;
         if (!stereo_table(fade_c, &room, &zone, lo, hi)) return false;
-        if (room && zone)  // (a room or a side view: all of it stays clear; the fade only softens what lies past it)
+        // (a room or a side view, not the overworld, whose camera zones are areas of 240 x 198: all of it stays clear;
+        // the fade only softens what lies past it)
+        if (room && zone && ow == 0 && hi[0] - lo[0] < 80 && hi[2] - lo[2] < 80)
             for (int i = 0; i < 4; i++) {
                 float dx = (i & 1 ? hi[0] : lo[0]) - fade_c[0], dz = (i & 2 ? hi[2] : lo[2]) - fade_c[2];
                 fade_r = fmaxf(fade_r, sqrtf(dx * dx + dz * dz) + cfg.room_margin);

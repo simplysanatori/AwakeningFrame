@@ -1452,7 +1452,8 @@ static bool direct_repeat;  // (render thread off) backend_represent's present
 // overlay alone (its "Preparing shaders" label) into the window, or in VR into the HUD / menu panel's image, cleared
 // transparent there (the eyes get the stub's colour). Nothing once the game presents or the render thread runs.
 void backend_boot_frame(void) {
-    if (g_last_presented || rq_on()) return;
+    extern bool rq_running(void);
+    if (g_last_presented || rq_running()) return;  // (not rq_on: that would start the render thread)
     static const float clear_flat[4] = {0.04f, 0.05f, 0.06f, 1}, clear_xr[4] = {0, 0, 0, 0};
     if (!vk_frame_begin(xr_mode() ? clear_xr : clear_flat)) {
         SDL_Delay(50);  // (VR: the session not running yet)
