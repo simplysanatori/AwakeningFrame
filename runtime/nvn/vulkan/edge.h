@@ -9,8 +9,8 @@
 // The backdrop colours are the average colours of the top and bottom bands of the scene's geometry, smoothed over time
 // on the GPU (no read-back).
 //
-// Modes (LARECOMP_VR_EDGE): fog (default), gradient, black (off: edge_eye returns false and the caller's present runs
-// as before), passthrough. Everything else is in docs/af/EDGE.md.
+// Modes (LARECOMP_VR_EDGE): fog, gradient, black (the default: off; edge_eye returns false and the caller's present runs
+// as before), passthrough. Overworld only: in an interior or a dungeon edge_eye returns false too (LARECOMP_VR_EDGE_INDOORS=1 lifts it). Everything else is in docs/af/EDGE.md.
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>

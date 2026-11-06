@@ -36,6 +36,7 @@ static struct {
     float desat, bright;       // how the scene's average is turned into haze
     float tau;                 // seconds the backdrop colours take to follow the scene
     int debug;
+    bool indoors;              // also in interiors and dungeons (default: the overworld only)
     float pivot_default;
 } cfg;
 
@@ -49,19 +50,20 @@ static bool hex3(const char *s, float out[3]) {
 static void cfg_init(void) {
     const char *e;
     cfg.init = true;
-    cfg.mode = EDGE_FOG;
+    cfg.mode = EDGE_BLACK;  // (off until asked: LARECOMP_VR_EDGE=fog)
     if ((e = getenv("LARECOMP_VR_EDGE"))) {
         if (!strcmp(e, "black") || !strcmp(e, "off") || !strcmp(e, "0") || !strcmp(e, "none")) cfg.mode = EDGE_BLACK;
+        else if (!strcmp(e, "fog") || !strcmp(e, "1")) cfg.mode = EDGE_FOG;
         else if (!strcmp(e, "gradient")) cfg.mode = EDGE_GRADIENT;
         else if (!strcmp(e, "passthrough")) cfg.mode = EDGE_PASSTHROUGH;
-        else if (strcmp(e, "fog") && strcmp(e, "1") && *e) LOG("[edge] LARECOMP_VR_EDGE=%s unknown (fog, gradient, black, passthrough): fog\n", e);
+        else if (*e) LOG("[edge] LARECOMP_VR_EDGE=%s unknown (fog, gradient, black, passthrough): off\n", e);
     }
     cfg.fog_start = 1e6f, cfg.fog_end = 2e6f;  // (distance fog is off unless LARECOMP_VR_EDGE_FOG asks: only the void band fades)
     if ((e = getenv("LARECOMP_VR_EDGE_FOG"))) {
         float a, b;
         if (sscanf(e, "%f,%f", &a, &b) == 2 && a >= 0 && b > a) cfg.fog_start = a, cfg.fog_end = b;
     }
-    cfg.soft = (e = getenv("LARECOMP_VR_EDGE_SOFT")) && atof(e) >= 0 ? (float)atof(e) : 0.04f;
+    cfg.soft = (e = getenv("LARECOMP_VR_EDGE_SOFT")) && atof(e) >= 0 ? (float)atof(e) : 0.025f;
     cfg.strength = (e = getenv("LARECOMP_VR_EDGE_STRENGTH")) ? fminf(fmaxf((float)atof(e), 0.0f), 1.0f) : 1.0f;
     cfg.rect_soft = (e = getenv("LARECOMP_VR_EDGE_RECT")) && atof(e) >= 0 ? (float)atof(e) : 0.0f;  // (the culling quadrilateral fade: opt in)
     cfg.sky[0] = 0.80f, cfg.sky[1] = 0.89f, cfg.sky[2] = 0.96f, cfg.skymix = (e = getenv("LARECOMP_VR_EDGE_SKYMIX")) ? fminf(fmaxf((float)atof(e), 0.0f), 1.0f) : 0.85f;
@@ -77,6 +79,7 @@ static void cfg_init(void) {
         if (sscanf(e, "%f,%f", &a, &c) == 2) cfg.desat = a, cfg.bright = c;
     }
     cfg.tau = (e = getenv("LARECOMP_VR_EDGE_TAU")) && atof(e) > 0 ? (float)atof(e) : 0.8f;
+    cfg.indoors = (e = getenv("LARECOMP_VR_EDGE_INDOORS")) && atoi(e) > 0;
     cfg.debug = (e = getenv("LARECOMP_VR_EDGE_DEBUG")) ? atoi(e) : 0;
     float s = (e = getenv("LARECOMP_VR_SCALE")) && atof(e) > 0 ? (float)atof(e) : 0.067f;
     float d = (e = getenv("LARECOMP_VR_DIST")) && atof(e) > 0 ? (float)atof(e) : 1.0f;
@@ -130,32 +133,36 @@ static const char *vs_src =
     "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
     "}\n";
 
-// coverage: the geometry share of a 8x8 block (16 taps, a 4x4 lattice)
+// void share: each mask texel is an 8x8 block of the eye (all 64 pixels read, none skipped: a thin tree line or a gap in
+// the terrain keeps its true share), turned into a void weight (thin slivers and lone pixels count for nothing)
 static const char *cov_fs =
     PRELUDE
     "void main() {\n"
     "  vec2 blk = floor(gl_FragCoord.xy);\n"
     "  float n = 0.0;\n"
-    "  for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++) {\n"
-    "    vec2 p = (blk * 8.0 + vec2(1.0 + 2.0 * float(i), 1.0 + 2.0 * float(j))) / u.sz.xy;\n"
-    "    n += is_geo(dsample(qmap(p))) ? 1.0 : 0.0;\n"
+    "  for (int j = 0; j < 8; j++) for (int i = 0; i < 8; i++) {\n"
+    "    vec2 p = (blk * 8.0 + vec2(0.5 + float(i), 0.5 + float(j))) / u.sz.xy;\n"
+    "    n += is_geo(dsample(qmap(p))) ? 0.0 : 1.0;\n"
     "  }\n"
-    "  o = vec4(n / 16.0, 0.0, 0.0, 1.0);\n"
+    "  o = vec4(smoothstep(0.35, 0.65, n / 64.0), 0.0, 0.0, 1.0);\n"
     "}\n";
 
-// a separable blur of the mask; 13 taps over +-radius texels (fog.z), gaussian weights (direction in fl.w: 0 x, 1 y)
+// how near the void is: a separable gaussian-weighted MAX of the void weight (the product of the two passes' weights is
+// the radial gaussian, so this is a soft distance to the nearest void: 1 at the void, 0.6 one sigma away, 0.14 at two
+// and a half; it does not depend on how big the void is, unlike an average). 19 taps over +-radius texels (fog.z)
+// (direction in fl.w: 0 x, 1 y)
 static const char *blur_fs =
     PRELUDE
     "void main() {\n"
     "  vec2 p = gl_FragCoord.xy / u.sz.zw;\n"
     "  vec2 dir = (u.fl.w < 0.5 ? vec2(1.0, 0.0) : vec2(0.0, 1.0)) / u.sz.zw;\n"
-    "  float acc = 0.0, wsum = 0.0;\n"
-    "  for (int k = -6; k <= 6; k++) {\n"
-    "    float w = exp(-float(k * k) / 18.0);\n"
-    "    acc += w * texture(mk, clamp(p + dir * (float(k) * u.fog.z / 6.0), vec2(0.0), vec2(1.0))).r;\n"
-    "    wsum += w;\n"
+    "  float sg = max(u.fog.z, 0.5) / 2.5, best = 0.0;\n"
+    "  for (int k = -9; k <= 9; k++) {\n"
+    "    float d = float(k) * u.fog.z / 9.0;\n"
+    "    float w = exp(-d * d / (2.0 * sg * sg));\n"
+    "    best = max(best, w * texture(mk, clamp(p + dir * d, vec2(0.0), vec2(1.0))).r);\n"
     "  }\n"
-    "  o = vec4(acc / wsum, 0.0, 0.0, 1.0);\n"
+    "  o = vec4(best, 0.0, 0.0, 1.0);\n"
     "}\n";
 
 // the backdrop colours: texel 0 the top band's average colour, texel 1 the bottom's, over the geometry only
@@ -187,7 +194,7 @@ static const char *main_fs =
     "void main() {\n"
     "  vec2 p = gl_FragCoord.xy / u.sz.xy;\n"
     "  int quad = 3;\n"
-    "  if (u.mi.z > 8.5) { quad = int(p.x * 2.0) + 2 * int(p.y * 2.0); p = fract(p * 2.0); }\n"  // (debug 9: 2x2 mosaic)
+    "  if (abs(u.mi.z - 9.0) < 0.5) { quad = int(p.x * 2.0) + 2 * int(p.y * 2.0); p = fract(p * 2.0); }\n"  // (debug 9: 2x2 mosaic)
     "  vec2 q = qmap(p);\n"
     "  vec4 s = texture(ct, q * u.cc.xy);\n"
     "  float d = dsample(q);\n"
@@ -221,21 +228,30 @@ static const char *main_fs =
     "      rect = max(rect, (1.0 - t * t * (3.0 - 2.0 * t)) * u.rc.w);\n"  // (full at the edge, none a band inside)
     "    }\n"
     "  }\n"
-    "  float cover = texture(mk, p).r;\n"
-    "  float edge = (1.0 - smoothstep(0.5, 0.97, cover)) * u.fog.w;\n"
+    "  float cover = texture(mk, p).r;\n"  // (how near the void is, 0..1)
+    "  float edge = smoothstep(0.06, 0.92, cover) * u.fog.w;\n"
     "  float fade = !geo ? 1.0 : (u.fl.z < 1.5 ? max(max(fog, edge), rect) : 0.0);\n"
     "  vec3 c = mix(s.rgb, back, fade);\n"
     "  float a = 1.0;\n"
     "  if (u.fl.z > 2.5) { a = 1.0 - fade; c = s.rgb * a; }\n"  // (passthrough: premultiplied)
     "  float n = ign(gl_FragCoord.xy, u.fl.w) + ign(gl_FragCoord.xy + 17.0, u.fl.w + 3.0) - 1.0;\n"  // (triangular)
-    "  c += n / 255.0;\n"
-    "  if (u.mi.z > 8.5) {\n"
+    "  c += n / 255.0 * min(fade * 8.0, 1.0);\n"  // (dither only where something was blended: the rest is untouched)
+    "  float dm = u.mi.z;\n"
+    "  if (abs(dm - 9.0) < 0.5) {\n"
     "    if (quad == 0) c = s.rgb;\n"
     "    else if (quad == 1) c = geo ? vec3(clamp(r / (4.0 * u.up.w), 0.0, 1.0), fract(d * 64.0), d) : vec3(1.0, 0.0, d);\n"
     "    else if (quad == 2) c = vec3(cover, fog, edge);\n"
-    "  } else if (u.mi.z > 7.5) {\n"
+    "  } else if (abs(dm - 8.0) < 0.5) {\n"
     "    if (p.x < 0.5) c = s.rgb;\n"  // (debug 8: before | after, in one frame)
     "    if (abs(p.x - 0.5) < 0.0008) c = vec3(1.0);\n"
+    "    a = 1.0;\n"
+    "  } else if (abs(dm - 10.0) < 0.5) {\n"  // (debug 10: the box 0.55..0.95 x 0.5..0.9 shows the untreated eye inside, the treated outside, one frame)
+    "    vec2 bq = abs(p - vec2(0.75, 0.7));\n"
+    "    if (bq.x < 0.2 && bq.y < 0.2) c = s.rgb;\n"
+    "    if (abs(max(bq.x, bq.y) - 0.2) < 0.0008) c = vec3(1.0);\n"
+    "    a = 1.0;\n"
+    "  } else if (abs(dm - 11.0) < 0.5) {\n"  // (debug 11: |treated - untreated| x 8 over a dark copy of the eye: white where the pass changed a pixel)
+    "    c = abs(c - s.rgb) * 8.0 + 0.1 * s.rgb;\n"
     "    a = 1.0;\n"
     "  } else if (u.mi.z > 0.5) {\n"
     "    int m = int(u.mi.z + 0.5);\n"
@@ -486,6 +502,10 @@ bool renderer_origin_lower_left(void);
 bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uint32_t w, uint32_t h) {
     if (!cfg.init) cfg_init();
     if (cfg.mode == EDGE_BLACK || eye < 0 || eye > 1 || !noted[eye].have) return false;
+    {   // outdoors only: an interior or a dungeon (or the title) keeps its dark void and the game's own glow, drawn by the present as before
+        extern int game_level_overworld(void);  // (widescreen.c) 1 the overworld, 0 another level, -1 not in play
+        if (!cfg.indoors && game_level_overworld() != 1) return false;
+    }
     EdgeEye ein = {.eye = eye};
     const EdgeEye *in = &ein;
     {
