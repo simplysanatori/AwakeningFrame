@@ -187,6 +187,12 @@ static bool suggest(const char *profile, bool frame, const char *grip) {
     return XR_SUCCEEDED(r);
 }
 
+// The VR tab's Controller Layout while the game runs (runtime/vr_settings.c): taken by the next xr_input_frame. A layout
+// change (or Buttons Match Labels) gives a held control a new button; it stays silent until let go, so the press that made
+// the change in the menu does not turn into a press of another button.
+static int g_layout_req = -1;  // (atomic) -1 none, 0 switch, 1 comfort
+void xr_input_set_layout(int comfort) { __atomic_store_n(&g_layout_req, comfort != 0, __ATOMIC_RELEASE); }
+
 void xr_input_init(PFN_xrGetInstanceProcAddr gipa, bool valve) {
     memset(&S, 0, sizeof S);
     S.snap_armed = true;
@@ -394,7 +400,13 @@ static void chord_filter(uint32_t host, uint64_t now, uint32_t *game, uint32_t *
     *menus = (host & ~VM) | (out == VM && first ? first : out);
 }
 
+static bool g_relatch;  // the layout changed: what is held now goes silent (below)
 void xr_input_frame(void) {
+    int req = __atomic_exchange_n(&g_layout_req, -1, __ATOMIC_ACQ_REL);
+    if (req >= 0 && (req != 0) != S.comfort) {
+        S.comfort = req != 0, g_relatch = true;
+        LOG("[xr] controller layout: %s (VR settings)\n", S.comfort ? "comfort" : "switch");
+    }
     if (!S.attached) return;
     XrActiveActionSet as[2] = {{.actionSet = S.set, .subactionPath = XR_NULL_PATH}, {.actionSet = S.gaze_set, .subactionPath = XR_NULL_PATH}};
     XrActionsSyncInfo si = {.type = XR_TYPE_ACTIONS_SYNC_INFO, .countActiveActionSets = S.gaze_set ? 2 : 1, .activeActionSets = as};
@@ -463,6 +475,21 @@ void xr_input_frame(void) {
     else if (ax > 0.7f && S.snap_armed && S.dom == 1) S.snap_armed = false, atomic_store(&g_snap, sr[0] > 0 ? 1 : -1);
 
     // the game's: buttons through the layout table, the left stick turned by the table's yaw
+    {
+        static int by_label = -1;
+        static bool mute[C_COUNT];  // (held through a layout change: silent until let go)
+        bool lab = by_label >= 0 && by_label != (int)g_settings.face_by_label;
+        if (g_relatch || lab) {
+            if (lab) LOG("[xr] buttons match labels: %s (held buttons wait for a release)\n", g_settings.face_by_label ? "on" : "off");
+            g_relatch = false;
+            for (int c = 0; c < C_COUNT; c++) mute[c] = S.down[c];
+        }
+        by_label = g_settings.face_by_label;
+        for (int c = 0; c < C_COUNT; c++) {
+            if (!S.down[c]) mute[c] = false;
+            if (mute[c]) rig_ctl[c] = true;
+        }
+    }
     uint32_t host = 0;
     const MapEnt *map = S.comfort ? k_map_comfort : k_map_switch;
     size_t nmap = S.comfort ? sizeof k_map_comfort / sizeof *k_map_comfort : sizeof k_map_switch / sizeof *k_map_switch;
@@ -470,7 +497,7 @@ void xr_input_frame(void) {
         if (S.down[map[i].ctl] && !rig_ctl[map[i].ctl] && map[i].host >= 0 && map[i].host < 32) host |= 1u << map[i].host;
     if (!S.comfort)
         for (Ctl c = C_A; c <= C_Y; c++)
-            if (S.down[c]) host |= 1u << face_host(c, g_settings.face_by_label);
+            if (S.down[c] && !rig_ctl[c]) host |= 1u << face_host(c, g_settings.face_by_label);
     float yaw = atomic_load(&g_yaw), c = cosf(yaw), s = sinf(yaw);
     // (app space: x right, y ahead; the table's frame is the app's turned by -yaw, the game's up is the table's -z)
     int32_t lx = to_axis(sl[0] * c + sl[1] * s), ly = to_axis(-sl[0] * s + sl[1] * c);

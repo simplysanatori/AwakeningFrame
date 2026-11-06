@@ -144,6 +144,13 @@ static void timing_line(uint64_t f, uint64_t t_wait0, uint64_t t_ret, const XrFr
             (t_end - b) / 1e6, atomic_load(&g_gpu_us[0]) / 1000.0, atomic_load(&g_gpu_us[1]) / 1000.0, late);
 }
 
+// The VR tab's Refresh Rate, between its two 90 Hz choices (30 FPS, 60 FPS test), while the game runs (runtime/vr_settings.c):
+// the display's rate itself is SteamVR's, set by the launch wrapper (xrRequestDisplayRefreshRateFB is refused), but the
+// game's rate at that rate is ours: the pacer's lock and frame time follow at the next refresh. 60: the 60 fps test, 0: as
+// the display's rate gives (30 fps below 100 Hz). -1: LARECOMP_XR_FPS, read at the first refresh.
+static int g_fps_req = -1;
+void xr_set_game_fps(int fps) { __atomic_store_n(&g_fps_req, fps == 60 ? 60 : 0, __ATOMIC_RELEASE); }
+
 static void end_frame(const XrFrameState *fs, bool new_set) {
     XrCompositionLayerProjectionView pv[2];
     XrCompositionLayerProjection proj = {.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION};
@@ -265,6 +272,8 @@ static void *xr_thread(void *arg) {
             static int locked = -1;
             static int test60 = -1;
             if (test60 < 0) test60 = getenv("LARECOMP_XR_FPS") && atoi(getenv("LARECOMP_XR_FPS")) == 60;
+            int fr = __atomic_exchange_n(&g_fps_req, -1, __ATOMIC_ACQ_REL);
+            if (fr >= 0 && (fr == 60) != (test60 == 1)) test60 = fr == 60, LOG("[xr] game frame rate at 90 Hz: %s (VR settings)\n", test60 ? "60 fps (test)" : "30 fps");
             int want = g_xr.display_hz < 100 ? (test60 ? 60 : 30) : 0;
             if (want != locked) {
                 pace_xr_lock(want == 30 ? 30 : 0);
