@@ -38,6 +38,23 @@
 // draw, clear or copy runs only when a target is twinned (vk_tex_twinned); compute, counters and read-backs run in
 // eye 0 only; the game's memory writes of eye 0 are undone before eye 1 and redone by it.
 static int g_eye = -1;
+// ---- multiview (LARECOMP_MV=1; docs/af/STEREO.md "Multiview"): a list runs once (g_mv_run) and every pass whose
+// attachments are all twinned (layered: textures.c vk_mv_on) draws both eyes as one multiview pass (pass_view_mask 3).
+// A twinned pass that can't be one (twinned and shared attachments) is drawn into layer 0 and makes eye 1 run the
+// list again for it (mv_need_eye1; that run skips everything else).
+static bool g_mv_run, mv_need_eye1;
+static uint32_t pass_view_mask;  // the open pass's view mask (3: both eyes)
+static uint32_t g_mv_bits[2];    // (the draw being recorded) per stage, cbuf k has an [eye 0 | eye 1] copy (bit k)
+static uint32_t g_tex_amask;     // (the draw) its fragment textures sampled as both eyes' layers (sampler2DArray)
+static bool g_mvp;               // (the draw) it uses a multiview program (ShaderKey.mv)
+static struct { uint64_t passes, other, lists1, lists2, copies, mvprog, baseprog, bad_tex, bad_cb, building, eye1_passes, cam_draws, cam_shared; } mvs;
+static void mv_cam_shared(int stage, int k) {  // (camera check, multiview) a camera block bound to both views alike: eye 1 gets eye 0's
+    if (!pass_view_mask) return;
+    static int nlog;
+    if (mvs.cam_shared++ < 1000000 && nlog++ < 8) LOG("[mv] camera check: cbuf %d of stage %d in a multiview pass has eye 0's camera in both views\n", k, stage);
+}
+static bool mv_passes_on(void);
+extern uint64_t renderer_exec_frame(void);
 static uint64_t st_skipped[2], st_ran1;  // (stats) eye 1: skipped / run draws+clears+copies
 static bool st_mixed_logged;
 static bool eye1_skip_rt(void);           // (below the state) eye 1 and no twinned attachment
@@ -171,7 +188,7 @@ static bool overlap_on(void) {
     if (on < 0) {
         const char *e = getenv("LARECOMP_GPU_OVERLAP"), *w = getenv("LARECOMP_OVERLAP_WATCH");
         uint32_t g;
-        // Shader global memory as copies (gmir_on: no heap import - Turnip on the Steam Frame): the GPU reads nothing
+        // Shader global memory as copies (gmir_on: no heap import - Turnip with LARECOMP_VK_HEAP_DMABUF=0): the GPU reads nothing
         // of the game's memory in place - every range is copied at translation, which the game's SyncWait still waits
         // for (rq_wait_item) - and its stores reach guest memory as each submission completes (gmir_writeback, also on
         // a deferred SyncWait). So the overlap needs no storage snapshots there (snap_on). On by default in the VR mode
@@ -923,21 +940,23 @@ static void guest_copy_flush(void) { gcopy_gen++; }
 // cam_override_patch's substitute for a bound range, as a transient copy shared by the draws of one submission that bind
 // the same range in the same eye (guest memory is stable within a submission, as for guest_copy; the camera epoch
 // covers a new latch). LARECOMP_CAM_PATCH_NOSHARE=1: a fresh patch and copy per binding, as before.
-static bool cam_patched(uint64_t addr, uint64_t size, VkSpan *out) {
+static bool cam_patched_eye(uint64_t addr, uint64_t size, int eye, VkSpan *out);
+static bool cam_patched(uint64_t addr, uint64_t size, VkSpan *out) { return cam_patched_eye(addr, size, g_eye, out); }
+static bool cam_patched_eye(uint64_t addr, uint64_t size, int eye, VkSpan *out) {
     static struct { uint64_t addr, size, seq; uint32_t epoch; int8_t eye; bool hit; VkSpan span; } memo[2048];
     static int noshare = -1;
     if (noshare < 0) noshare = getenv("LARECOMP_CAM_PATCH_NOSHARE") != NULL;
     uint64_t seq = vk_pending_seq() + (gcopy_gen << 40), h = (addr * 0x9E3779B97F4A7C15ull) ^ (size * 0xC2B2AE3D27D4EB4Full);
     uint32_t epoch = cam_override_epoch(), slot = (uint32_t)(h ^ (h >> 32)) & 2047;
     if (!noshare && memo[slot].seq == seq && memo[slot].addr == addr && memo[slot].size == size && memo[slot].epoch == epoch &&
-        memo[slot].eye == g_eye) {
+        memo[slot].eye == eye) {
         if (memo[slot].hit) *out = memo[slot].span;
         return memo[slot].hit;
     }
     uint8_t pb[4096];
     bool hit = cam_override_patch((const void *)(uintptr_t)addr, size, pb);
     if (hit) *out = vk_transient_copy(pb, size, 256);
-    memo[slot].addr = addr, memo[slot].size = size, memo[slot].seq = seq, memo[slot].epoch = epoch, memo[slot].eye = (int8_t)g_eye;
+    memo[slot].addr = addr, memo[slot].size = size, memo[slot].seq = seq, memo[slot].epoch = epoch, memo[slot].eye = (int8_t)eye;
     memo[slot].hit = hit, memo[slot].span = hit ? *out : (VkSpan){0};
     return hit;
 }
@@ -1112,8 +1131,37 @@ static uint32_t index_max(const void *src, uint32_t count, uint32_t isz, uint32_
     return m;
 }
 
+bool renderer_texture_presented(NvnTexture *t);
+static bool mv_passes_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("LARECOMP_MV_PASSES"); on = vk_mv_on() && g_vk.multiview && (!e || atoi(e) != 0); }
+    return on;
+}
+// The bound attachments: 1 all layered (one multiview pass draws both eyes), 0 none twinned, -1 layered and shared
+// ones, a layered one through a view of another layer, or a twin without an eye-1 layer (eye 1 draws it); 2 layered
+// and presented ones only (the HUD clone, the window image over the scene's depth: eye 0's view only, as eye 1's
+// draws into them are never shown - no eye-1 run for them)
+static int mv_rt_kind(void) {
+    int lay = 0, other = 0, twu = 0, pres = 0;
+    for (int i = 0; i < st.rt.ncolor; i++) {
+        NvnTexture *t = st.rt.color[i];
+        if (!t) continue;
+        if (!t->backend) vk_tex(t, true);
+        if (vk_b_layered(t->backend) && !(st.rt.has_cview[i] && (st.rt.cview[i].setmask & 2) && st.rt.cview[i].min_layer)) lay++;
+        else other++, twu += vk_tex_twinned(t), pres += renderer_texture_presented(t) && !vk_tex_twinned(t);
+    }
+    if (st.rt.depth) {
+        NvnTexture *t = st.rt.depth;
+        if (!t->backend) vk_tex(t, true);
+        if (vk_b_layered(t->backend) && !(st.rt.has_dview && (st.rt.dview.setmask & 2) && st.rt.dview.min_layer)) lay++;
+        else other++, twu += vk_tex_twinned(t), pres += renderer_texture_presented(t) && !vk_tex_twinned(t);
+    }
+    if (lay && other && other == pres && !twu) return 2;
+    return lay && !other ? 1 : lay || twu ? -1 : 0;
+}
 static bool eye1_skip_rt(void) {
     if (g_eye != 1) return false;
+    if (g_mv_run && mv_rt_kind() >= 1) { st_skipped[0]++; return true; }  // (eye 0's multiview pass drew it)
     bool tw = false, shared = false;
     for (int i = 0; i < st.rt.ncolor; i++)
         if (st.rt.color[i]) { if (vk_tex_twinned(st.rt.color[i])) tw = true; else shared = true; }
@@ -1122,7 +1170,7 @@ static bool eye1_skip_rt(void) {
         st_mixed_logged = true;
         LOG("[stereo] a pass with twinned and shared targets (the shared one is drawn by both eyes; logged once)\n");
     }
-    if (!tw) st_skipped[0]++; else st_ran1++;
+    if (!tw) st_skipped[0]++; else st_ran1++, mvs.eye1_passes += g_mv_run;
     return !tw;
 }
 
@@ -1527,20 +1575,35 @@ static inline bool ss_need(uint32_t bit, bool same) {
 static void vk_end_pass_at(int line);
 void vk_end_pass(void) { vk_end_pass_at(0); }
 #define vk_end_pass() vk_end_pass_at(__LINE__)
+static __typeof__(st.rt) pass_rt;  // (VR pass diet, merge: the open pass's attachments as bound)
 static void vk_end_pass_at(int line) {
     if (!in_pass) return;
     if (prof && line < 4096) prof_end_line[line]++;
     rec_CmdEndRendering(vk_cmd());
     in_pass = false;
-    if (g_debug_frame && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {
+    if (g_debug_frame && pass_rt.ncolor && pass_rt.color[0] && pass_rt.color[0]->backend) {
         char path[256];
         static uint64_t debug_pass_frame = ~0ull;
         static int multi = -1;
         if (multi < 0) multi = getenv("LARECOMP_DEBUG_FRAMES") != NULL;
         if (multi && renderer_present_count() != debug_pass_frame) { debug_pass_frame = renderer_present_count(); debug_pass_no = 0; }
-        if (multi) snprintf(path, sizeof path, "build/pass_%llu_%03d.png", (unsigned long long)debug_pass_frame, debug_pass_no++);
-        else snprintf(path, sizeof path, "build/pass_%03d.png", debug_pass_no++);
-        renderer_save_texture_tex(st.rt.color[0]->backend, path);
+        int no = debug_pass_no++;
+        for (int ve = 0; ve < (pass_view_mask ? 2 : 1); ve++) {  // (a multiview pass: both eyes' layers, as passes of eye 0 / 1)
+        int eye = pass_view_mask ? ve : g_eye;
+        if (multi) snprintf(path, sizeof path, "build/pass_%llu_%03d_e%d%s.png", (unsigned long long)debug_pass_frame, no, eye, pass_view_mask ? "m" : "");
+        else if (g_eye >= 0) snprintf(path, sizeof path, "build/pass_%03d_e%d%s.png", no, eye, pass_view_mask ? "m" : "");
+        else snprintf(path, sizeof path, "build/pass_%03d.png", no);
+        extern uint32_t vk_debug_save_layer;
+        vk_debug_save_layer = pass_view_mask ? (uint32_t)ve : vk_b_layer(pass_rt.color[0]->backend);  // (multiview storage: the eye's layer)
+        {
+            const TexBackend *db = pass_rt.color[0]->backend;
+            LOG("[dbgpass] %s: %d color, first %ux%u fmt %#x %p (mv2 %d twinned %d layer %u), depth %p (twinned %d)\n", path, pass_rt.ncolor,
+                pass_rt.color[0]->width, pass_rt.color[0]->height, pass_rt.color[0]->format, (void *)pass_rt.color[0], db->mv2,
+                vk_tex_twinned(pass_rt.color[0]), vk_debug_save_layer, (void *)pass_rt.depth, pass_rt.depth ? vk_tex_twinned(pass_rt.depth) : -1);
+        }
+        renderer_save_texture_tex(pass_rt.color[0]->backend, path);
+        vk_debug_save_layer = 0;
+        }
     }
 }
 
@@ -1554,7 +1617,6 @@ static int content_extent(int e, bool scalable, float sc, float al) {
 }
 
 static bool heap_whole_userptr(void);
-static __typeof__(st.rt) pass_rt;  // (VR pass diet, merge: the open pass's attachments as bound)
 static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
     if (in_pass && vr_diet(DIET_MERGE) && !memcmp(&pass_rt, &st.rt, sizeof pass_rt)) {
@@ -1613,6 +1675,20 @@ static void begin_pass(void) {
     }
     VkRenderingAttachmentInfo ca[8], da = {0}, sa = {0};
     uint32_t w = 0, minw = UINT32_MAX, minh = UINT32_MAX;  // w: first attachment seen
+    pass_view_mask = 0;
+    if (g_mv_run && g_eye == 0) {  // (multiview) both eyes in this pass, or eye 1 runs the list for it
+        int k = mv_rt_kind();
+        if (k == 1) pass_view_mask = 3, mvs.passes++;
+        else if (k < 0) {
+            mv_need_eye1 = true, mvs.other++;
+            static int nlog;
+            NvnTexture *t0 = st.rt.ncolor ? st.rt.color[0] : st.rt.depth;
+            if (nlog++ < 16)
+                LOG("[mv] a pass with twinned and shared attachments (%d color, first %ux%u fmt %#x, depth %s; frame %llu): eye 1 runs the list\n",
+                    st.rt.ncolor, t0 ? t0->width : 0, t0 ? t0->height : 0, t0 ? t0->format : 0, st.rt.depth ? "yes" : "no",
+                    (unsigned long long)renderer_exec_frame());
+        }
+    }
     pass_ncolor = (uint32_t)st.rt.ncolor;
     pass_samples = 1;
     for (int i = 0; i < st.rt.ncolor; i++) {
@@ -1621,7 +1697,8 @@ static void begin_pass(void) {
         pass_color[i] = VK_FORMAT_UNDEFINED;
         if (!t) continue;
         renderer_mark_gpu_owned(t);
-        VkImageView v = vk_view(t, &st.rt.cview[i], st.rt.has_cview[i], true, TEXTYPE_2D);
+        VkImageView v = pass_view_mask ? vk_view_mv(t, &st.rt.cview[i], st.rt.has_cview[i], true)
+                                       : vk_view(t, &st.rt.cview[i], st.rt.has_cview[i], true, TEXTYPE_2D);
         TexBackend *b = t->backend;
         if (!v) continue;
         ca[i].imageView = v;
@@ -1658,7 +1735,8 @@ static void begin_pass(void) {
     bool has_d = false, has_s = false;
     if (st.rt.depth) {
         renderer_mark_gpu_owned(st.rt.depth);
-        VkImageView v = vk_view(st.rt.depth, &st.rt.dview, st.rt.has_dview, true, TEXTYPE_2D);
+        VkImageView v = pass_view_mask ? vk_view_mv(st.rt.depth, &st.rt.dview, st.rt.has_dview, true)
+                                       : vk_view(st.rt.depth, &st.rt.dview, st.rt.has_dview, true, TEXTYPE_2D);
         TexBackend *b = st.rt.depth->backend;
         if (v && renderer_format_is_depth(st.rt.depth->format)) {
             VkRenderingAttachmentInfo a = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = v,
@@ -1701,7 +1779,7 @@ static void begin_pass(void) {
     }
     pass_w = minw; pass_h = minh;
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = 1,
-                          .colorAttachmentCount = pass_ncolor, .pColorAttachments = pass_ncolor ? ca : NULL,
+                          .viewMask = pass_view_mask, .colorAttachmentCount = pass_ncolor, .pColorAttachments = pass_ncolor ? ca : NULL,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
     if (g_eye >= 0 && fov_on()) {  // (VR foveation: eye passes into per-eye scalable targets get a rate / density map)
         bool per_eye = !placed && (pass_ncolor || has_d || has_s);
@@ -1715,7 +1793,7 @@ static void begin_pass(void) {
         if (per_eye && (has_d || has_s)) per_eye = vk_tex_twinned(st.rt.depth) && ((TexBackend *)st.rt.depth->backend)->scalable;
         if (!fb && (has_d || has_s)) fb = st.rt.depth->backend;
         float fx = fb && fb->ax > 0 ? fb->sx / fb->ax : 1, fy = fb && fb->ay > 0 ? fb->sy / fb->ay : 1;
-        ri.pNext = fov_pass(g_eye, per_eye && fb, minw, minh, fx, fy);
+        ri.pNext = fov_pass(pass_view_mask ? 2 : g_eye, per_eye && fb, minw, minh, fx, fy);  // (2: both eyes, multiview)
     }
     // LARECOMP_VK_LOG_PASSES=<n> (default 300 with =1): each of the first n passes before it begins - an Intel crash
     // inside vkCmdBeginRendering (issues #8, #46) ends the log on the pass the driver choked on
@@ -1867,7 +1945,7 @@ static void fullscreen_vertex_bind(VkCommandBuffer cb) {
 static VkPipeline clear_pipeline(int index, int kind, uint32_t mask, bool depth, bool stencil) {
     uint64_t key = 0xcbf29ce484222325ull;
 #define MIX(v) do { uint64_t v_ = (uint64_t)(v); for (int b_ = 0; b_ < 8; b_++) { key ^= (v_ >> (b_ * 8)) & 0xFF; key *= 0x100000001B3ull; } } while (0)
-    MIX(index); MIX(kind); MIX(mask); MIX(depth); MIX(stencil); MIX(pass_ncolor); MIX(pass_depth); MIX(pass_stencil); MIX(pass_samples);
+    MIX(index); MIX(kind); MIX(mask); MIX(depth); MIX(stencil); MIX(pass_view_mask); MIX(pass_ncolor); MIX(pass_depth); MIX(pass_stencil); MIX(pass_samples);
     for (uint32_t i = 0; i < pass_ncolor; i++) MIX(pass_color[i]);
     uint32_t slot = (uint32_t)key & (CLEAR_TAB - 1);
     for (int p = 0; p < CLEAR_TAB; p++, slot = (slot + 1) & (CLEAR_TAB - 1)) {
@@ -1903,7 +1981,7 @@ static VkPipeline clear_pipeline(int index, int kind, uint32_t mask, bool depth,
     VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
                                            .dynamicStateCount = ndyn, .pDynamicStates = dyn};
     VkPipelineRenderingCreateInfo rinfo = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .pNext = fov_pipeline_chain(),
-                                           .colorAttachmentCount = pass_ncolor,
+                                           .viewMask = pass_view_mask, .colorAttachmentCount = pass_ncolor,
                                            .pColorAttachmentFormats = pass_color, .depthAttachmentFormat = pass_depth,
                                            .stencilAttachmentFormat = pass_stencil};
     VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &rinfo, .stageCount = 2,
@@ -2036,7 +2114,7 @@ static VkPipelineLayout make_layout(Prog *p, int nsets, VkShaderStageFlags s0, V
     if (gm) p->set_layout[nsets++] = gmem_chunk_layout();
     // (lazy chunks, vertex / fragment: the storage buffers' chunks as push constants, shader.h GMEM_DIRECT_MAX)
     VkPushConstantRange gd = {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16 * GMEM_DIRECT_MAX};
-    bool direct = gm && gc_lazy && s1 == VK_SHADER_STAGE_FRAGMENT_BIT;
+    bool direct = gm && gc_lazy && !maxwell_gmem_whole && s1 == VK_SHADER_STAGE_FRAGMENT_BIT;
     // (LARECOMP_VK_PUSH_CB: the shaders' promoted constant buffer words, ShaderInfo.npush: vertex from 0, fragment after)
     VkPushConstantRange pcr[2];
     uint32_t npcr = 0;
@@ -2208,6 +2286,7 @@ static uint64_t prog_content_key(uint64_t vh, uint64_t fh, const ShaderKey *vkey
     b = (const uint8_t *)vkey;
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
+    if (fkey->mv) { h ^= 0x100u | fkey->mv; h *= 0x100000001B3ull; }  // (multiview: the fragment stage's own mask; none: as before)
     return h;
 }
 
@@ -2233,10 +2312,10 @@ static bool key_memo_on(void) {
 
 static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey);
 static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
-    static struct { uint64_t code[2]; ShaderKey vkey; uint8_t rt[8]; uint32_t gen; Prog *prog; } m;
+    static struct { uint64_t code[2]; ShaderKey vkey; uint8_t rt[8], fmv; uint32_t gen; Prog *prog; } m;
     bool on = key_memo_on();
     if (on && m.prog && m.gen == key_gen && (np->stage_mask & 3) == 3 && m.code[0] == np->stages[0].code_addr &&
-        m.code[1] == np->stages[1].code_addr && !memcmp(&m.vkey, vkey, sizeof *vkey) && !memcmp(m.rt, fkey->rt_kind, 8)) {
+        m.code[1] == np->stages[1].code_addr && !memcmp(&m.vkey, vkey, sizeof *vkey) && !memcmp(m.rt, fkey->rt_kind, 8) && m.fmv == fkey->mv) {
         prof_prog_memo++;
         prog_fp_check(m.prog, np);  // (as a table hit)
         return m.prog;
@@ -2244,7 +2323,7 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     Prog *p = get_program_(np, vkey, fkey);
     if (on && p) {
         m.code[0] = np->stages[0].code_addr; m.code[1] = np->stages[1].code_addr;
-        m.vkey = *vkey; memcpy(m.rt, fkey->rt_kind, 8); m.gen = key_gen; m.prog = p;
+        m.vkey = *vkey; memcpy(m.rt, fkey->rt_kind, 8); m.fmv = fkey->mv; m.gen = key_gen; m.prog = p;
     }
     return p;
 }
@@ -2256,6 +2335,7 @@ static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     const uint8_t *vb = (const uint8_t *)vkey;
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= vb[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
+    if (fkey->mv) { h ^= 0x100u | fkey->mv; h *= 0x100000001B3ull; }  // (multiview: the fragment stage's own mask)
     if (!h) h = 1;
     uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
     while (prog_tab[slot].key && prog_tab[slot].key != h) slot = (slot + 1) & (PROG_TAB - 1);
@@ -2473,6 +2553,7 @@ typedef struct {
     uint8_t blend[8][8];
     uint8_t blend_on, a2c, topo_class, poly_fill;
     uint32_t write_mask[8];
+    uint32_t view_mask;  // (multiview) the pass's view mask
 } PipeKey;
 
 typedef struct { PipeKey k; uint64_t hash; VkPipeline pipe; _Atomic int state; } Pipe;  // state: 0 building, 1 ready, 2 failed
@@ -2495,6 +2576,7 @@ struct PipeMemo {
     VkFormat color[8], depth, stencil;
     uint32_t attrib[16], stream[16][2], rt_fmt[8];
     uint8_t blend[8][8], blend_on, a2c, cls, poly_fill;
+    uint32_t view_mask;
     Pipe *pp;
     VtxLayout vl;  // the layout pipe_key_fill made from these inputs (dynamic vertex input leaves it out of pp's key)
 };
@@ -2661,7 +2743,7 @@ static void pipe_ci_fill(PipeCI *c, const PipeKey *k) {
     c->dy = (VkPipelineDynamicStateCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
                                                .dynamicStateCount = NDYN + g_vk.vids, .pDynamicStates = c->dyn};
     c->ri = (VkPipelineRenderingCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .pNext = fov_pipeline_chain(),
-                                            .colorAttachmentCount = k->ncolor,
+                                            .viewMask = k->view_mask, .colorAttachmentCount = k->ncolor,
                                             .pColorAttachmentFormats = k->color, .depthAttachmentFormat = k->depth,
                                             .stencilAttachmentFormat = k->stencil};
     c->pi = (VkGraphicsPipelineCreateInfo){.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &c->ri, .stageCount = 2,
@@ -2685,8 +2767,8 @@ static void build_pipeline(void *arg) {
     if (g_shader_stats) {  // (LARECOMP_VK_SHADER_STATS: the shaders by code address and the fs hash the GPU profile shows)
         uint64_t fa = k->prog->code[1];
         uint64_t fh = k->prog->fs_rt_hash ? k->prog->fs_rt_hash : fa ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(fa + 0x30), 0x200) : 0;
-        snprintf(g_stats_label, sizeof g_stats_label, "vs %llx fs %llx fsh %016llx", (unsigned long long)k->prog->code[0],
-                 (unsigned long long)fa, (unsigned long long)fh);
+        snprintf(g_stats_label, sizeof g_stats_label, "vs %llx fs %llx fsh %016llx%s%s", (unsigned long long)k->prog->code[0],
+                 (unsigned long long)fa, (unsigned long long)fh, k->view_mask ? " multiview" : "", k->prog->vkey.mv || k->prog->fkey.mv || k->prog->fkey.tex_amask[0] || k->prog->fkey.tex_amask[1] || k->prog->fkey.tex_amask[2] ? " mv-program" : "");
     }
     VkResult r = vk_create_graphics_pipeline(&c.pi, &pp->pipe);
     SLOW_FEEDBACK_HIT();
@@ -2722,6 +2804,7 @@ static void set_vertex_input(VkCommandBuffer cb, const VtxLayout *l) {
 // ================================================================== feedback snapshots (renderer.m resolve_feedback)
 static NvnTexture *feedback_tex[4];
 static VkImageView feedback_view[4];
+static VkImageView feedback_view_mv[4];  // (multiview pass: the snapshot's two layers as a 2D array)
 static int nfeedback;
 static uint64_t g_cur_fs_hash;
 static NvnTexture *snap_tex[8];
@@ -2751,7 +2834,7 @@ static bool is_attachment(NvnTexture *t) {
     return false;
 }
 
-static TexBackend *snapshot_image(NvnTexture *t, TexBackend *src) {
+static TexBackend *snapshot_image(NvnTexture *t, TexBackend *src, bool both) {
     Snap *s = NULL;
     for (int i = 0; i < nsnaps; i++) if (snaps[i].key == t) s = &snaps[i];
     if (!s) {
@@ -2759,7 +2842,7 @@ static TexBackend *snapshot_image(NvnTexture *t, TexBackend *src) {
         s->key = t;
     }
     TexBackend *d = &s->copy;
-    if (d->image && (d->width != src->width || d->height != src->height || d->format != src->format)) {
+    if (d->image && (d->width != src->width || d->height != src->height || d->format != src->format || d->mv2 != both)) {
         vk_views_forget(d);  // (resolution change)
         vk_defer_image(d->image, d->mem);
         d->image = VK_NULL_HANDLE;
@@ -2767,13 +2850,14 @@ static TexBackend *snapshot_image(NvnTexture *t, TexBackend *src) {
     }
     if (!d->image) {
         VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = src->format,
-                                .extent = {src->width, src->height, 1}, .mipLevels = 1, .arrayLayers = 1,
+                                .extent = {src->width, src->height, 1}, .mipLevels = 1, .arrayLayers = both ? 2 : 1,
                                 .samples = (VkSampleCountFlagBits)src->samples, .tiling = VK_IMAGE_TILING_OPTIMAL,
                                 .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
         VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &d->image, &d->mem, NULL));
         d->format = src->format; d->width = src->width; d->height = src->height; d->depth = 1; d->layers = 1; d->levels = 1;
         d->samples = src->samples; d->aspect = src->aspect; d->base_type = VK_IMAGE_VIEW_TYPE_2D;
+        d->mv2 = d->mv_tw = both, d->presented = true;  // (both eyes' layers; presented: never taken for a twin)
         vk_image_init_layout(vk_cmd(), d->image, d->aspect);
     }
     return d;
@@ -3007,24 +3091,27 @@ static void resolve_feedback(Prog *pr) {
             for (int k = 0; k < 8; k++) if (snap_tex[k] == t) si = k;
             bool self_write = t == st.rt.depth && st.ds[0] && st.ds[1];
             TexBackend *src = vk_tex(t, true);
+            // (multiview: a twin drawn by a multiview pass is sampled as both eyes' layers - both copied)
+            bool both = g_mv_run && g_eye == 0 && vk_b_layered(src) && mv_rt_kind() == 1;
             Snap *existing = NULL;
-            for (int k = 0; k < nsnaps; k++) if (snaps[k].key == t && snaps[k].copy.image) existing = &snaps[k];
+            for (int k = 0; k < nsnaps; k++) if (snaps[k].key == t && snaps[k].copy.image && snaps[k].copy.mv2 == both) existing = &snaps[k];
             VkImageAspectFlags sa = src->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : src->aspect;
             static const VkComponentMapping id = {0};
             if (!nosnap && si >= 0 && (snap_ok[si] || self_write) && existing) {
                 feedback_tex[nfeedback] = t;
+                feedback_view_mv[nfeedback] = both ? vk_image_view(&existing->copy, VK_IMAGE_VIEW_TYPE_2D_ARRAY, src->format, 0, 1, 0, 2, id, sa) : VK_NULL_HANDLE;
                 feedback_view[nfeedback++] = vk_image_view(&existing->copy, VK_IMAGE_VIEW_TYPE_2D, src->format, 0, 1, 0, 1, id, sa);
                 continue;
             }
             stat_feedback_copies++;
             if (ct_on()) LOG("[ct] snapshot %p %ux%u (was %s, si %d)\n", (void *)t, src->width, src->height, si >= 0 ? snap_why[si] : "new", si);
             vk_end_pass();
-            TexBackend *dst = snapshot_image(t, src);
+            TexBackend *dst = snapshot_image(t, src, both);
             VkCommandBuffer cb = vk_cmd();
             vk_full_barrier(cb);
             gp_mark(cb, "feedback snapshot %ux%u fmt %d", src->width, src->height, src->format);
-            VkImageCopy rg = {.srcSubresource = {src->aspect, 0, 0, 1}, .dstSubresource = {src->aspect, 0, 0, 1},
-                              .extent = {src->width, src->height, 1}};
+            VkImageCopy rg = {.srcSubresource = {src->aspect, 0, both ? 0 : vk_b_layer(src), both ? 2 : 1},
+                              .dstSubresource = {src->aspect, 0, 0, both ? 2 : 1}, .extent = {src->width, src->height, 1}};
             rec_CmdCopyImage(cb, src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
             if (g_debug_frame && (src->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) {
                 static int nd;
@@ -3036,6 +3123,7 @@ static void resolve_feedback(Prog *pr) {
                 cb = vk_cmd();
             }
             feedback_tex[nfeedback] = t;
+            feedback_view_mv[nfeedback] = both ? vk_image_view(dst, VK_IMAGE_VIEW_TYPE_2D_ARRAY, src->format, 0, 1, 0, 2, id, sa) : VK_NULL_HANDLE;
             feedback_view[nfeedback++] = vk_image_view(dst, VK_IMAGE_VIEW_TYPE_2D, src->format, 0, 1, 0, 1, id, sa);
             if (si < 0) { static int rr; si = rr++ & 7; snap_tex[si] = t; }
             snap_ok[si] = true;
@@ -3749,6 +3837,71 @@ static VkSpan drv_dedupe(int stage, uint64_t size) {
     return s;
 }
 
+// (multiview) the range and size cbuf_info binds for constant buffer k >= 3 of a stage. false: nothing bound
+static bool cbuf_range(int stage, const ShaderInfo *si, int k, Range *r, uint64_t *size) {
+    int idx = k - 3;
+    *r = (idx >= 0 && idx < 18) ? st.ubuf[stage][idx] : (Range){0, 0};
+    if (!r->addr) return false;
+    uint64_t sz = si->cbuf_size[k] ? si->cbuf_size[k] : 256;
+    if ((si->cbuf_dynamic & (1u << k)) && r->size) sz = r->size > 0x10000 ? 0x10000 : r->size;
+    if (sz > r->size && r->size) sz = r->size;
+    if (sz < 16) sz = 16;
+    *size = sz;
+    return true;
+}
+// (multiview) eye `eye`'s substitute for a bound range as cbuf_info makes it (the main camera, or a block with its
+// matrices patched); false: not the camera's. Shared by the draws of a submission (as cam_patched).
+static bool cam_sub(int stage, Range r, uint64_t size, int eye, VkSpan *out) {
+    if (!cam_override_active()) return false;
+    bool hit = false;
+    if (size <= 320) {
+        static struct { uint64_t addr, size, seq; uint32_t epoch; int8_t eye; bool hit; VkSpan span; } memo[256];
+        uint64_t seq = vk_pending_seq() + (gcopy_gen << 40), h = (r.addr * 0x9E3779B97F4A7C15ull) ^ (size * 0xC2B2AE3D27D4EB4Full);
+        uint32_t epoch = cam_override_epoch(), slot = (uint32_t)(h ^ (h >> 32)) & 255;
+        if (memo[slot].seq == seq && memo[slot].addr == r.addr && memo[slot].size == size && memo[slot].epoch == epoch && memo[slot].eye == eye) {
+            hit = memo[slot].hit;
+            if (hit) *out = memo[slot].span;
+        } else {
+            uint8_t cb[320];
+            cam_override_set_eye(eye);
+            hit = cam_override_ubo(stage, r.addr, r.size, cb);
+            cam_override_set_eye(g_eye == 1);
+            if (hit) *out = vk_transient_copy(cb, size, 256);
+            memo[slot].addr = r.addr, memo[slot].size = size, memo[slot].seq = seq, memo[slot].epoch = epoch, memo[slot].eye = (int8_t)eye;
+            memo[slot].hit = hit, memo[slot].span = hit ? *out : (VkSpan){0};
+        }
+        if (hit) return true;
+    }
+    if (size <= 4096) {
+        cam_override_set_eye(eye);
+        hit = cam_patched_eye(r.addr, size, eye, out);
+        cam_override_set_eye(g_eye == 1);
+    }
+    return hit;
+}
+// (multiview) the [eye 0 | eye 1] copy of a camera block: eye 1's `rows` rows (16 bytes) after eye 0's
+static bool cam_pair(int stage, Range r, uint64_t size, uint32_t rows, VkDescriptorBufferInfo *out) {
+    uint64_t stride = (uint64_t)rows * 16;
+    if (!rows || size > stride || stride + size > 65536) return false;
+    static struct { uint64_t addr, size, stride, seq; uint32_t epoch; VkSpan span; } memo[256];
+    uint64_t seq = vk_pending_seq() + (gcopy_gen << 40), h = (r.addr * 0x9E3779B97F4A7C15ull) ^ (size * 0xC2B2AE3D27D4EB4Full) ^ stride;
+    uint32_t epoch = cam_override_epoch(), slot = (uint32_t)(h ^ (h >> 32)) & 255;
+    if (memo[slot].seq == seq && memo[slot].addr == r.addr && memo[slot].size == size && memo[slot].stride == stride &&
+        memo[slot].epoch == epoch) {
+        *out = ubo_span(memo[slot].span, stride + size);
+        return true;
+    }
+    VkSpan e0, e1;
+    if (!cam_sub(stage, r, size, 0, &e0) || !cam_sub(stage, r, size, 1, &e1)) return false;
+    VkSpan sp = vk_transient(stride + size, 256);
+    memcpy(sp.ptr, e0.ptr, size);
+    memcpy((uint8_t *)sp.ptr + stride, e1.ptr, size);
+    memo[slot].addr = r.addr, memo[slot].size = size, memo[slot].stride = stride, memo[slot].seq = seq, memo[slot].epoch = epoch;
+    memo[slot].span = sp;
+    *out = ubo_span(sp, stride + size);
+    return true;
+}
+
 // Constant buffer k of a stage (renderer.m bind_cbufs), copied into transient memory.
 static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32_t gx, uint32_t gy, uint32_t gz) {
     static const uint8_t zeros[0x10000];
@@ -3793,13 +3946,17 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
     if ((si->cbuf_dynamic & (1u << k)) && r.size) size = r.size > 0x10000 ? 0x10000 : r.size;
     if (size > r.size && r.size) size = r.size;
     if (size < 16) size = 16;
+    if (g_mvp && stage < 2 && ((g_mv_bits[stage] >> k) & 1)) {  // (multiview: both eyes' copies, eye 1's rows apart)
+        VkDescriptorBufferInfo pb;
+        if (cam_pair(stage, r, size, si->cbuf_mv_rows[k], &pb)) { cc_mark(stage, idx); mvs.cam_draws++; return pb; }
+    }
     if (cam_override_active() && size <= 320) {  // (free-camera probe, runtime/nvn/cam_override.c: the main camera's host copy)
         uint8_t cb[320];
-        if (cam_override_ubo(stage, r.addr, r.size, cb)) { cc_mark(stage, idx); return ubo_span(vk_transient_copy(cb, size, 256), size); }
+        if (cam_override_ubo(stage, r.addr, r.size, cb)) { cc_mark(stage, idx); mv_cam_shared(stage, k); return ubo_span(vk_transient_copy(cb, size, 256), size); }
     }
     if (cam_override_active() && size <= 4096) {  // (the camera's matrices copied into the pass's other blocks: cam_override_patch)
         VkSpan ps;
-        if (cam_patched(r.addr, size, &ps)) { cc_mark(stage, idx); return ubo_span(ps, size); }
+        if (cam_patched(r.addr, size, &ps)) { cc_mark(stage, idx); mv_cam_shared(stage, k); return ubo_span(ps, size); }
     }
     // snapshot: later CPU writes must not leak in. Shared by the draws of one submission binding the same range:
     // within a command list nothing writes guest memory (no inline UpdateUniformBuffer: that writes through below
@@ -3967,7 +4124,7 @@ static bool gmem_import(uint64_t size) {
 // itself, through its own DRM file as for any vkMapMemory. Else the memory is exported as a dma-buf and that is
 // mmapped there - which some systems refuse (issue #92: RX 6800 XT, Mesa 25.0.7, "Permission denied"), and then
 // the whole heap was a userptr import again.
-// Default on for RADV and Mesa's PanVK (issue #483); LARECOMP_VK_HEAP_DMABUF=0 off, =1 on any Linux driver with dma-buf
+// Default on for RADV, Mesa's PanVK (issue #483) and Turnip; LARECOMP_VK_HEAP_DMABUF=0 off, =1 on any Linux driver with dma-buf
 // export or placed maps. LARECOMP_VK_NO_GMEM: off.
 // LARECOMP_VK_HEAP_PLACED=0: the dma-buf mapping even where placed maps exist (tests).
 #ifdef __linux__
@@ -4078,6 +4235,7 @@ static bool guest_heap_dmabuf_try(void) {
     bool placed = g_vk.map_placed && (!pe || atoi(pe));
     if (!placed && !g_vk.dmabuf) { LOG("[vk] heap as driver memory: no way to map it here\n"); return false; }
     bi.pNext = placed ? NULL : &eb;  // (an exportable buffer only for the dma-buf mapping)
+    if (g_vk.bda) bi.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;  // (Turnip: chunks of it by address, gc_import)
     VkBuffer buf;
     if (vkCreateBuffer(g_vk.dev, &bi, NULL, &buf) != VK_SUCCESS) { LOG("[vk] heap as driver memory: buffer failed\n"); return false; }
     VkMemoryRequirements req;
@@ -4093,7 +4251,8 @@ static bool guest_heap_dmabuf_try(void) {
         vkDestroyBuffer(g_vk.dev, buf, NULL);
         return false;
     }
-    VkMemoryDedicatedAllocateInfo ded = {.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, .buffer = buf};
+    VkMemoryAllocateFlagsInfo af = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
+    VkMemoryDedicatedAllocateInfo ded = {.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, .pNext = g_vk.bda ? &af : NULL, .buffer = buf};
     VkExportMemoryAllocateInfo ex = {.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO, .pNext = &ded,
                                      .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
     VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = placed ? (void *)&ded : (void *)&ex,
@@ -4226,6 +4385,20 @@ void backend_guest_heap_prepare(void) {
         // permissions (and nothing here drops heap page entries later). About 2.5 s and 6.5 MB of page tables for
         // 3.3 GB. LARECOMP_VK_HEAP_PREFAULT=0: not done.
         const char *st = getenv("LARECOMP_SOFT_WRITE_TRACKING"), *pf = getenv("LARECOMP_VK_HEAP_PREFAULT");
+        // Turnip (Steam Frame, Adreno 750, Linux 7.2): the msm driver's fault handler counts the page from the VMA's
+        // start too (vmf->address - vma->vm_start), and the prefault below doesn't hold there: under memory pressure
+        // its shrinker evicts an idle buffer and zaps the CPU's page entries, which then fault in again from the wrong
+        // place in every part after a split (tools: a 3.3 GB placed map, one page protected, read back 25 s later -
+        // every page above it held the buffer's first pages; in the game the heap allocator's header at the first save
+        // load, the same crash every run). Without page protection the mapping stays one VMA and a refault is right.
+        // So no soft tracking there: the overlap runs with the hash probe (overlap_on). LARECOMP_SOFT_WRITE_TRACKING=1:
+        // on anyway (tests).
+        if (g_vk.heap_no_split && !(st && atoi(st))) {
+            gmem_mprotect_broken = true;
+            LOG("[vk] heap as driver memory: no soft write tracking on this driver (a page fault after a split maps the "
+                "wrong page); the overlap uses the hash probe\n");
+            return;
+        }
         if (!(st && !atoi(st)) && !(pf && !atoi(pf))) {
             uint64_t t0 = SDL_GetTicksNS();
             int r = madvise((void *)(uintptr_t)HEAP_BASE, HEAP_MAX, MADV_NOHUGEPAGE);
@@ -4312,6 +4485,7 @@ static struct {
     VkBuffer buf;
     VkDeviceMemory mem;
     uint64_t size, addr;  // (addr: the chunk's device address, lazy mode)
+    uint64_t boff;        // the chunk's offset in buf: 0 for an import, its heap offset in the driver memory heap (gmem_buf)
 } gc[GC_MAX];
 static int gc_n;             // chunks over HEAP_MAX
 static uint32_t gc_shift;    // 0: one buffer
@@ -4364,13 +4538,30 @@ static void gc_remember(int k) {
 static int gc_imported;
 static uint64_t gc_imported_bytes, stat_gc_misses;
 
+// The heap as driver memory where one storage buffer can't span it (Turnip: 128 MB): the lazy chunks' path over
+// ranges of the one buffer instead of windows - each access takes its chunk's device address from the table - where
+// a window is picked with one branch per window in every access (26 here, against 1-4 on the GPUs windows were made
+// for: VR at 120 Hz, Mabe held at 30 with the GPU at 20.1 ms a frame; chunks: 60 fps, 16.0 ms). Every chunk is there
+// from the start, so shaders count no misses and the draw's chunks aren't push constants (maxwell_gmem_whole: those
+// would overlap the constant buffer words Turnip gets as push constants).
+static bool gmem_driver_chunks(void) {
+#ifdef __linux__
+    return gc_lazy && gmem_dmabuf;
+#else
+    return false;
+#endif
+}
 static bool gmem_lazy(void) {
     static int lazy = -1;
     if (lazy >= 0) return lazy;
     lazy = g_vk.lazy_heap;
     if (!lazy && g_vk.heap_probe && !getenv("LARECOMP_VK_NO_GMEM")) lazy = whole_import_probe_oom();
-    if (lazy && (!g_vk.host_import || !g_vk.bda || !g_vk.ssbo_chunks)) {
-        LOG("[vk] lazy heap import: not possible here (%s)\n", !g_vk.host_import ? "no host memory import" : !g_vk.bda ? "no buffer device addresses" : "no stores from fragment / vertex shaders");
+    bool driver_heap = false;
+#ifdef __linux__
+    driver_heap = gmem_dmabuf && g_vk.bda;  // (gmem_chunk_decide runs after the heap is made: gmir_on)
+#endif
+    if (lazy && (!(g_vk.host_import || driver_heap) || !g_vk.bda || !g_vk.ssbo_chunks)) {
+        LOG("[vk] lazy heap import: not possible here (%s)\n", !(g_vk.host_import || driver_heap) ? "no host memory import" : !g_vk.bda ? "no buffer device addresses" : "no stores from fragment / vertex shaders");
         lazy = 0;
     }
     return lazy;
@@ -4389,7 +4580,7 @@ static uint32_t gmem_chunk_shift(void) {
 static void gmem_chunk_decide(void) {
     if (gmir_on()) {  // (copies: no heap binding at all, every stage goes through the table)
         gc_lazy = false, gc_shift = 0, gc_n = 0;
-        maxwell_gmem_lazy = maxwell_gmem_fs_miss = false;
+        maxwell_gmem_lazy = maxwell_gmem_fs_miss = maxwell_gmem_whole = false;
         maxwell_gmem_mirror = true;
         gc_shift_decided = 0;
         return;
@@ -4400,6 +4591,7 @@ static void gmem_chunk_decide(void) {
     gc_lazy = gmem_lazy();
     shift = 0;
     if (e) { uint64_t b = strtoull(e, NULL, 10) << 20; if (b) shift = 63 - __builtin_clzll(b); }
+    else if (gc_lazy && gmem_driver_chunks() && lim && lim < (1ull << 30)) shift = 63 - __builtin_clzll(lim);  // (as large as a storage buffer)
     else if (gc_lazy) shift = 24;
     else if (HEAP_MAX > lim && lim) shift = 63 - __builtin_clzll(lim);
     if (shift > 30) shift = 30;  // (1 GB at most: NVIDIA computes a block's length in signed 32 bits, a 2 GB range reads as negative)
@@ -4427,10 +4619,12 @@ static void gmem_chunk_decide(void) {
     gc_shift = (uint32_t)shift;
     gc_n = shift ? n : 0;
     maxwell_gmem_lazy = gc_lazy;
+    maxwell_gmem_whole = gmem_driver_chunks();
     maxwell_gmem_fs_miss = gc_lazy && getenv("LARECOMP_VK_GMEM_FS_MISS") && atoi(getenv("LARECOMP_VK_GMEM_FS_MISS")) != 0;
     if (maxwell_gmem_fs_miss) LOG("[vk] lazy chunks: every fragment shader counts misses, no early tests (LARECOMP_VK_GMEM_FS_MISS)\n");
     if (shift) LOG("[vk] guest heap bound to shaders in %llu MB %s (storage buffers up to %llu MB here)\n",
-                   (unsigned long long)(1ull << shift) >> 20, gc_lazy ? "chunks, imported as the game binds them" : "windows", (unsigned long long)lim >> 20);
+                   (unsigned long long)(1ull << shift) >> 20, maxwell_gmem_whole ? "chunks of the driver memory, by device address" :
+                   gc_lazy ? "chunks, imported as the game binds them" : "windows", (unsigned long long)lim >> 20);
     gc_shift_decided = shift;
 }
 
@@ -4447,6 +4641,28 @@ static bool host_import(uint64_t off, uint64_t size, VkBuffer *buf, VkDeviceMemo
 // Lazy mode: chunk k imported (again, if the heap grew into it since). False: not mapped yet / the import failed.
 static bool gc_import(int k) {
     uint64_t off = (uint64_t)k << gc_shift, heap = gmem_heap_size();
+#ifdef __linux__
+    // The heap as driver memory (Turnip: storage buffers of 128 MB at most): a chunk is a range of the one buffer,
+    // its device address and offset - nothing imported, the whole chunk there whatever the heap's size
+    if (gmem_dmabuf && gmem_buf) {
+        if (k < 0 || k >= gc_n) return false;
+        if (gc[k].buf) return true;
+        static uint64_t base;
+        static VkBuffer base_of;
+        if (base_of != gmem_buf) {
+            VkBufferDeviceAddressInfo ai = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = gmem_buf};
+            base = vkGetBufferDeviceAddress(g_vk.dev, &ai);
+            base_of = gmem_buf;
+        }
+        gc[k].buf = gmem_buf; gc[k].mem = VK_NULL_HANDLE; gc[k].boff = off;
+        gc[k].size = gmem_size - off < (1ull << gc_shift) ? gmem_size - off : 1ull << gc_shift;
+        gc[k].addr = base + off;
+        gc_imported++;
+        gc_imported_bytes += gc[k].size;
+        gc_gen++;
+        return true;
+    }
+#endif
     if (k < 0 || k >= gc_n || off >= heap) return false;
     uint64_t size = heap - off < (1ull << gc_shift) ? heap - off : 1ull << gc_shift;
     if (gc[k].buf && gc[k].size >= size) return true;
@@ -4464,7 +4680,7 @@ static bool gc_import(int k) {
         gc_imported++;
     }
     VkBufferDeviceAddressInfo ai = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = buf};
-    gc[k].buf = buf; gc[k].mem = mem; gc[k].size = size;
+    gc[k].buf = buf; gc[k].mem = mem; gc[k].size = size; gc[k].boff = 0;
     gc[k].addr = vkGetBufferDeviceAddress(g_vk.dev, &ai);
     gc_imported_bytes += size;
     gc_gen++;
@@ -4596,7 +4812,7 @@ static VkDescriptorSet gmem_chunk_set(const int dk[GMEM_DIRECT_MAX]) {
     if (gc_lazy && gc_remembered_heap != gmem_heap_size()) {
         gc_remembered_heap = gmem_heap_size();
         gc_remembered_load();
-        for (int k = 0; k < gc_n; k++) if (gc_remembered[k] && !gc[k].buf) gc_import(k);
+        for (int k = 0; k < gc_n; k++) if ((gc_remembered[k] || gmem_driver_chunks()) && !gc[k].buf) gc_import(k);
     }
     static struct { VkDescriptorSet set; int dk[GMEM_DIRECT_MAX]; } cache[GC_SET_CACHE];
     static int ncache, next;
@@ -4632,7 +4848,7 @@ static VkDescriptorSet gmem_chunk_set(const int dk[GMEM_DIRECT_MAX]) {
                                          .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[1]};
         for (int j = 0; j < GMEM_DIRECT_MAX; j++) {  // (GDir<j>: the chunk's own import, whole; unused: the zero buffer)
             int k = dk[j];
-            bi[2 + j] = k >= 0 && k < gc_n && gc[k].buf ? (VkDescriptorBufferInfo){gc[k].buf, 0, gc_direct_bytes(k)}
+            bi[2 + j] = k >= 0 && k < gc_n && gc[k].buf ? (VkDescriptorBufferInfo){gc[k].buf, gc[k].boff, gc_direct_bytes(k)}
                                                        : (VkDescriptorBufferInfo){gc_dummy, 0, 4096};
             w[nw++] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = GMEM_DIRECT_BINDING + j,
                                              .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[2 + j]};
@@ -4713,7 +4929,7 @@ static void gmem_chunk_bind(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeli
     }
     uint32_t gd[GMEM_DIRECT_MAX * 4];
     int dk[GMEM_DIRECT_MAX] = {-1, -1, -1, -1};
-    bool direct = gc_lazy && bp == VK_PIPELINE_BIND_POINT_GRAPHICS;
+    bool direct = gc_lazy && !maxwell_gmem_whole && bp == VK_PIPELINE_BIND_POINT_GRAPHICS;
     if (direct) gmem_direct_pick(stages, gd, dk);
     VkDescriptorSet set = gmem_chunk_set(dk);
     rec_CmdBindDescriptorSets(cb, bp, layout, set_index, 1, &set, 0, NULL);
@@ -4753,7 +4969,7 @@ static void gmem_copy(VkCommandBuffer cb, VkBuffer other, const VkBufferCopy *cp
             int k = (int)(h >> gc_shift);
             uint64_t in = h - ((uint64_t)k << gc_shift), piece = (1ull << gc_shift) - in < left ? (1ull << gc_shift) - in : left;
             if (k < gc_n && (gc[k].buf || gc_import(k)) && in + piece <= gc[k].size) {
-                VkBufferCopy c = to_heap ? (VkBufferCopy){o, in, piece} : (VkBufferCopy){in, o, piece};
+                VkBufferCopy c = to_heap ? (VkBufferCopy){o, gc[k].boff + in, piece} : (VkBufferCopy){gc[k].boff + in, o, piece};
                 if (to_heap) rec_CmdCopyBuffer(cb, other, gc[k].buf, 1, &c);
                 else rec_CmdCopyBuffer(cb, gc[k].buf, other, 1, &c);
             }
@@ -5670,7 +5886,7 @@ static bool guest_direct_(int kind, uint64_t addr, uint64_t size, VkBuffer *buf,
         if (vcache_lookup(addr, size, buf, off)) return true;
         heap_clean(addr, size);
         *buf = gc[k].buf;
-        *off = o - ((uint64_t)k << gc_shift);
+        *off = gc[k].boff + o - ((uint64_t)k << gc_shift);
         return true;
     }
     if (addr + size > HEAP_BASE + gmem_size && kernel_heap_size() != gmem_tried) { gmem_tried = kernel_heap_size(); gmem_info(); }
@@ -5711,7 +5927,7 @@ void vk_exec_reset(void) {
     }
     gmem_size = gmem_tried = 0;
     for (int k = 0; k < gc_n; k++) {  // (lazy chunks: their pages are replaced too)
-        if (gc[k].buf) { vkDestroyBuffer(g_vk.dev, gc[k].buf, NULL); vkFreeMemory(g_vk.dev, gc[k].mem, NULL); }
+        if (gc[k].buf && gc[k].mem) { vkDestroyBuffer(g_vk.dev, gc[k].buf, NULL); vkFreeMemory(g_vk.dev, gc[k].mem, NULL); }
         memset(&gc[k], 0, sizeof gc[k]);
     }
     gc_imported = 0; gc_scanned = 0; gc_imported_bytes = 0; gc_gen++;  // (gc_remembered stays: the same heap layout next boot)
@@ -5789,6 +6005,7 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
     wh[0] = wh[1] = 0;
     fr[0] = fr[1] = 1;
     NvnTexEntry *ent = NULL;  // (shadow slots: what the view came from)
+    bool arr = stage == 1 && i < 24 && ((g_tex_amask >> i) & 1);  // (multiview: both eyes' layers as a 2D array)
     if (h && st.tpool && tic < (uint32_t)st.tpool->count) {
         NvnTexEntry *e = ent = &((NvnTexEntry *)st.tpool->entries)[tic];
         if (g_interp_log) e = ent = (NvnTexEntry *)interp_texentry(stage, i, e, sizeof *e);  // (frame interpolation: the frame's entry)
@@ -5802,21 +6019,23 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
             if (nomemo < 0) nomemo = getenv("LARECOMP_VK_NO_TEX_MEMO") != NULL;
             static struct { NvnTexture *tex; uint64_t vh, frame; uint32_t gen; uint8_t type, has_view; VkImageView view; } memo[1024];
             uint64_t vh = e->has_view ? hash_words(0, &e->view, sizeof e->view) : 0, frame = vk_frame_counter();
-            uint32_t ms = (uint32_t)((((uintptr_t)e->tex >> 4) ^ vh ^ (uint64_t)st_->type * 0x9E3779B97F4A7C15ull) & 1023);
+            uint8_t mtype = (uint8_t)(st_->type | (arr ? 0x80 : 0));
+            uint32_t ms = (uint32_t)((((uintptr_t)e->tex >> 4) ^ vh ^ (uint64_t)mtype * 0x9E3779B97F4A7C15ull) & 1023);
             if (!nomemo && memo[ms].tex == e->tex && memo[ms].vh == vh && memo[ms].frame == frame && memo[ms].gen == vk_view_gen &&
-                memo[ms].type == st_->type && memo[ms].has_view == e->has_view) {
+                memo[ms].type == mtype && memo[ms].has_view == e->has_view) {
                 view = memo[ms].view;
             } else {
-                view = vk_view(naliases ? alias_read(e->tex) : e->tex, &e->view, e->has_view, false, st_->type);
+                view = arr ? vk_view_mv(e->tex, &e->view, e->has_view, false)
+                           : vk_view(naliases ? alias_read(e->tex) : e->tex, &e->view, e->has_view, false, st_->type);
                 memo[ms].tex = e->tex; memo[ms].vh = vh; memo[ms].frame = frame; memo[ms].gen = vk_view_gen;
-                memo[ms].type = (uint8_t)st_->type; memo[ms].has_view = e->has_view; memo[ms].view = view;
+                memo[ms].type = mtype; memo[ms].has_view = e->has_view; memo[ms].view = view;
             }
             renderer_texture_scale(e->tex, &sc[0], &sc[1]);
             renderer_texture_fraction(e->tex, &fr[0], &fr[1]);
             wh[0] = e->tex->width; wh[1] = e->tex->height;
             for (int k = 0; k < nfeedback; k++)
                 if (e->tex == feedback_tex[k] && (st_->type == TEXTYPE_2D || st_->type == TEXTYPE_2D_ARRAY)) {
-                    view = feedback_view[k];
+                    view = arr ? feedback_view_mv[k] : feedback_view[k];
                     if (st_->type == TEXTYPE_2D_ARRAY) view = vk_dummy_view(TEXTYPE_2D_ARRAY);  // (2D snapshot as array: rare)
                 }
         } else if (e->dead_format) {
@@ -5824,7 +6043,8 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
         }
     }
     if (h && st.spool && tsc < (uint32_t)st.spool->count) smp = vk_sampler(&((NvnSamplerDesc *)st.spool->entries)[tsc]);
-    if (st_->shadow)
+    if (arr && !view) view = vk_dummy_view(TEXTYPE_2D_ARRAY);
+    if (st_->shadow && !arr)
         shadow_slot_check(stage, st_, i, h, tic, ent, ent && ent->tex ? (naliases ? alias_read(ent->tex) : ent->tex) : NULL, &view);
     if (!view) view = vk_dummy_view(st_->type);
     if (!smp) smp = vk_default_sampler(true);
@@ -6084,6 +6304,8 @@ static void prep_job(void (*fn)(void *), void *arg) {
 static _Atomic int prep_pipe_dups;  // records whose pipeline another record already made
 bool renderer_prepare_begin(void) { return g_vk.dev != VK_NULL_HANDLE; }
 int renderer_prepare_pending(void) { return prep_pending; }
+// (shader_prep.h) the multiview records (SR_MV / SR_MVP) can be built and are what this run's eye passes draw
+bool renderer_prepare_multiview(void) { return mv_passes_on(); }
 int renderer_prepare_finished(void) { return prep_finished; }
 static void gpl_probe(void);
 static void gpl_probe_note(Pipe *pp);
@@ -6127,6 +6349,7 @@ static void prep_pipeline(void *arg) {
     const PipeIn in = {r->attrib, r->nattrib, r->stream, r->nstream, r->color, r->channel_mask, r->blend_on, r->blend,
                        r->a2c, r->topo, r->poly_fill};
     pipe_key_fill(&a->pp->k, pr, &in, color, ncolor, depth, stencil, r->samples ? r->samples : 1, NULL);
+    a->pp->k.view_mask = (r->flags & SR_MV) ? 3 : 0;
     uint64_t ph = hash_words(0xcbf29ce484222325ull, &a->pp->k, sizeof a->pp->k);
     if (!ph) ph = 1;
     // Another record makes the same pipeline (with dynamic vertex input: every record differing only in its vertex
@@ -6160,6 +6383,12 @@ bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlo
     vkey.flip_y = fkey.flip_y = (r->flags & SR_FLIP_Y) != 0;
     vkey.depth_minus_one = (r->flags & SR_DEPTH_MINUS_ONE) != 0;
     vkey.flip_x = fkey.flip_x = (r->flags & SR_FLIP_X) != 0;
+    if (r->flags & SR_MVP) {  // (a multiview program, mv_program)
+        if (!g_vk.multiview) return false;
+        vkey.mv = r->mv_cb[0], fkey.mv = r->mv_cb[1];
+        for (int b = 0; b < 3; b++) vkey.tex_amask[b] = fkey.tex_amask[b] = (uint8_t)(r->mv_amask >> (b * 8));
+    }
+    if ((r->flags & SR_MV) && !g_vk.multiview) return false;
     for (int i = 0; i < r->nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(r->attrib[i] & 0xFF);
     for (int i = 0; i < r->ncolor && i < 8; i++) if (r->color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(r->color[i]);
     uint64_t ck = prog_content_key(r->vs, r->fs, &vkey, &fkey);
@@ -6402,7 +6631,10 @@ static void rec_from_state(ShaderRec *r, bool flip_x, uint32_t mode) {
     r->kind = 'G';
     r->vs = shader_stage_hash(&st.program->stages[0]);
     r->fs = shader_stage_hash(&st.program->stages[1]);
-    r->flags = (nvn_window_origin() == 0 ? SR_FLIP_Y : 0) | (nvn_depth_mode() == 0 ? SR_DEPTH_MINUS_ONE : 0) | (flip_x ? SR_FLIP_X : 0);
+    r->flags = (nvn_window_origin() == 0 ? SR_FLIP_Y : 0) | (nvn_depth_mode() == 0 ? SR_DEPTH_MINUS_ONE : 0) | (flip_x ? SR_FLIP_X : 0) |
+               (pass_view_mask ? SR_MV : 0) | (g_mvp ? SR_MVP : 0);
+    r->mv_amask = g_mvp ? g_tex_amask : 0;
+    r->mv_cb[0] = g_mvp ? (uint8_t)(g_mv_bits[0] >> 3) : 0, r->mv_cb[1] = g_mvp ? (uint8_t)(g_mv_bits[1] >> 3) : 0;
     r->nattrib = (uint8_t)(st.nattrib < 16 ? st.nattrib : 16);
     memcpy(r->attrib, st.attrib, sizeof r->attrib[0] * r->nattrib);
     r->nstream = (uint8_t)(st.nstream < 16 ? st.nstream : 16);
@@ -6790,11 +7022,14 @@ static void stereo_composite(void) {
             LOG("[stereo] eye %d composite in frame %llu without a draw with the eye camera (source %ux%u)\n", g_eye, (unsigned long long)f,
                 wx_scene_w, wx_scene_h);
     }
-    g_eye_out_frame[g_eye] = renderer_exec_frame() + 1;
-    g_eye_out_n[g_eye]++;
-    stereo_note_composite(g_eye);  // (the poses this output was rendered with go with it into the layer)
-    g_eye_depth[g_eye] = st_last_depth ? vk_tex(st_last_depth, true) : NULL;
-    memcpy(g_eye_zr[g_eye], st_last_zr, sizeof st_last_zr);
+    if (g_mv_run && g_eye == 1) return;  // (multiview: eye 0's run noted both eyes' outputs)
+    for (int e = g_eye; e <= (g_mv_run ? 1 : g_eye); e++) {  // (multiview: the composite is one pass for both eyes)
+        g_eye_out_frame[e] = renderer_exec_frame() + 1;
+        g_eye_out_n[e]++;
+        stereo_note_composite(e);  // (the poses this output was rendered with go with it into the layer)
+        g_eye_depth[e] = st_last_depth ? vk_tex(st_last_depth, true) : NULL;
+        memcpy(g_eye_zr[e], st_last_zr, sizeof st_last_zr);
+    }
     static uint64_t n[2];
     if (n[g_eye]++ % 600 == 0) LOG("[stereo] eye %d composite #%llu (frame %llu)\n", g_eye, (unsigned long long)n[g_eye], (unsigned long long)renderer_exec_frame());
 }
@@ -7093,8 +7328,67 @@ static bool ring_early(CmdRec *r, bool indexed) {
     }
     return skip;
 }
+// (multiview pass) the program for this draw: the base one when nothing it reads differs per eye, else its multiview
+// variant (ShaderKey.mv: per-view cbufs, both eyes' layers of the twins it samples). Sets g_mv_bits, g_tex_amask and
+// g_mvp. NULL: the variant is still building (the draw is skipped, as any first use).
+static Prog *mv_program(Prog *pr, const ShaderKey *vkey, const ShaderKey *fkey) {
+    static int prog_on = -1;  // LARECOMP_MV_PROG=0 (cost tests only): the base programs everywhere - eye 1 gets eye 0's camera
+    if (prog_on < 0) prog_on = !getenv("LARECOMP_MV_PROG") || atoi(getenv("LARECOMP_MV_PROG")) != 0;
+    if (!prog_on) return pr;
+    uint32_t amask = 0, bits[2] = {0, 0};
+    for (int i = 0; i < pr->fi->ntex; i++) {
+        NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
+        if (!t || !vk_b_layered(t->backend)) continue;
+        if (i < 24 && pr->fi->tex[i].type == TEXTYPE_2D && !pr->fi->tex[i].is_image) amask |= 1u << i;
+        else if (mvs.bad_tex++ < 8)
+            LOG("[mv] fragment texture %d (type %d) is a twin a multiview program can't sample per eye: eye 0's in both\n", i, pr->fi->tex[i].type);
+    }
+    for (int i = 0; i < pr->vi->ntex; i++) {
+        NvnTexture *t = shader_texture_object(0, &pr->vi->tex[i]);
+        if (t && vk_b_layered(t->backend) && mvs.bad_tex++ < 8) LOG("[mv] a vertex shader samples a twin: eye 0's in both\n");
+    }
+    if (cam_override_active())
+        for (int sg = 0; sg < 2; sg++) {
+            const ShaderInfo *si = sg ? pr->fi : pr->vi;
+            for (int k = 3; k < 18; k++) {
+                if (!((si->cbuf_mask >> k) & 1)) continue;
+                Range r;
+                uint64_t size;
+                VkSpan sp;
+                if (!cbuf_range(sg, si, k, &r, &size) || !cam_sub(sg, r, size, 0, &sp)) continue;
+                uint64_t stride = (uint64_t)si->cbuf_mv_rows[k] * 16;
+                if (!stride || size > stride || stride + size > 65536) {
+                    if (mvs.bad_cb++ < 8) LOG("[mv] camera block cbuf %d (stage %d, %llu bytes) can't take a second eye's copy\n", k, sg, (unsigned long long)size);
+                    continue;
+                }
+                if (k > 10) {  // (ShaderKey.mv: a mask of cbufs 3-10)
+                    if (mvs.bad_cb++ < 8) LOG("[mv] camera block cbuf %d (stage %d) is past the multiview key's mask: eye 0's in both\n", k, sg);
+                    continue;
+                }
+                bits[sg] |= 1u << k;
+            }
+        }
+    if (!amask && !bits[0] && !bits[1]) { mvs.baseprog++; return pr; }
+    ShaderKey vk2 = *vkey, fk2 = *fkey;
+    vk2.mv = (uint8_t)(bits[0] >> 3), fk2.mv = (uint8_t)(bits[1] >> 3);  // (the stage's per-eye cbufs: constant-index reads)
+    for (int b = 0; b < 3; b++) vk2.tex_amask[b] = fk2.tex_amask[b] = (uint8_t)(amask >> (b * 8));
+    Prog *mp = get_program(st.program, &vk2, &fk2);
+    int ps = mp ? atomic_load(&mp->state) : 2;
+    if (ps == 2) {
+        static int nlog;
+        if (nlog++ < 8) LOG("[mv] a multiview program failed (%s): the base one, eye 0's view in both\n", mp && mp->fi ? mp->fi->error : "?");
+        mvs.baseprog++;
+        return pr;
+    }
+    if (ps != 1) { mvs.building++; return NULL; }
+    g_mv_bits[0] = bits[0], g_mv_bits[1] = bits[1], g_tex_amask = amask, g_mvp = true;
+    mvs.mvprog++;
+    return mp;
+}
+
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
+    g_mvp = false, g_tex_amask = 0, g_mv_bits[0] = g_mv_bits[1] = 0;
     if (!st.program) { SKIP(SK_NO_PROGRAM); return; }
     if (ring_early(r, indexed)) { SKIP(SK_RING); return; }  // (lane ring: a ring draw in a depth-only pass)
     ShaderKey vkey = {0}, fkey = {0};
@@ -7252,6 +7546,11 @@ static void draw_(CmdRec *r, bool indexed) {
         if (st.rt.color[i] && ((st.channel_mask >> (i * 4)) & 0xF)) snapshots_invalidate(st.rt.color[i]);
     begin_pass();
     VkCommandBuffer cb = vk_cmd();
+    if (pass_view_mask) {  // (multiview pass: the program that draws both eyes right)
+        Prog *mp = mv_program(pr, &vkey, &fkey);
+        if (!mp) { SKIP(SK_PROG_BUILDING); return; }
+        pr = mp;
+    }
 
     uint32_t mode = (uint32_t)r->x[0];
     VkPrimitiveTopology topo;
@@ -7275,7 +7574,7 @@ static void draw_(CmdRec *r, bool indexed) {
     PipeKey k;
     VtxLayout vl;  // the draw's vertex layout (on a memo hit: the memo's, made from the same inputs)
     Pipe *pp;
-    if (pm && pm->pp && pm->gen == key_gen && pm->ncolor == pass_ncolor && pm->samples == pass_samples && pm->depth == pass_depth &&
+    if (pm && pm->pp && pm->gen == key_gen && pm->view_mask == pass_view_mask && pm->ncolor == pass_ncolor && pm->samples == pass_samples && pm->depth == pass_depth &&
         pm->stencil == pass_stencil && pm->nattrib == st.nattrib && pm->nstream == st.nstream && pm->channel_mask == in.channel_mask &&
         pm->blend_on == in.blend_on && pm->a2c == in.a2c && pm->cls == in.topo_class && pm->poly_fill == in.poly_fill &&
         !memcmp(pm->color, pass_color, npc * sizeof pass_color[0]) && !memcmp(pm->rt_fmt, rt_fmt, sizeof rt_fmt) &&
@@ -7286,6 +7585,7 @@ static void draw_(CmdRec *r, bool indexed) {
         vl = pm->vl;  // (the key leaves the layout out with dynamic vertex input: kept with the memo)
     } else {
         pipe_key_fill(&k, pr, &in, pass_color, pass_ncolor, pass_depth, pass_stencil, pass_samples, &vl);
+        k.view_mask = pass_view_mask;
         uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
         if (!ph) ph = 1;
         uint32_t pslot = (uint32_t)(ph ^ (ph >> 29)) & (PIPE_TAB - 1);
@@ -7315,7 +7615,7 @@ static void draw_(CmdRec *r, bool indexed) {
             pipe_tab[pslot].pipe = pp;
         }
         if (pm) {
-            pm->gen = key_gen; pm->ncolor = pass_ncolor; pm->samples = pass_samples; pm->depth = pass_depth; pm->stencil = pass_stencil;
+            pm->gen = key_gen; pm->view_mask = pass_view_mask; pm->ncolor = pass_ncolor; pm->samples = pass_samples; pm->depth = pass_depth; pm->stencil = pass_stencil;
             pm->nattrib = st.nattrib; pm->nstream = st.nstream; pm->channel_mask = in.channel_mask; pm->blend_on = in.blend_on;
             pm->a2c = in.a2c; pm->cls = in.topo_class; pm->poly_fill = in.poly_fill;
             memcpy(pm->color, pass_color, sizeof pm->color); memcpy(pm->rt_fmt, rt_fmt, sizeof pm->rt_fmt);
@@ -7597,7 +7897,7 @@ static void draw_(CmdRec *r, bool indexed) {
                     if (r.size == 320 && cam_override_ubo(sg, r.addr, r.size, cam_cb)) cam_src = cam_cb;
                     else if (cam_patched(r.addr, psz, &cam_ps)) cam_src = cam_ps.ptr;
                     cam_hit = cam_src != NULL;
-                    if (cam_hit) cc_mark(sg, idx);
+                    if (cam_hit) cc_mark(sg, idx), mv_cam_shared(sg, idx + 3);
                 }
                 if (cam_hit && o + 4 <= psz) memcpy(&pw[i], cam_src + o, 4);
             }
@@ -7845,7 +8145,7 @@ static void copy_buffer_to_texture(uint64_t src, const TexRefRec *dst) {
         }
     VkBufferImageCopy c = {.bufferOffset = s.off, .bufferRowLength = wb * fi->bw, .bufferImageHeight = hb * fi->bh,
                            .imageSubresource = {b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : b->aspect,
-                                                (uint32_t)level, array ? (uint32_t)rg[2] : 0, array ? nz : 1},
+                                                (uint32_t)level, array ? (uint32_t)rg[2] : vk_b_layer(b), array ? nz : 1},
                            .imageOffset = {rg[0], rg[1], array ? 0 : rg[2]},
                            .imageExtent = {(uint32_t)rg[3], (uint32_t)rg[4], array ? 1 : nz}};
     rec_CmdCopyBufferToImage(cb, s.buf, b->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
@@ -7877,7 +8177,7 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
         VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &srcimg, &small_mem, NULL));
         vk_image_init_layout(cb, srcimg, VK_IMAGE_ASPECT_COLOR_BIT);
-        VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)lroundf(t->width * tsx), (int32_t)lroundf(t->height * tsy), 1}},  // (the contents)
+        VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, vk_b_layer(b), 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)lroundf(t->width * tsx), (int32_t)lroundf(t->height * tsy), 1}},  // (the contents)
                           .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {(int32_t)t->width, (int32_t)t->height, 1}}};
         rec_CmdBlitImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, srcimg, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
         vk_full_barrier(cb);
@@ -7889,7 +8189,7 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     VkBufferImageCopy c = {.bufferOffset = out.off, .bufferRowLength = (uint32_t)(row / fi->bpb) * fi->bw,
                            .bufferImageHeight = (uint32_t)(img / row) * fi->bh,
                            .imageSubresource = {b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : b->aspect,
-                                                (uint32_t)level, array ? (uint32_t)rg[2] : 0, array ? nz : 1},
+                                                (uint32_t)level, array ? (uint32_t)rg[2] : srcimg == b->image ? vk_b_layer(b) : 0, array ? nz : 1},
                            .imageOffset = {rg[0], rg[1], array ? 0 : rg[2]},
                            .imageExtent = {(uint32_t)rg[3], (uint32_t)rg[4], array ? 1 : nz}};
     rec_CmdCopyImageToBuffer(cb, srcimg, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
@@ -8027,6 +8327,7 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     uint32_t sly = src->has_view && (src->view.setmask & 2) ? src->view.min_layer : 0;
     uint32_t dly = dst->has_view && (dst->view.setmask & 2) ? dst->view.min_layer : 0;
     if (slv >= s->levels || dlv >= d->levels || sly >= s->layers || dly >= d->layers) return;
+    sly += vk_b_layer(s), dly += vk_b_layer(d);  // (multiview storage: the eye's layer of a twin)
     {   // whole-image regions are the contents' extent in the level, and every region stays inside its level: scaled
         // allocations (internal resolution below 1x) round guest regions past the edge, and out-of-bounds copies /
         // blits are undefined in Vulkan (garbage that changed every frame on NVIDIA: flicker in the depth pyramid's
@@ -8111,7 +8412,12 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
 // (VR pass diet) the whole of src into dst, both twinned scene-sized targets of one format (vr_diet.c)
 static void diet_copy(NvnTexture *src, NvnTexture *dst) {
     TexRefRec s = {.tex = (uint64_t)(uintptr_t)src}, d = {.tex = (uint64_t)(uintptr_t)dst};
-    copy_texture(&s, &d, 0);
+    int nl = g_mv_run && g_eye == 0 && dst && vk_b_layered(dst->backend) ? 2 : 1;  // (multiview run: both layers)
+    for (int l = 0; l < nl; l++) {
+        if (nl == 2) vk_eye_layer = l;
+        copy_texture(&s, &d, 0);
+    }
+    if (nl == 2) vk_eye_layer = 0;
 }
 
 // ================================================================== present helpers (device.c)
@@ -8283,12 +8589,15 @@ static VkPipeline present_pipeline_ex(VkFormat fmt, bool rcas) {
 static VkPipeline present_pipeline(VkFormat fmt) { return present_pipeline_ex(fmt, false); }
 
 // Scanout shows the bytes the game wrote: sRGB images are read through a UNORM view (no decode), like metal.m.
-static VkImageView raw_view(TexBackend *b) {
+static VkImageView raw_view_layer(TexBackend *b, uint32_t layer) {
     VkFormat f = b->format == VK_FORMAT_R8G8B8A8_SRGB ? VK_FORMAT_R8G8B8A8_UNORM
                : b->format == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_B8G8R8A8_UNORM : b->format;
     static const VkComponentMapping id = {0};
-    return vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, f, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
+    return vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, f, 0, 1, layer, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
 }
+static VkImageView raw_view(TexBackend *b) { return raw_view_layer(b, 0); }
+uint32_t vk_debug_save_layer;  // (vk_stereo_dump, the debug frame's pass dumps: the layer renderer_save_texture_tex reads)
+#define save_layer vk_debug_save_layer
 
 // ---- post passes (Video tab "Anti-aliasing" / "Upscaler"): SMAA 1x at the game image's size, then AMD FSR 1 (EASU
 // upscale to the image's size in the window, RCAS sharpen) when it is smaller than its place in the window, as
@@ -8756,7 +9065,7 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
     rec_CmdBeginRendering(cb, &ri);
     VkPipeline p = present_pipeline(VK_FORMAT_R8G8B8A8_UNORM);
     VkDescriptorSet ds = vk_alloc_set(present_set_layout);
-    VkDescriptorImageInfo ii = {vk_default_sampler(true), raw_view(b), VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo ii = {vk_default_sampler(true), raw_view_layer(b, save_layer), VK_IMAGE_LAYOUT_GENERAL};
     VkWriteDescriptorSet wr = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,
                                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
     rec_UpdateDescriptorSets(1, &wr);
@@ -8893,7 +9202,8 @@ static void exec_list(uint64_t handle, int depth) {
             // ClearTexture(cmd, texture, view, region, color, mask): a render-target clear of the texture alone (renderer.m)
             const struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; float color[4]; } *ct = x;
             NvnTexture *t = (NvnTexture *)(uintptr_t)ct->tex;
-            if (!t || (g_eye == 1 && !vk_tex_twinned(t))) break;
+            if (!t || (g_eye == 1 && (!vk_tex_twinned(t) || (g_mv_run && vk_b_layered(t->backend))))) break;  // (mv: eye 0 did both)
+            if (g_eye == 0 && g_mv_run && vk_tex_twinned(t) && !vk_b_layered(t->backend)) mv_need_eye1 = true;
             snap_reason = "clear-texture"; snapshots_invalidate(NULL);
             alias_before_write(t, 0, "clear");
             RtState saved = st.rt;
@@ -9004,9 +9314,11 @@ static void exec_list(uint64_t handle, int depth) {
                 VkCommandBuffer cb = vk_cmd();  // (first: may begin the buffer, which resets the slot's queries)
                 CounterQ *q = &cq[cur_sub];
                 pthread_mutex_lock(&cq_lock);
-                if (q->pool && q->n < CQ_MAX) {
+                bool two = in_pass && pass_view_mask;  // (in a multiview pass a timestamp writes one query per view)
+                if (q->pool && q->n + two < CQ_MAX) {
                     rec_CmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, q->pool, q->n);
                     q->out[q->n++] = out;
+                    if (two) q->out[q->n++] = out;
                 }
                 pthread_mutex_unlock(&cq_lock);
             }
@@ -9015,7 +9327,18 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_COPY_TEXTURE_TO_TEXTURE: case CMD_DOWNSAMPLE: case CMD_COPY_BUFFER_TO_TEXTURE: {
             const TexRefRec *t = x;
             const TexRefRec *dst = r->op == CMD_COPY_BUFFER_TO_TEXTURE ? &t[0] : &t[1];
-            if (g_eye == 1 && !vk_tex_twinned((NvnTexture *)(uintptr_t)dst->tex)) { st_skipped[1]++; break; }  // (stereo: shared)
+            if (g_debug_frame) {
+                NvnTexture *s_ = r->op == CMD_COPY_BUFFER_TO_TEXTURE ? NULL : (NvnTexture *)(uintptr_t)t[0].tex, *d_ = (NvnTexture *)(uintptr_t)dst->tex;
+                LOG("[dbgcopy] e%d op %d %p (%ux%u tw %d) -> %p (%ux%u fmt %#x tw %d)\n", g_eye, r->op, (void *)s_, s_ ? s_->width : 0,
+                    s_ ? s_->height : 0, s_ ? vk_tex_twinned(s_) : -1, (void *)d_, d_ ? d_->width : 0, d_ ? d_->height : 0,
+                    d_ ? d_->format : 0, d_ ? vk_tex_twinned(d_) : -1);
+            }
+            {
+                NvnTexture *d_ = (NvnTexture *)(uintptr_t)dst->tex;
+                bool tw = vk_tex_twinned(d_), lay = d_ && vk_b_layered(d_->backend);
+                if (g_eye == 1 && (!tw || (g_mv_run && lay))) { st_skipped[1]++; break; }  // (stereo: shared; mv: eye 0 did both layers)
+                if (g_eye == 0 && g_mv_run && tw && !lay) mv_need_eye1 = true;  // (a twin without an eye-1 layer: eye 1 copies)
+            }
             if (g_eye == 0 && r->op != CMD_COPY_BUFFER_TO_TEXTURE && !vk_tex_twinned((NvnTexture *)(uintptr_t)dst->tex) &&
                 vk_tex_twinned((NvnTexture *)(uintptr_t)t[0].tex)) {
                 // (a shared target made from a twin: eye 1 would see eye 0's) the destination is twinned from now on, so
@@ -9028,9 +9351,18 @@ static void exec_list(uint64_t handle, int depth) {
                                   d_->width, d_->height, d_->format, (unsigned long long)renderer_exec_frame(),
                                   added ? "twinned from now on" : "not twinnable: eye 1 gets eye 0's");
             }
-            if (r->op == CMD_COPY_TEXTURE_TO_TEXTURE) copy_texture(&t[0], &t[1], r->x[6]);
-            else if (r->op == CMD_DOWNSAMPLE) copy_texture(&t[0], &t[1], 1);
-            else copy_buffer_to_texture(r->x[0], x);
+            {   // (multiview run: into both layers of a twin)
+                NvnTexture *d_ = (NvnTexture *)(uintptr_t)dst->tex;
+                int nl = g_mv_run && g_eye == 0 && d_ && vk_b_layered(d_->backend) ? 2 : 1;
+                mvs.copies += nl == 2;
+                for (int l = 0; l < nl; l++) {
+                    if (nl == 2) vk_eye_layer = l;
+                    if (r->op == CMD_COPY_TEXTURE_TO_TEXTURE) copy_texture(&t[0], &t[1], r->x[6]);
+                    else if (r->op == CMD_DOWNSAMPLE) copy_texture(&t[0], &t[1], 1);
+                    else copy_buffer_to_texture(r->x[0], x);
+                }
+                if (nl == 2) vk_eye_layer = 0;
+            }
             break;
         }
         case CMD_COPY_TEXTURE_TO_BUFFER: if (!g_interp_replaying && g_eye != 1) copy_texture_to_buffer(x, r->x[3]); break;
@@ -9158,6 +9490,13 @@ static void stereo_note_cpu(uint64_t ns0, uint64_t ns1) {
     }
 }
 
+// (multiview storage) the twins' layer that views and copies take from now on
+static void mv_layer(int l) {
+    extern uint32_t vk_view_gen;
+    vk_eye_layer = l;
+    vk_view_gen++;  // (the texture memo and cached sets hold the other layer's views)
+    snap_reason = "eye layer"; snapshots_invalidate(NULL);
+}
 // ---- (stereo) camera check (st_cc_*): see st_cc_mask
 static uint64_t cc_ubo_hash(void) {  // (LARECOMP_STEREO_CAMCHECK=2) the bytes of the draw's bound uniform ranges (<= 4 KB)
     uint64_t h = 1469598103934665603ull;
@@ -9294,25 +9633,55 @@ static void stereo_execute(uint64_t handle) {
     idx_memo_gen++;
     g_eye = 0;
     cam_override_set_eye(0);
+    if (vk_mv_on()) vk_mv_latch();  // (multiview storage: the candidates' eye-1 layers from now on)
+    g_mv_run = mv_passes_on();  // (multiview: one run draws both eyes; eye 1 runs only for the passes that can't)
+    mv_need_eye1 = false;
     uint64_t t0 = plat_now_ns();
     uint32_t q = st_ts_begin();
     exec_list(handle, 0);
     vk_end_pass();
     st_ts_end(q, 0);
+    if (g_mv_run) {
+        if (mv_need_eye1) mvs.lists2++; else mvs.lists1++;
+        static uint64_t t_log;
+        uint64_t now = plat_now_ns();
+        if (now - t_log > 5000000000ull) {
+            t_log = now;
+            LOG("[mv] 5 s: lists %llu one run, %llu with eye 1's; passes %llu multiview, %llu twinned+shared (eye 1 drew %llu); "
+                "%llu copies into both layers; draws: %llu multiview programs, %llu base, %llu skipped (building); "
+                "not per eye: %llu textures, %llu blocks; camera check: %llu per-eye camera bindings, %llu with eye 0's in both views\n",
+                (unsigned long long)mvs.lists1, (unsigned long long)mvs.lists2, (unsigned long long)mvs.passes,
+                (unsigned long long)mvs.other, (unsigned long long)mvs.eye1_passes, (unsigned long long)mvs.copies,
+                (unsigned long long)mvs.mvprog, (unsigned long long)mvs.baseprog, (unsigned long long)mvs.building,
+                (unsigned long long)mvs.bad_tex, (unsigned long long)mvs.bad_cb, (unsigned long long)mvs.cam_draws,
+                (unsigned long long)mvs.cam_shared);
+            uint64_t bt = mvs.bad_tex, bc = mvs.bad_cb;
+            memset(&mvs, 0, sizeof mvs);
+            mvs.bad_tex = bt, mvs.bad_cb = bc;  // (their logs stay limited)
+        }
+        if (!mv_need_eye1) {  // (both eyes drawn: eye 0's memory writes stand, the fences are done after this submission)
+            stereo_note_cpu(plat_now_ns() - t0, 0);
+            goto done;
+        }
+    }
     gw_restore();
     uint64_t t1 = plat_now_ns();
     st = start;
     st.rt_dirty = true;
     g_eye = 1;
     cam_override_set_eye(1);
-    vk_stereo_swap(true);
+    if (vk_mv_on()) vk_mv_latch(), mv_layer(1);  // (multiview storage: eye 1's layer of the twins)
+    else vk_stereo_swap(true);
     q = st_ts_begin();
     exec_list(handle, 0);
     vk_end_pass();
     st_ts_end(q, 1);
-    vk_stereo_swap(false);
+    if (vk_mv_on()) mv_layer(0);
+    else vk_stereo_swap(false);
     if (st_cc_on && cam_override_active()) stereo_cc_list();
     stereo_note_cpu(t1 - t0, plat_now_ns() - t1);
+done:
+    g_mv_run = false;
     g_eye = -1;
     cam_override_set_eye(0);
     st.rt_dirty = true;
@@ -9334,11 +9703,14 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
     int drawn = 0;
     for (int eye = 0; eye < 2; eye++) {
         TexBackend *b = g_eye_out.backend;
-        if (eye == 1) b = b->twin;
+        bool lay = vk_b_layered(b);  // (multiview storage: eye 1 is layer 1)
+        if (eye == 1 && !lay) b = b->twin;
         if (!b || !b->image || !g_eye_out_frame[eye]) continue;
+        uint32_t ly = lay ? (uint32_t)eye : 0;
         if (g_eye_posted[eye] != g_eye_out_n[eye]) {  // (a new output: the eye post hook, once)
             g_eye_posted[eye] = g_eye_out_n[eye];
             StereoEyePost ep = {.eye = eye, .cb = cb, .color = b, .depth = g_eye_depth[eye], .width = b->width, .height = b->height,
+                                .layer = ly, .depth_layer = vk_b_layered(g_eye_depth[eye]) ? (uint32_t)eye : 0,
                                 .ax = b->scalable && b->ax > 0 ? b->sx / b->ax : 1, .ay = b->scalable && b->ay > 0 ? b->sy / b->ay : 1,
                                 .zn = g_eye_zr[eye][0], .zf = g_eye_zr[eye][1]};
             ep.have_matrices = stereo_eye_matrices(eye, ep.V, ep.P);
@@ -9363,7 +9735,7 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
         rec_CmdSetScissor(cb, 0, 1, &sc);
         VkPipeline p = present_pipeline_ex(fmt, false);
         VkDescriptorSet ds = vk_alloc_set(present_set_layout);
-        VkDescriptorImageInfo ii = {vk_default_sampler(true), raw_view(b), VK_IMAGE_LAYOUT_GENERAL};
+        VkDescriptorImageInfo ii = {vk_default_sampler(true), raw_view_layer(b, ly), VK_IMAGE_LAYOUT_GENERAL};
         VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,
                                   .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
         rec_UpdateDescriptorSets(1, &w);
@@ -9391,10 +9763,14 @@ void vk_stereo_dump(const char *dir, uint64_t frame) {
     if (!g_eye_out_ok || !g_eye_out.backend) return;
     char p[512];
     for (int e = 0; e < 2; e++) {
-        TexBackend *b = e ? ((TexBackend *)g_eye_out.backend)->twin : g_eye_out.backend;
+        TexBackend *b = g_eye_out.backend;
+        bool lay = vk_b_layered(b);
+        if (e && !lay) b = b->twin;
         if (!b) continue;
         snprintf(p, sizeof p, "%s/stereo_%05llu_eye%d.png", dir, (unsigned long long)frame, e);
+        save_layer = lay ? (uint32_t)e : 0;
         renderer_save_texture_tex(b, p);
+        save_layer = 0;
     }
     if (g_hud_ok && g_hud.backend) {
         snprintf(p, sizeof p, "%s/stereo_%05llu_hud.png", dir, (unsigned long long)frame);

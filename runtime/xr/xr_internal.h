@@ -66,6 +66,7 @@ typedef struct {
     uint64_t rid[2];        // the latch each eye's image came from (xr_latch_views_id)
     uint64_t latch_ns;      // plat_now_ns() of that latch (prediction: latch -> display)
     XrTime vtime;           // the display time its views were located for
+    bool alpha;             // its eye images carry alpha for passthrough (edge.c; the Table Edge can change between sets)
 } XrSet;
 
 // xr_latch_views_id's latches: the poses each frame's eyes were rendered with, kept until a set names them
@@ -83,6 +84,7 @@ typedef struct {
     void *loader;
     XrInstance inst;
     XrSystemId sys;
+    bool has_alpha_blend;  // the runtime offers XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND (Table Edge Passthrough; xr_session.c)
     bool has_refresh_fb, has_format_list, has_gaze;  // has_gaze: XR_EXT_eye_gaze_interaction enabled (foveation)
     // session
     XrSession session;

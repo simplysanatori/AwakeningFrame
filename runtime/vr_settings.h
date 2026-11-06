@@ -6,6 +6,7 @@
 // that is absent leaves its row at "Applies After Restart"; Height, Size and Tilt are the rig's, vr_rig.ini). docs/af/VR_SETTINGS.md.
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 
 enum { VRS_LAYOUT_SWITCH, VRS_LAYOUT_COMFORT, VRS_N_LAYOUT };               // LARECOMP_XR_LAYOUT
@@ -71,6 +72,11 @@ void vr_settings_changed(VrOpt o);
 void vr_settings_sync_rig(void);
 // The Recentre Table button.
 void vr_settings_recentre(void);
+// (test hook, once per game frame: hle/warp.c) LARECOMP_VR_SET_AT=<frame>:<key>=<value>[,<frame>:<key>=<value>...]: at
+// that game frame, the change as the VR tab makes it (g_settings.vr, the ini saved, vr_settings_changed). Keys: the ini's
+// without vr_ (edge_style, foveation, dynamic_resolution, follow, layout, turn, panel_distance, panel_width, refresh, fps)
+// and edge, dynres, label (Buttons Match Labels, 0 / 1); values as in the ini. Frames in increasing order.
+void vr_settings_test_tick(uint64_t frame);
 
 #ifdef __cplusplus
 }

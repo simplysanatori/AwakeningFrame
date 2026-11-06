@@ -27,6 +27,7 @@ bool xr_input_gaze(XrSpace base, XrTime t, float dir[3]);
 // the diorama's yaw. Game buttons go through the player's controller bindings as a gamepad's would; menus get the same
 // as SDL gamepad events.
 void input_xr_set(uint32_t host, int32_t lx, int32_t ly);
+void input_xr_set2(uint32_t host_game, uint32_t host, int32_t lx, int32_t ly);  // (the game's buttons, the menus' events)
 // The game's rumble now as one strength 0..1 (the same mix and gates as the gamepad's: the Controls tab's Rumble and
 // Intensity, the menu open, the game's own vibration permission), 0: none.
 float input_rumble_level(void);

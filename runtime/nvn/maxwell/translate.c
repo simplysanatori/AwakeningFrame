@@ -26,6 +26,7 @@ uint64_t maxwell_gmem_base, maxwell_gmem_size;
 int maxwell_frag_subgroups = 1;
 uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; shader.h)
 bool maxwell_gmem_lazy;
+bool maxwell_gmem_whole;
 bool maxwell_gmem_fs_miss;
 bool maxwell_glsl_stack_vars = true;
 bool maxwell_glsl_structured;  // static stacks + structured control flow by default (exec.c: Mali, Adreno)
@@ -175,6 +176,18 @@ static const char *pred(Ctx *c, int p, bool neg, char *buf) {
 }
 #define P(p, n) pred(c, (p), (n), alloca(16))
 
+// (multiview, ShaderKey.mv / tex_amask) the key makes a multiview shader (GL_EXT_multiview): per-eye constant buffers or
+// array twins, vertex and fragment shaders only
+static bool key_mv(const Ctx *c) {
+    return c->glsl && c->key && (c->stage == STAGE_VERTEX || c->stage == STAGE_FRAGMENT) &&
+           (c->key->mv || c->key->tex_amask[0] || c->key->tex_amask[1] || c->key->tex_amask[2]);
+}
+// constant buffer k is per eye (ShaderKey.mv bit k - 3, k 3..10): eye 1's copy cbuf_mv_rows[k] rows after eye 0's
+static bool cbuf_mv(const Ctx *c, int k) {
+    return c->glsl && c->key && (c->stage == STAGE_VERTEX || c->stage == STAGE_FRAGMENT) && k >= 3 && k <= 10 &&
+           ((c->key->mv >> (k - 3)) & 1);
+}
+
 static const char *cbuf_ref(Ctx *c, int idx, int64_t off, const char *dyn, char *buf) {
     // c1, statically indexed (GLSL, LARECOMP_VK_INLINE_C1=1): the shader's own compiler constants never change, so the
     // value itself instead of a uniform buffer load - which on Mesa's PanVK is a memory load every time (it keeps no
@@ -196,6 +209,13 @@ static const char *cbuf_ref(Ctx *c, int idx, int64_t off, const char *dyn, char 
     if (off + 16 > (int64_t)c->info->cbuf_size[idx]) c->info->cbuf_size[idx] = (uint32_t)((off + 16 + 255) & ~255);
     if (dyn) c->info->cbuf_dynamic |= 1u << idx;
     if (!dyn && idx < 18 && off >= 0 && (uint32_t)(off >> 4) + 1 > c->cbuf_need[idx]) c->cbuf_need[idx] = (uint32_t)(off >> 4) + 1;
+    if (cbuf_mv(c, idx)) {  // (multiview: eye 1 reads its copy, MVR<k> rows on - glsl_finish's constant; both indices
+        // stay constants, so the driver can keep the rows read in its constant registers as for any other block)
+        if (dyn) sprintf(buf, "cbr(cb%d, (%s) + %lldu + (gl_ViewIndex == 0 ? 0u : MVB%d))", idx, dyn, (long long)off, idx);
+        else sprintf(buf, "(gl_ViewIndex == 0 ? cb%d[%lld][%lld] : cb%d[%lldu + MVR%d][%lld])", idx, (long long)(off >> 4),
+                     (long long)((off >> 2) & 3), idx, (long long)(off >> 4), idx, (long long)((off >> 2) & 3));
+        return buf;
+    }
     if (dyn) sprintf(buf, "cbr(cb%d, (%s) + %lldu)", idx, dyn, (long long)off);
     else sprintf(buf, "cb%d[%lld][%lld]", idx, (long long)(off >> 4), (long long)((off >> 2) & 3));
     return buf;
@@ -629,6 +649,32 @@ static const char *uv2(Ctx *c, int slot, const char *x, const char *y, char *buf
 }
 #define UV2(slot, x, y) uv2(c, (slot), (x), (y), alloca(700))
 
+// (multiview) fragment texture slot `slot` is a twin sampled as a 2D array at layer gl_ViewIndex (ShaderKey.tex_amask)
+static bool mv_tex_array(const Ctx *c, int slot) {
+    return c->glsl && c->key && c->stage == STAGE_FRAGMENT && slot >= 0 && slot < 24 &&
+           ((c->key->tex_amask[slot >> 3] >> (slot & 7)) & 1);
+}
+// texelFetch(t<slot>, ivec2(...), lod) -> texelFetch(t<slot>, ivec3(ivec2(...), gl_ViewIndex), lod) for such a slot
+static void mv_fetch_fix(const Ctx *c, int slot, char *call) {
+    if (!mv_tex_array(c, slot)) return;
+    char *p = strstr(call, ", ivec2(");
+    if (!p) return;
+    p += 2;
+    int depth = 0;
+    char *q = p + 5;  // at the '('
+    for (; *q; q++) {
+        if (*q == '(') depth++;
+        else if (*q == ')' && --depth == 0) break;
+    }
+    if (!*q) return;
+    char tail[4096];
+    snprintf(tail, sizeof tail, "%s", q + 1);
+    size_t head = (size_t)(p - call);
+    char mid[4096];
+    snprintf(mid, sizeof mid, "ivec3(%.*s, gl_ViewIndex)", (int)(q + 1 - p), p);
+    snprintf(call + head, 4096, "%s%s", mid, tail);
+}
+
 // GLSL texture lookup on slot `slot` (its type is final here: a conflicting use fails in tex_slot).
 // co: coordinate expressions (1 for 1D, 2 for 2D, 3 for 3D / cube), layer: uint expression or NULL, dref: depth
 // reference or NULL, lod_kind 0 implicit / 1 level / 2 bias (lod), off: ivec2 texel offset or NULL.
@@ -646,7 +692,10 @@ static void glsl_sample(Ctx *c, char *out, int slot, const char *const *co, cons
         lod_kind = 1;
     }
     if (t->shadow && type == TEXTYPE_3D) { fail(c, "3d shadow texture"); strcpy(out, "vec4(0.0f)"); return; }
-    if (layer && type != TEXTYPE_1D_ARRAY && type != TEXTYPE_2D_ARRAY && type != TEXTYPE_CUBE_ARRAY) {
+    if (mv_tex_array(c, slot)) {  // (multiview: a 2D twin as the 2D array of both eyes' layers)
+        if (type != TEXTYPE_2D || layer) { fail(c, "multiview array twin on a slot of type %d", type); strcpy(out, "vec4(0.0f)"); return; }
+        layer = "gl_ViewIndex";
+    } else if (layer && type != TEXTYPE_1D_ARRAY && type != TEXTYPE_2D_ARRAY && type != TEXTYPE_CUBE_ARRAY) {
         fail(c, "array lookup on a 3d texture");  // TEX .3D with the array bit
         strcpy(out, "vec4(0.0f)");
         return;
@@ -749,6 +798,7 @@ static bool glsl_texs(Ctx *c, uint64_t w, bool fetch, int *slot_out, char *call,
             sprintf(call, "texelFetch(t%d, ivec2(%s), int(%s))", slot, RSC2(c, slot, "uint2(int2(%s, %s) + int2(int(%s << 28) >> 28, int(%s << 24) >> 28))", A, A1, B1, B1), Bv); break;
         default: fail(c, "tlds info %d", info); return false;
         }
+        mv_fetch_fix(c, slot, call);
     }
     *slot_out = slot;
     return true;
@@ -1985,7 +2035,7 @@ static const char *glsl_sampler_type(const ShaderTexture *t) {
 // coverage with early tests would write depth for samples it drops: the renderer uses this shader's module without
 // the execution mode for those pipelines, vulkan/exec.c fs_late.)
 static bool glsl_early_tests(const Ctx *c) {
-    return c->glsl && c->stage == STAGE_FRAGMENT && c->info->uses_gmem && maxwell_gmem_chunk_shift && maxwell_gmem_lazy &&
+    return c->glsl && c->stage == STAGE_FRAGMENT && c->info->uses_gmem && maxwell_gmem_chunk_shift && maxwell_gmem_lazy && !maxwell_gmem_whole &&
            !maxwell_gmem_fs_miss && !c->info->uses_discard && !c->omap_depth && !c->uses_gmem_store;
 }
 
@@ -2001,7 +2051,7 @@ static void push_promote(Ctx *c, Str *body) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("LARECOMP_VK_PUSH_CB"); on = e ? atoi(e) != 0 : maxwell_glsl_push; }
     if (!on || (c->stage != STAGE_FRAGMENT && c->stage != STAGE_VERTEX) || !body->buf ||
-        (maxwell_gmem_lazy && c->info->uses_gmem)) return;
+        (maxwell_gmem_lazy && !maxwell_gmem_whole && c->info->uses_gmem)) return;  // (GDirect's push constants)
     // LARECOMP_VK_PUSH_VS=0: none in vertex shaders (an A/B of the vertex words: the fragment budget stays 48 words)
     static int vs_on = -1;
     if (vs_on < 0) { const char *e = getenv("LARECOMP_VK_PUSH_VS"); vs_on = !e || atoi(e); }
@@ -2036,7 +2086,8 @@ static void push_promote(Ctx *c, Str *body) {
         }
         int cb, row, col, len = 0;
         if (p[0] == 'c' && p[1] == 'b' && (p == b || !((p[-1] >= 'a' && p[-1] <= 'z') || (p[-1] >= '0' && p[-1] <= '9') || p[-1] == '_')) &&
-            sscanf(p, "cb%d[%d][%d]%n", &cb, &row, &col, &len) == 3 && len && cb >= 3 && cb < 18 && col < 4 && row < 4096) {
+            sscanf(p, "cb%d[%d][%d]%n", &cb, &row, &col, &len) == 3 && len && cb >= 3 && cb < 18 && col < 4 && row < 4096 &&
+            !cbuf_mv(c, cb)) {  // (multiview: a per-eye block's words stay in it)
             uint16_t off = (uint16_t)(row * 16 + col * 4);
             double w = 1;
             for (int d = 0; d < loops && d < 6; d++) w *= 8;
@@ -2085,6 +2136,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     Str s = {0};
     sp(&s, "#version 460\n");  // (the prelude's first line; an extension directive has to follow it)
     if (info->uses_gmem && maxwell_gmem_chunk_shift && maxwell_gmem_lazy) sp(&s, "#extension GL_EXT_buffer_reference : require\n");
+    if (key_mv(c)) sp(&s, "#extension GL_EXT_multiview : require\n");
     sp(&s, "%s", glsl_prelude + sizeof "#version 460\n" - 1);
     if (stage == STAGE_FRAGMENT && !maxwell_frag_subgroups)  // the quad's lanes through fine derivatives (SHFL above)
         sp(&s, "uint quad_lane() { ivec2 p = ivec2(gl_FragCoord.xy); return uint(p.x & 1) | (uint(p.y & 1) << 1); }\n"
@@ -2102,6 +2154,12 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         if (c->cbuf_need[i] > n) n = c->cbuf_need[i];
         if ((info->cbuf_dynamic & (1u << i)) && n < 4096) n = 4096;
         if (!n) n = 1;
+        uint32_t rows = (info->cbuf_dynamic & (1u << i)) ? 256 : n;  // (multiview: also told by programs without mv)
+        if (i >= 3) info->cbuf_mv_rows[i] = (uint16_t)(rows < 0xFFFF ? rows : 0);
+        if (cbuf_mv(c, i)) {  // (multiview) eye 1's copy follows eye 0's: rows apart (dynamic: 256, the camera patch's 4 KB)
+            if (!(info->cbuf_dynamic & (1u << i))) n *= 2;
+            sp(&s, "#define MVR%d %uu\n#define MVB%d %uu\n", i, rows, i, rows * 16);
+        }
         sp(&s, "layout(std140, set = %d, binding = %d) uniform CB%d { uvec4 cb%d[%u]; };\n", set, i, i, i, n);
     }
     if (info->npush) sp(&s, "layout(push_constant) uniform PC { layout(offset = %u) uint pcw[%d]; };\n", info->push_base, info->npush);  // (push_promote)
@@ -2136,7 +2194,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         }
     } else if (info->uses_gmem) {  // chunks imported lazily: a table of device addresses, buffer references (shader.h)
         int ws = (int)maxwell_gmem_chunk_shift - 2, cs = GMEM_CHUNK_SET(stage);
-        bool direct = stage != STAGE_COMPUTE;  // (compute: its storage buffers are in gfast_ already)
+        bool direct = stage != STAGE_COMPUTE && !maxwell_gmem_whole;  // (compute: its storage buffers are in gfast_ already)
         sp(&s, "layout(std140, set = %d, binding = %d) uniform GChunks { uvec4 gchunk[%d]; };\n", cs, GMEM_CHUNK_BINDING, GMEM_CHUNKS_MAX);
         sp(&s, "layout(buffer_reference, std430, buffer_reference_align = 4) %sbuffer GW { uint w[]; };\n", c->uses_gmem_store ? "" : "readonly ");
         // Misses are counted with atomics on GMiss: a side effect, which in a fragment shader turns early depth / stencil
@@ -2147,7 +2205,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         // the bound storage buffers' chunks (gmem_chunk_bind), pointers in uniform buffers, the chunks other shaders
         // missed (cache/gmem_chunks.txt). LARECOMP_VK_GMEM_FS_MISS=1 (maxwell_gmem_fs_miss): every shader counts, no
         // early tests (as before; to find a chunk only such a shader reaches).
-        bool count = stage != STAGE_FRAGMENT || maxwell_gmem_fs_miss || c->uses_gmem_store || glsl_early_tests(c);
+        bool count = !maxwell_gmem_whole && (stage != STAGE_FRAGMENT || maxwell_gmem_fs_miss || c->uses_gmem_store || glsl_early_tests(c));
         if (count) {
             sp(&s, "layout(std430, set = %d, binding = %d) buffer GMiss { uint n[%d]; uint w[%d]; } gmiss_;\n", cs, GMEM_MISS_BINDING,
                GMEM_CHUNKS_MAX, GMEM_CHUNKS_MAX);
@@ -2220,6 +2278,12 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     }
     for (int i = 0; i < info->ntex; i++) {
         ShaderTexture *t = &info->tex[i];
+        if (mv_tex_array(c, i)) {  // (multiview: the eyes' layers of a 2D twin)
+            if (t->type != TEXTYPE_2D) fail(c, "multiview array twin on a slot of type %d", t->type);
+            sp(&s, "layout(set = %d, binding = %d) uniform %s t%d;\n", set, 32 + i, t->shadow ? "sampler2DArrayShadow" : "sampler2DArray", i);
+            sp(&s, "ivec3 tsize%d(int l) { return ivec3(textureSize(t%d, l).xy, 1); }\n", i, i);
+            continue;
+        }
         sp(&s, "layout(set = %d, binding = %d) uniform %s t%d;\n", set, 32 + i, glsl_sampler_type(t), i);
         // size of level l as (width, height, depth or layers)
         switch (t->type) {
@@ -2331,6 +2395,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         }
     }
     sp(&s, "}\n");
+    if (c->fail) { free(s.buf); free(c->body.buf); free(c); return info; }  // (a late failure: the multiview checks above)
     info->msl = s.buf;
     info->attr_mask = c->in_attr_mask;
     info->out_mask = stage == STAGE_FRAGMENT ? c->omap_target : c->out_attr_mask;

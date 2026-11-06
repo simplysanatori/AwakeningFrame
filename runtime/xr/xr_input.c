@@ -341,6 +341,59 @@ static void haptics(void) {
     }
 }
 
+// View + Menu (the overlay menu's chord: menu.mm, Back + Start) must not reach the game as Minus / Plus too: whichever
+// was pressed first used to (the game's map or pause menu opened under the overlay). A press of either is held back
+// for LARECOMP_XR_CHORD_MS (120) or until it is released: the other one joining in that time makes the chord, which goes
+// to the menus only (both, in one refresh) and keeps both from the game until both are up; otherwise the press goes to
+// the game (a release inside the window: a tap, replayed to the game as long as it was held, 60 ms at least). Once
+// one has gone to the game, the other joining later is no chord: it goes to the game too, the menus see only the first.
+// host: the buttons held now; *game: the game's, *menus: the menus' events.
+static void chord_filter(uint32_t host, uint64_t now, uint32_t *game, uint32_t *menus) {
+    static const uint32_t VM = 1u << SDL_GAMEPAD_BUTTON_BACK | 1u << SDL_GAMEPAD_BUTTON_START;
+    static uint32_t prev, pend, passed, first, replay;
+    static uint64_t pend_t0, window_ns, replay_end;
+    static bool chord;
+    if (!window_ns) {
+        const char *e = getenv("LARECOMP_XR_CHORD_MS");
+        window_ns = (uint64_t)((e ? atof(e) : 120.0) * 1e6);
+        if (!window_ns) window_ns = 1;
+    }
+    uint32_t r = host & VM, out = 0;
+    if (chord) {
+        if (!r) chord = false;
+        *game = host & ~VM, *menus = (host & ~VM) | r;
+        prev = r;
+        return;
+    }
+    if (r == VM && !passed) {  // the chord: the menus get both, the game neither
+        static unsigned n;
+        if (n++ < 20) LOG("[xr] View + Menu: the menu (%.0f ms apart; not passed to the game)\n", pend ? (now - pend_t0) / 1e6 : 0.0);
+        chord = true, pend = passed = replay = 0, prev = r;
+        *game = host & ~VM, *menus = host;
+        return;
+    }
+    uint32_t down = r & ~prev & ~passed;
+    if (down && !pend) pend_t0 = now;
+    pend |= down;
+    uint32_t tap = pend & ~r;  // (released inside the window)
+    pend &= ~tap;
+    if (tap) {
+        uint64_t held = now - pend_t0;
+        replay |= tap, replay_end = now + (held > 60000000 ? held : 60000000);
+    }
+    if (replay && now >= replay_end) replay = 0;
+    if (pend && now - pend_t0 >= window_ns) {
+        if (!passed) first = pend;
+        passed |= pend, pend = 0;
+    }
+    passed &= r;
+    if (!passed) first = 0;
+    out = passed | replay;
+    prev = r;
+    *game = (host & ~VM) | out;
+    *menus = (host & ~VM) | (out == VM && first ? first : out);
+}
+
 void xr_input_frame(void) {
     if (!S.attached) return;
     XrActiveActionSet as[2] = {{.actionSet = S.set, .subactionPath = XR_NULL_PATH}, {.actionSet = S.gaze_set, .subactionPath = XR_NULL_PATH}};
@@ -432,7 +485,12 @@ void xr_input_frame(void) {
             yaw * 57.29578f, lx, ly);
     }
     S.last_host = host, S.last_lx = lx, S.last_ly = ly;
-    input_xr_set(host, lx, ly);
+    uint32_t game, menus;
+    chord_filter(host, plat_now_ns(), &game, &menus);
+    static uint32_t last_game, last_menus;
+    if (S.log && (game != last_game || menus != last_menus)) LOG("[xr] input: to the game %#x, to the menus %#x\n", game, menus);
+    last_game = game, last_menus = menus;
+    input_xr_set2(game, menus, lx, ly);
     haptics();
 }
 

@@ -103,6 +103,7 @@ static void start(void) {
 }
 
 extern uint64_t kernel_current_thread_id(void);
+bool rq_running(void) { return atomic_load_explicit(&on, memory_order_acquire) > 0; }  // (rq_on without starting it)
 bool rq_on(void) {
     int v = atomic_load_explicit(&on, memory_order_acquire);
     if (__builtin_expect(v < 0, 0)) {

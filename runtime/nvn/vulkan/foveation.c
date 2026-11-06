@@ -353,7 +353,9 @@ static void slot_fill(FovMap *m, FovSlot *s, float cx, float cy, float hw, float
 }
 
 // VRS mode: the shading-rate map of eye `eye`'s w x h passes, brought up to date (one copy per submission at most)
-static const void *vrs_pass(int eye, uint32_t w, uint32_t h, float cx, float cy, float fw, float fh, uint32_t key) {
+// eye 2 (a multiview pass, both eyes): one map, each texel at the finer rate of the two eyes' (Turnip's shading-rate
+// attachments have one layer: layeredShadingRateAttachments is false); c[1] is eye 1's focus then
+static const void *vrs_pass(int eye, uint32_t w, uint32_t h, const float c[2][2], float fw, float fh, uint32_t key) {
     VrsMap *m = NULL;
     for (int i = 0; i < F.nvmaps && !m; i++)
         if (F.vmaps[i].eye == eye && F.vmaps[i].w == w && F.vmaps[i].h == h) m = &F.vmaps[i];
@@ -380,12 +382,27 @@ static const void *vrs_pass(int eye, uint32_t w, uint32_t h, float cx, float cy,
         for (uint32_t j = 0; j < m->mh; j++)
             for (uint32_t i = 0; i < m->mw; i++) {
                 float x = (i + 0.5f) * VRS_TEXEL, y = (j + 0.5f) * VRS_TEXEL, d[2];
-                float dx = (x - cx) / (fw * 0.5f), dy = (y - cy) / (fh * 0.5f);
                 if (x > fw + VRS_TEXEL || y > fh + VRS_TEXEL) d[0] = d[1] = 0.25f;
-                else density(sqrtf(dx * dx + dy * dy), d);
+                else {
+                    d[0] = d[1] = 0;
+                    for (int f = 0; f < (eye == 2 ? 2 : 1); f++) {
+                        float dx = (x - c[f][0]) / (fw * 0.5f), dy = (y - c[f][1]) / (fh * 0.5f), e[2];
+                        density(sqrtf(dx * dx + dy * dy), e);
+                        d[0] = fmaxf(d[0], e[0]), d[1] = fmaxf(d[1], e[1]);
+                    }
+                }
                 int lw = d[0] >= 1 ? 0 : d[0] >= 0.5f ? 1 : 2, lh = d[1] >= 1 ? 0 : d[1] >= 0.5f ? 1 : 2;
                 px[j * m->mw + i] = (uint8_t)(lw << 2 | lh);  // (log2 width << 2 | log2 height)
             }
+        if (F.log_passes) {
+            static int nl;
+            if (nl++ % 100 < 3) {
+                int hist[16] = {0};
+                for (uint32_t i = 0; i < m->mw * m->mh; i++) hist[px[i] & 15]++;
+                LOG("[fov] #%d eye %d map %ux%u: ramp %.2f foci (%.0f %.0f) (%.0f %.0f) filled %.0fx%.0f; texels 1x1 %d, 2x2 %d, 4x2 %d, 2x4 %d, 4x4 %d\n", nl, eye, w, h, F.ramp,
+                    c[0][0], c[0][1], eye == 2 ? c[1][0] : -1.f, eye == 2 ? c[1][1] : -1.f, fw, fh, hist[0], hist[5], hist[9], hist[6], hist[10]);
+            }
+        }
         VkCommandBuffer cb = vk_upload_cmd();
         VkImageMemoryBarrier2 b = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                                    .srcAccessMask = 0, .dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
@@ -413,7 +430,7 @@ static const void *vrs_pass(int eye, uint32_t w, uint32_t h, float cx, float cy,
 }
 
 const void *fov_pass(int eye, bool per_eye, uint32_t w, uint32_t h, float fx, float fy) {
-    if (!F.dev_ok || F.level == LV_OFF || eye < 0 || eye > 1) return NULL;
+    if (!F.dev_ok || F.level == LV_OFF || eye < 0 || eye > 2) return NULL;
     F.st_eye_passes++;
     uint32_t ew = 0, eh = 0;
     bool size_ok = stereo_eye_size(&ew, &eh) && w >= ew * F.min_scale && h >= eh * F.min_scale;
@@ -427,11 +444,20 @@ const void *fov_pass(int eye, bool per_eye, uint32_t w, uint32_t h, float fx, fl
     // the focus in this pass's pixels (rows from the top of the image; the filled part is its top-left fx x fy)
     if (fx <= 0 || fx > 1) fx = 1;
     if (fy <= 0 || fy > 1) fy = 1;
-    float fw = fx * w, fh = fy * h, nx = F.focus[eye][0], ny = F.focus[eye][1];
-    float cx = (nx * 0.5f + 0.5f) * fw, cy = (renderer_origin_lower_left() ? ny * 0.5f + 0.5f : 0.5f - ny * 0.5f) * fh;
-    uint32_t key = ((uint32_t)fminf(fmaxf(cx / 8 + 512, 0), 1023)) | ((uint32_t)fminf(fmaxf(cy / 8 + 512, 0), 1023) << 10) |
-                   ((uint32_t)(fx * 31) << 20) | ((uint32_t)(fy * 15) << 25) | ((uint32_t)(F.ramp * 7) << 29);
-    if (F.vrs) return vrs_pass(eye, w, h, cx, cy, fw, fh, key);
+    float fw = fx * w, fh = fy * h, c[2][2];
+    uint32_t key = 0;
+    for (int e = 0; e < (eye == 2 ? 2 : 1); e++) {  // (eye 2, multiview: both eyes' foci)
+        float nx = F.focus[eye == 2 ? e : eye][0], ny = F.focus[eye == 2 ? e : eye][1];
+        c[e][0] = (nx * 0.5f + 0.5f) * fw, c[e][1] = (renderer_origin_lower_left() ? ny * 0.5f + 0.5f : 0.5f - ny * 0.5f) * fh;
+        uint32_t k = ((uint32_t)fminf(fmaxf(c[e][0] / 8 + 512, 0), 1023)) | ((uint32_t)fminf(fmaxf(c[e][1] / 8 + 512, 0), 1023) << 10) |
+                     ((uint32_t)(fx * 31) << 20) | ((uint32_t)(fy * 15) << 25) | ((uint32_t)(F.ramp * 7) << 29);
+        // (eye 1's focus folded into eye 0's key below the ramp's bits: equal foci leave the key as eye 0's, and the
+        // ramp still changes it - k ^ k * c kept the same key through the ramp, so the map stayed at full rate)
+        key = e ? key ^ ((((k ^ key) & 0xFFFFFu) * 2654435761u) & 0x1FFFFFFFu) : k;
+    }
+    float cx = c[0][0], cy = c[0][1];
+    if (F.vrs) return vrs_pass(eye, w, h, (const float (*)[2])c, fw, fh, key);
+    if (eye == 2) return NULL;  // (density maps: none in multiview passes)
     FovMap *m = NULL;
     for (int i = 0; i < F.nmaps && !m; i++)
         if (F.maps[i].eye == eye && F.maps[i].w == w && F.maps[i].h == h) m = &F.maps[i];

@@ -761,8 +761,14 @@ static void create_device(void) {
         vkGetPhysicalDeviceProperties2(g_vk.phys, &pr);
         // the heap as driver memory (exec.c guest_heap_dmabuf) by default: RADV, and PanVK (Mali-G610, Mesa 27.0-devel,
         // issue #483: an 81-minute run without faults, the Field 15 -> 21 fps, ~85% fewer uploads). PanVK's device name
-        // is the GPU's ("Mali-G610 MC4"), hence the driver ID.
-        g_vk.heap_dmabuf_default = strstr(g_vk.props.deviceName, "RADV") != NULL || drv.driverID == VK_DRIVER_ID_MESA_PANVK;
+        // is the GPU's ("Mali-G610 MC4"), hence the driver ID. Turnip too (Steam Frame, Adreno 750, Mesa 26.3, Linux
+        // 7.2: placed map, cached coherent type; no soft tracking there, chunks by device address - exec.c): VR at
+        // 120 Hz, Mabe and the forest 30 -> 60 fps without dynamic resolution, uploads ~1.6 GB -> ~190 MB per 2 s.
+        g_vk.heap_dmabuf_default = strstr(g_vk.props.deviceName, "RADV") != NULL || drv.driverID == VK_DRIVER_ID_MESA_PANVK ||
+                                   drv.driverID == VK_DRIVER_ID_MESA_TURNIP;
+        // Turnip: the kernel's msm driver maps a page of the heap that faults in again counted from the start of the VMA
+        // it is in, not of the buffer (exec.c backend_guest_heap_prepare), so soft write tracking is never used over it
+        g_vk.heap_no_split = drv.driverID == VK_DRIVER_ID_MESA_TURNIP;
 #ifdef VK_EXT_graphics_pipeline_library
         if (gpl_ext)
             snprintf(gpl, sizeof gpl, "%s (fast linking %s, independent interpolation decoration %s)",
@@ -869,6 +875,14 @@ static void create_device(void) {
     if (xr_mode()) f12.shaderOutputViewportIndex = have12.shaderOutputViewportIndex, f12.shaderOutputLayer = have12.shaderOutputLayer;
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
                                             .storageBuffer16BitAccess = VK_TRUE, .pNext = &f12};
+    if (xr_mode() && vk_mv_on()) {  // (LARECOMP_MV: the stereo executor's multiview passes, docs/af/STEREO.md)
+        VkPhysicalDeviceVulkan11Features h11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+        VkPhysicalDeviceFeatures2 hf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &h11};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &hf);
+        f11.multiview = h11.multiview;
+        g_vk.multiview = h11.multiview;
+        LOG("[mv] multiview %s\n", h11.multiview ? "on" : "not supported: double execution");
+    }
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,
                                            .pNext = &f11};
     VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = fault ? (void *)&ff : (void *)&f11};
@@ -1452,7 +1466,8 @@ static bool direct_repeat;  // (render thread off) backend_represent's present
 // overlay alone (its "Preparing shaders" label) into the window, or in VR into the HUD / menu panel's image, cleared
 // transparent there (the eyes get the stub's colour). Nothing once the game presents or the render thread runs.
 void backend_boot_frame(void) {
-    if (g_last_presented || rq_on()) return;
+    extern bool rq_running(void);
+    if (g_last_presented || rq_running()) return;  // (not rq_on: that would start the render thread)
     static const float clear_flat[4] = {0.04f, 0.05f, 0.06f, 1}, clear_xr[4] = {0, 0, 0, 0};
     if (!vk_frame_begin(xr_mode() ? clear_xr : clear_flat)) {
         SDL_Delay(50);  // (VR: the session not running yet)

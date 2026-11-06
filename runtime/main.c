@@ -117,6 +117,8 @@ static void reboot_idle(void) {  // (main thread, while guest threads stop) keep
 static void teardown(void) {
     uint64_t t0 = plat_now_ns();
     kernel_stop_threads(reboot_idle);
+    extern void audio_stop_threads(void);
+    audio_stop_threads();  // (host threads reading guest memory: gone before backend_reset unmaps a driver memory heap)
     backend_clear_window();
     backend_reset();
     const ResetFn *start = __start_resets, *stop = __stop_resets;
