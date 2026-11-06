@@ -128,11 +128,33 @@ static bool eye_fn(const CamLatch *l, const float pivot[3], float V[2][16], floa
             p[10] = -(f + n) / (f - n), p[11] = -2 * f * n / (f - n);
         }
         p[14] = -1;
+        static int test = -1;  // (debug bisect) LARECOMP_STEREO_TEST=gamecam: the game's V and P; gameP: the game's P
+        if (test < 0) {
+            const char *t = getenv("LARECOMP_STEREO_TEST");
+            test = !t ? 0 : !strcmp(t, "gamecam") ? 1 : !strcmp(t, "gameP") ? 2 : !strcmp(t, "gamerot") ? 3 : !strcmp(t, "gamepos") ? 4 : 0;
+        }
+        if (test == 1) memcpy(v, l->ref.V, 64);
+        if (test == 3 || test == 4) {  // (the game's rotation with this eye's position / this rotation at the game's eye)
+            const float *gv = l->ref.V, *pos = test == 3 ? E : l->ref.eye;
+            if (test == 3) for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) v[r * 4 + c] = gv[r * 4 + c];
+            for (int r = 0; r < 3; r++) v[r * 4 + 3] = -(v[r * 4] * pos[0] + v[r * 4 + 1] * pos[1] + v[r * 4 + 2] * pos[2]);
+        }
+        if (test >= 1 && test <= 2) memcpy(p, l->ref.P, 64);
+        if (e == 1 && l->frame == g_logged_frame)
+            LOG("[stereo]   eye1 (%.2f %.2f %.2f) units\n", E[0], E[1], E[2]);
         if (e == 0 && l->frame >= g_logged_frame + 600) {
             g_logged_frame = l->frame;
             LOG("[stereo] f%llu pivot (%.2f %.2f %.2f) eye0 (%.2f %.2f %.2f) units; game eye (%.2f %.2f %.2f) near %.3g far %.3g\n",
                 (unsigned long long)l->frame, pivot[0], pivot[1], pivot[2], E[0], E[1], E[2], l->ref.eye[0], l->ref.eye[1], l->ref.eye[2],
                 l->near_, l->far_);
+            float c[4];
+            for (int i = 0; i < 4; i++) {
+                float vw[4];
+                for (int k = 0; k < 4; k++) vw[k] = v[k * 4 + 0] * pivot[0] + v[k * 4 + 1] * pivot[1] + v[k * 4 + 2] * pivot[2] + v[k * 4 + 3];
+                c[i] = p[i * 4 + 0] * vw[0] + p[i * 4 + 1] * vw[1] + p[i * 4 + 2] * vw[2] + p[i * 4 + 3] * vw[3];
+            }
+            LOG("[stereo]   game P00 %.3f P11 %.3f P02 %.3f P12 %.3f V up row (%.2f %.2f %.2f); eye0 fwd (%.2f %.2f %.2f); pivot -> ndc (%.3f %.3f %.3f)\n",
+                gp[0], gp[5], gp[2], gp[6], l->ref.V[4], l->ref.V[5], l->ref.V[6], -v[8], -v[9], -v[10], c[0] / c[3], c[1] / c[3], c[2] / c[3]);
         }
     }
     return true;

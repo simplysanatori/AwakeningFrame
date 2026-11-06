@@ -442,6 +442,11 @@ static bool eye_cams(void) {  // the latched frame's eye cameras (made once per 
         if (g_eye_identity) { g_eye_ok = true; return true; }
         float pv[3];
         cam_pivot(&g_latch.ref, g_link, g_link_ok, g_zone_ok, g_zlo, g_zhi, false, pv);
+        const CamRef *r = &g_latch.ref;
+        if (g_link_ok && r->fwd[1] < -0.2f) {  // the screen centre at Link's height (the floor is not at y 0 everywhere)
+            float t = (g_link[1] - r->eye[1]) / r->fwd[1];
+            if (t > 0) for (int i = 0; i < 3; i++) pv[i] = r->eye[i] + t * r->fwd[i];
+        }
         g_eye_ok = g_eye_fn(&g_latch, pv, g_eye_V, g_eye_P);
         for (int e = 0; g_eye_ok && e < 2; e++) {
             float vp[16];
@@ -461,7 +466,9 @@ static void stereo_build(const float *guest, float *out) {
     memcpy(out, n->V, 64), memcpy(out + 16, n->P, 64), memcpy(out + 32, n->VP, 64);
     float back[3] = {-n->fwd[0], -n->fwd[1], -n->fwd[2]};
     const float *ax[4] = {n->right, n->up, back, n->eye};
-    for (int g = 0; g < 8; g++) {
+    static int noaxis = -1;  // (debug) LARECOMP_STEREO_NOAXIS=1: floats 48-79 as the game has them
+    if (noaxis < 0) noaxis = getenv("LARECOMP_STEREO_NOAXIS") != NULL;
+    for (int g = 0; g < 8 && !noaxis; g++) {
         int a = g_latch.axis[g];
         if (!a) continue;
         int k = (a < 0 ? -a : a) - 1;

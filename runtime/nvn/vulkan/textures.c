@@ -530,7 +530,9 @@ static void twc_remove(NvnTexture *t) {
     for (int i = 0; i < g_nsw; i++) if (g_sw[i] == t) { g_sw[i] = g_sw[--g_nsw]; break; }
 }
 
+extern uint32_t vk_view_gen;
 int vk_stereo_swap(bool eye1) {
+    vk_view_gen++;  // (exec.c's texture-view memos and cached sets name eye 0's views: not valid across the switch)
     if (!eye1) {
         for (int i = 0; i < g_nsw; i++) {
             TexBackend *w = g_sw[i]->backend;
