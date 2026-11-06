@@ -33,6 +33,7 @@ static struct {  // (XR thread; the presenting thread's fields under g_xr.mu)
 } st;
 
 bool xr_active(void) { return g_xr.thread_on && g_xr.session; }
+bool xr_session_running(void) { return g_xr.running; }
 int64_t xr_target_display_time(void) { return atomic_load(&g_xr.target_time); }
 float xr_display_hz(void) { return g_xr.display_hz; }
 

@@ -335,6 +335,5 @@ void xr_session_destroy(void) {
 
 // The session ended (EXITING, or the runtime is going away): the app closes as when its window is closed.
 void xr_request_app_quit(void) {
-    SDL_Event e = {.type = SDL_EVENT_QUIT};
-    SDL_PushEvent(&e);
+    rt_request_quit("the XR session ended");
 }

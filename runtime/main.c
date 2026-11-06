@@ -12,6 +12,11 @@
 #include "hle.h"
 #include "kernel.h"
 #include "rando.h"
+#include <signal.h>
+#include <stdatomic.h>
+#ifdef LARECOMP_HAVE_XR
+#include "xr/xr.h"
+#endif
 
 #ifndef _WIN32
 #include <signal.h>
@@ -80,6 +85,39 @@ void rt_request_reboot(int kind) {
 }
 int rt_reboot_requested(void) { return g_reboot; }
 
+static _Atomic int g_quit;      // 1: a quit was asked for (the loops that watch SDL events also see the SDL_EVENT_QUIT pushed with it)
+static volatile int g_quit_sig;  // the signal that asked, for the log
+void rt_request_quit(const char *why) {
+    LOG("[quit] requested (%s)\n", why);
+    atomic_store(&g_quit, 1);
+    SDL_Event e = {.type = SDL_EVENT_QUIT};
+    SDL_PushEvent(&e);
+}
+bool rt_quit_requested(void) {
+    if (g_quit_sig && !atomic_load(&g_quit)) {  // (the handler only stores: logging and SDL are not async-signal-safe)
+        LOG("[quit] signal %d\n", (int)g_quit_sig);
+        atomic_store(&g_quit, 1);
+    }
+    return atomic_load(&g_quit) != 0;
+}
+// VR mode, XR session running: a window close SDL reports (gamescope closing or re-moding its window, a stray SIGTERM
+// SDL would turn into SDL_EVENT_QUIT) is not a quit; it is logged and ignored. Flat mode and every other state: false.
+bool rt_ignore_window_close(const char *what) {
+#ifdef LARECOMP_HAVE_XR
+    if (xr_wanted() && xr_session_running()) {
+        LOG("[quit] %s from the window ignored (VR session running) at %llu ms\n", what, (unsigned long long)SDL_GetTicks());
+        return true;
+    }
+#endif
+    (void)what;
+    return false;
+}
+static void quit_signal(int sig) { g_quit_sig = sig; }
+void rt_install_quit_signals(void) {
+    signal(SIGTERM, quit_signal);
+    signal(SIGINT, quit_signal);
+}
+
 // LARECOMP_REBOOT_AT=<frame>:<seed | vanilla | title>[,...] (test): at that presented frame, switch to the seed /
 // vanilla in place, or go back to the start screen (with LARECOMP_LAUNCHER_AUTOPLAY it plays the saved choice).
 // Frames count on across reboots. Called by the presenter every frame.
@@ -118,7 +156,7 @@ void backend_quit(void);              // quitting: the render thread stopped, th
 static void reboot_idle(void) {  // (main thread, while guest threads stop) keep the window alive
     SDL_Event e;
     while (SDL_PollEvent(&e))
-        if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); backend_quit(); exit(0); }
+        if (e.type == SDL_EVENT_QUIT && (rt_quit_requested() || !rt_ignore_window_close("SDL_EVENT_QUIT"))) { LOG("window closed\n"); backend_quit(); exit(0); }
 }
 
 static void teardown(void) {

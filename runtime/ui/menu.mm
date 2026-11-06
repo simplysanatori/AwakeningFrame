@@ -736,6 +736,7 @@ static void tab_audio(void) {
 // Quit: back to the start screen (in game: the game reboots to it) or out to the desktop. Each asks first (progress
 // since the last save is lost); B / Esc or Cancel backs out.
 extern "C" void rt_request_reboot(int kind);  // runtime/main.c (RT_REBOOT_TITLE = 2: the start screen)
+extern "C" void rt_request_quit(const char *why);  // runtime/main.c
 static void tab_quit(float scale, bool in_game) {
     static int ask;  // 0: the two choices; 1: start screen?; 2: desktop?
     if (ask && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
@@ -759,9 +760,7 @@ static void tab_quit(float scale, bool in_game) {
                 rt_request_reboot(2);
                 set_open(false);
             } else {
-                SDL_Event q = {};
-                q.type = SDL_EVENT_QUIT;
-                SDL_PushEvent(&q);
+                rt_request_quit("Quit to desktop");
             }
             ask = 0;
         }

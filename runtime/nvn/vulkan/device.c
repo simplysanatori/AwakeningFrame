@@ -2102,6 +2102,10 @@ void ui_window_init(void) {
     atexit(quick_exit_handler);
     settings_load();
     input_apply_background();  // controllers in the background: "Allow background inputs" (Controls tab)
+    if (xr_mode()) {  // (VR mode: SIGTERM / SIGINT are ours - SDL would turn them into SDL_EVENT_QUIT, which gamescope's window changes also make)
+        SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
+        rt_install_quit_signals();
+    }
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) FATAL("SDL_Init: %s\n", SDL_GetError());
     input_load_user_mappings();
     int win_w = 1280, win_h = 720;
@@ -2194,9 +2198,22 @@ int ui_run(void) {
     for (;;) {
         if (rt_reboot_requested()) return rt_reboot_requested();  // (runtime/main.c tears the game down)
         SDL_Event e;
+        static const char *test_close = NULL; static bool test_close_done;  // LARECOMP_TEST_WINDOW_CLOSE=<ms> (test): a window close, as gamescope's, at that time
+        if (!test_close_done && (test_close = getenv("LARECOMP_TEST_WINDOW_CLOSE")) && SDL_GetTicks() > (Uint64)atoll(test_close)) {
+            test_close_done = true;
+            SDL_Event w = {.type = SDL_EVENT_WINDOW_CLOSE_REQUESTED}, q = {.type = SDL_EVENT_QUIT};
+            SDL_PushEvent(&w);
+            SDL_PushEvent(&q);
+        }
+        if (rt_quit_requested()) {  // (SIGTERM / SIGINT: only a flag; the loop below also leaves on the SDL_EVENT_QUIT of the others)
+            SDL_Event q = {.type = SDL_EVENT_QUIT};
+            SDL_PushEvent(&q);
+        }
         while (SDL_WaitEventTimeout(&e, 16)) {
             input_rumble_poll();
-            if (e.type == SDL_EVENT_QUIT) {
+            if (e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && rt_ignore_window_close("SDL_EVENT_WINDOW_CLOSE_REQUESTED")) continue;
+            if (e.type == SDL_EVENT_QUIT && !rt_quit_requested() && rt_ignore_window_close("SDL_EVENT_QUIT")) continue;
+            if (e.type == SDL_EVENT_QUIT || rt_quit_requested()) {
                 input_rumble_stop();
                 input_led_stop();
                 LOG("window closed\n");

@@ -100,6 +100,7 @@ $(B)/rt/nvn/vulkan/device.o: RTFLAGS += -DLARECOMP_HAVE_XR
 $(B)/rt/nvn/vulkan/stereo.o: RTFLAGS += -DLARECOMP_HAVE_XR
 $(B)/rt/nvn/vulkan/foveation.o: RTFLAGS += -DLARECOMP_HAVE_XR
 $(B)/rt/hle/input.o: RTFLAGS += -DLARECOMP_HAVE_XR
+$(B)/rt/main.o: RTFLAGS += -DLARECOMP_HAVE_XR
 RT_HDRS  += $(wildcard runtime/xr/*.h)
 endif
 BACKEND_OBJ := $(patsubst runtime/%.cpp,$(B)/rt/%.o,$(patsubst runtime/%.c,$(B)/rt/%.o,$(BACKEND_SRC)))
