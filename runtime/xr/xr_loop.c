@@ -12,6 +12,7 @@
 #include "xr_input.h"
 #include "xr_pointer.h"
 #include "xr_internal.h"
+#include "hz_filter.h"
 #include "../nvn/vulkan/edge.h"
 
 void vi_external_vsync(uint64_t now_ns);  // runtime/hle/vi.c
@@ -266,7 +267,17 @@ static void *xr_thread(void *arg) {
                 atomic_store(&g_xr.xr_minus_plat, fs.predictedDisplayTime - ((int64_t)ts.tv_sec * 1000000000ll + ts.tv_nsec));
         }
         int64_t period = fs.predictedDisplayPeriod > 0 ? fs.predictedDisplayPeriod : 8333333;
-        if (!g_xr.display_hz || g_xr.display_hz * period < 0.99e9 || g_xr.display_hz * period > 1.01e9) g_xr.display_hz = 1e9f / (float)period;
+        {   // a new rate once it holds HZ_FILTER_FRAMES refreshes (hz_filter.h): one-frame blips don't flip the 30 fps hold
+            static HzFilter hzf;
+            static uint32_t blips_logged;
+            static uint64_t blip_log_ns;
+            if (hzf.hz != g_xr.display_hz) hzf.hz = g_xr.display_hz, hzf.run = 0;  // set by xr_session.c too (rate events)
+            if (hz_filter_step(&hzf, period)) g_xr.display_hz = hzf.hz;
+            if (hzf.rejected != blips_logged && now - blip_log_ns > 10000000000ull) {
+                LOG("[xr] display period blips ignored: %u (last %.2f ms)\n", hzf.rejected, hzf.last_blip / 1e6);
+                blips_logged = hzf.rejected, blip_log_ns = now;
+            }
+        }
         {   // below 100 Hz (90): the game held in its 30 fps mode (pace.c pace_xr_lock); 120 Hz: 60 as the pacer decides.
             // LARECOMP_XR_FPS=60 (a test): below 100 Hz the pacer decides too, with a 16.67 ms game frame
             static int locked = -1;
