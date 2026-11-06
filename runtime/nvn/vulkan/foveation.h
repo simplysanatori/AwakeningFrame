@@ -26,6 +26,8 @@ VkPipelineCreateFlags fov_pipeline_flags(void);
 // The pNext for those pipelines' VkPipelineRenderingCreateInfo (shading-rate mode: the attachment's rate replaces the
 // pipeline's), or NULL. Constant, safe from any thread.
 const void *fov_pipeline_chain(void);
+// (scene: Low Quality's draws past the table) the chain for 2x2 fragments combined with the foveation map; NULL: none
+const void *fov_pipeline_chain_coarse(void);
 // (stereo.c, at each latch of the eye views) the eyes' orientations (x y z w, app space) and fov angles (left, right,
 // up, down; radians) of latch `id`: the focus of each eye for the passes that follow.
 void fov_note_views(const float orient[2][4], const float fov[2][4], uint64_t id);

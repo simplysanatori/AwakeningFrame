@@ -108,6 +108,10 @@ extern "C" void vr_tab_draw(float scale) {
                    desc(VRO_EDGE, "What fills the space past the world. Fade softens the world into darkness around Link, "
                                   "Passthrough shows your room.")))
         changed(VRO_EDGE);
+    grey(VRO_SCENE);
+    if (opt_choice("Surroundings", &v.scene, g_vr_scene_names, VRS_N_SCENE, VRS_SCENE_OFF,
+                   desc(VRO_SCENE, "Shows the world around the table. Low Quality and Full run best at 90 Hz.")))
+        changed(VRO_SCENE);
 
     opt_section("Performance");
     grey(VRO_FOVEATION);

@@ -16,6 +16,7 @@ const char *const g_vr_refresh_names[VRS_N_REFRESH] = {"120 Hz (60 FPS)", "90 Hz
 const char *const g_vr_layout_names[VRS_N_LAYOUT] = {"Switch", "Comfort"};
 const char *const g_vr_follow_names[VRS_N_FOLLOW] = {"Smooth", "Room", "Fixed"};
 const char *const g_vr_edge_names[VRS_N_EDGE] = {"Off", "Fade", "Passthrough"};
+const char *const g_vr_scene_names[VRS_N_SCENE] = {"Off", "Low Quality", "Backdrop", "Full"};
 const char *const g_vr_fov_names[VRS_N_FOV] = {"Off", "Low", "Medium", "High"};
 const char *const g_vr_turn_names[VRS_N_TURN] = {"Smooth", "Snap"};
 const char *const g_vr_hand_names[VRS_N_HAND] = {"Right", "Left"};
@@ -26,6 +27,7 @@ static const char *const k_layout[] = {"switch", "comfort"};
 static const char *const k_turn[] = {"smooth", "snap"};
 static const char *const k_follow[] = {"smooth", "room", "fixed"};
 static const char *const k_edge[] = {"black", "fade", "passthrough"};
+static const char *const k_scene[] = {"off", "low", "backdrop", "full"};
 static const char *const k_fov[] = {"off", "low", "medium", "high"};
 static const char *const k_hand[] = {"right", "left"};
 
@@ -47,6 +49,7 @@ extern void xr_rig_set_tilt_deg(float deg) WEAK;          // table tilt: degrees
 extern void xr_rig_recentre(void) WEAK;                   // put the table in front of the player again (xr_rig.c)
 extern void xr_rig_set_turn_mode(int snap) WEAK;          // VRS_TURN_SNAP: 1, VRS_TURN_SMOOTH: 0 (xr_rig_settings.c)
 extern void edge_set_mode(int mode) WEAK;                 // VRS_EDGE_*: edge.c (the mode, read per eye)
+extern void vr_scene_set_mode(int mode) WEAK;             // VRS_SCENE_*: nvn/vr_cull.c (the culling box and ring draws, read per frame)
 extern void fov_set_level(int level) WEAK;                // VRS_FOV_*: foveation.c
 extern void diet_set_dynres(int on) WEAK;                 // the dynamic eye resolution (output_scale.c)
 extern void xr_input_set_layout(int comfort) WEAK;        // xr_input.c S.comfort (VRS_LAYOUT_COMFORT: 1)
@@ -82,6 +85,7 @@ bool vr_settings_parse(const char *key, const char *val) {
     else if (!strcmp(key, "edge_style")) VR.edge = pick(k_edge, VRS_N_EDGE, val, VRS_EDGE_OFF);
     else if (!strcmp(key, "edge_mode") || !strcmp(key, "edge") || !strcmp(key, "culling"))
         ;  // old keys (haze / sky edge choices, the Culling row): read and dropped, so what was saved with them does not carry over
+    else if (!strcmp(key, "surroundings")) VR.scene = pick(k_scene, VRS_N_SCENE, val, VRS_SCENE_OFF);
     else if (!strcmp(key, "foveation")) VR.foveation = pick(k_fov, VRS_N_FOV, val, VRS_FOV_HIGH);
     else if (!strcmp(key, "dynamic_resolution")) VR.dynres = atoi(val) != 0;
     else if (!strcmp(key, "panel_distance")) VR.hud_dist = clampf((float)atof(val), 0.8f, 4.0f);
@@ -97,6 +101,7 @@ void vr_settings_save(FILE *f) {
     fprintf(f, "vr_layout = %s\nvr_turn = %s\n", k_layout[VR.layout], k_turn[VR.turn]);
     fprintf(f, "vr_follow = %s\n", k_follow[VR.follow]);
     fprintf(f, "vr_edge_style = %s\n", k_edge[VR.edge]);
+    fprintf(f, "vr_surroundings = %s\n", k_scene[VR.scene]);
     fprintf(f, "vr_foveation = %s\n", k_fov[VR.foveation]);
     fprintf(f, "vr_dynamic_resolution = %d\n", VR.dynres);
     fprintf(f, "vr_panel_distance = %.2f\nvr_panel_width = %.2f\n", VR.hud_dist, VR.hud_width);
@@ -111,7 +116,7 @@ static const char *const k_env[VRO_COUNT] = {
     // (height, size and tilt: the rig's, vr_rig.ini; LARECOMP_VR_TABLE / _PITCH / _SCALE are its base and the player's values
     // come on top, so the environment does not grey these rows)
     [VRO_HEIGHT] = "", [VRO_DIST] = "", [VRO_SIZE] = "", [VRO_TILT] = "",
-    [VRO_RECENTRE] = "", [VRO_EDGE] = "LARECOMP_VR_EDGE", [VRO_FOVEATION] = "LARECOMP_VR_FOVEATION",
+    [VRO_RECENTRE] = "", [VRO_EDGE] = "LARECOMP_VR_EDGE", [VRO_SCENE] = "LARECOMP_VR_SCENE", [VRO_FOVEATION] = "LARECOMP_VR_FOVEATION",
     [VRO_DYNRES] = "LARECOMP_VR_DYNRES", [VRO_HUD_DIST] = "LARECOMP_XR_QUAD",
     [VRO_HUD_WIDTH] = "LARECOMP_XR_QUAD", [VRO_POINTER_HAND] = "LARECOMP_VR_POINTER_HAND"};
 
@@ -152,6 +157,7 @@ void vr_settings_apply_env(void) {
     if (!g_given[VRO_TURN] && VR.turn != VRS_TURN_SMOOTH) put("LARECOMP_VR_TURN", k_turn[VR.turn]);
     if (!g_given[VRO_FOLLOW] && VR.follow != VRS_FOLLOW_SMOOTH) put("LARECOMP_VR_FOLLOW", k_follow[VR.follow]);
     if (!g_given[VRO_EDGE] && VR.edge != VRS_EDGE_OFF) put("LARECOMP_VR_EDGE", k_edge[VR.edge]);
+    if (!g_given[VRO_SCENE] && VR.scene != VRS_SCENE_OFF) put("LARECOMP_VR_SCENE", k_scene[VR.scene]);
     if (!g_given[VRO_FOVEATION]) put("LARECOMP_VR_FOVEATION", k_fov[VR.foveation]);
     if (!g_given[VRO_DYNRES]) put("LARECOMP_VR_DYNRES", VR.dynres ? "1" : "0");
     if (!g_given[VRO_HUD_DIST] && (VR.hud_dist != 2.0f || VR.hud_width != 2.2f)) {
@@ -192,6 +198,7 @@ bool vr_opt_live(VrOpt o) {
     case VRO_TILT: return xr_rig_set_tilt_deg != NULL;
     case VRO_RECENTRE: return xr_rig_recentre != NULL;
     case VRO_EDGE: return edge_set_mode != NULL;
+    case VRO_SCENE: return vr_scene_set_mode != NULL;
     case VRO_FOVEATION: return fov_set_level != NULL;
     case VRO_DYNRES: return diet_set_dynres != NULL;
     case VRO_HUD_DIST: case VRO_HUD_WIDTH: return vrui_set_hud_quad != NULL;
@@ -212,6 +219,7 @@ void vr_settings_changed(VrOpt o) {
     case VRO_SIZE: if (xr_rig_set_size_pct) xr_rig_set_size_pct((float)VR.size_pct); break;
     case VRO_TILT: if (xr_rig_set_tilt_deg) xr_rig_set_tilt_deg((float)VR.tilt_deg); break;
     case VRO_EDGE: if (edge_set_mode) edge_set_mode(VR.edge); break;
+    case VRO_SCENE: if (vr_scene_set_mode) vr_scene_set_mode(VR.scene); break;
     case VRO_FOVEATION: if (fov_set_level) fov_set_level(VR.foveation); break;
     case VRO_DYNRES: if (diet_set_dynres) diet_set_dynres(VR.dynres); break;
     case VRO_HUD_DIST: case VRO_HUD_WIDTH: if (vrui_set_hud_quad) vrui_set_hud_quad(VR.hud_dist, VR.hud_width); break;
@@ -245,7 +253,7 @@ void vr_settings_test_tick(uint64_t frame) {
             continue;
         }
         static const struct { const char *k; VrOpt o; } map[] = {
-            {"edge_style", VRO_EDGE}, {"foveation", VRO_FOVEATION}, {"dynamic_resolution", VRO_DYNRES}, {"follow", VRO_FOLLOW},
+            {"edge_style", VRO_EDGE}, {"surroundings", VRO_SCENE}, {"foveation", VRO_FOVEATION}, {"dynamic_resolution", VRO_DYNRES}, {"follow", VRO_FOLLOW},
             {"layout", VRO_LAYOUT}, {"turn", VRO_TURN}, {"panel_distance", VRO_HUD_DIST}, {"panel_width", VRO_HUD_WIDTH},
             {"refresh", VRO_REFRESH}, {"fps", VRO_REFRESH}};
         for (size_t i = 0; i < sizeof map / sizeof *map; i++)

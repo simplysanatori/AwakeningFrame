@@ -22,12 +22,15 @@ static struct {
     float kx, kz, hlo, hhi, margin;
     float ex, ez, tmax;     // LARECOMP_VR_CULL_EXTENT (world half-extents about the table centre, 0 = off), _TMAX
     float ring, ring_cast;  // LARECOMP_VR_RING / _RING_CAST margins (0 = off)
+    float env_ex, env_ez, env_tmax, env_ring, rooms;  // (scene) the environment's values; the reach of Low / Full in rooms
+    bool given_ex, given_tmax, given_ring;
 } C;
 static struct { bool have; float quad[4][2], floor_y, hlo, hhi, shrink[4]; } g_rect;  // the latest fit's floor quadrilateral (vr_cull_rect)
 static _Atomic float g_aspect, g_fs;   // the fitted culling aspect (absolute) and fovy scale; 0 = none yet
 static _Atomic float g_fovy_orig = 0;  // the game's own fovy field (radians or degrees, as it is)
 static _Atomic float g_aspect_orig = 0;
 
+static void scene_apply(int m);
 static void init(void) {
     const char *e;
     C.init = 1;
@@ -53,6 +56,67 @@ static void init(void) {
     if ((e = getenv("LARECOMP_VR_RING_CAST"))) C.ring_cast = (float)atof(e);
     if (!(C.ring > 0)) C.ring = 0;
     if (!(C.ring_cast > 0)) C.ring_cast = 0;
+    C.env_ex = C.ex, C.env_ez = C.ez, C.env_tmax = C.tmax, C.env_ring = C.ring;
+    C.given_ex = getenv("LARECOMP_VR_CULL_EXTENT") != NULL, C.given_tmax = getenv("LARECOMP_VR_CULL_TMAX") != NULL;
+    C.given_ring = getenv("LARECOMP_VR_RING") != NULL;
+    // (scene) LARECOMP_VR_SCENE=off | low | backdrop | full, or a number of rooms (full with that reach); the VR tab's row
+    // sets it live through vr_scene_set_mode. LARECOMP_VR_SCENE_ROOMS=<n>: the reach of low / full (default 2).
+    C.rooms = 2.0f;
+    if ((e = getenv("LARECOMP_VR_SCENE_ROOMS")) && atof(e) > 0) C.rooms = fminf((float)atof(e), 3.0f);
+    int m = VR_SCENE_OFF;
+    if ((e = getenv("LARECOMP_VR_SCENE"))) {
+        if (!strcmp(e, "low")) m = VR_SCENE_LOW;
+        else if (!strcmp(e, "backdrop")) m = VR_SCENE_BACKDROP;
+        else if (!strcmp(e, "full")) m = VR_SCENE_FULL;
+        else if (atof(e) > 0) m = VR_SCENE_FULL, C.rooms = fminf((float)atof(e), 3.0f);
+    }
+    scene_apply(m);
+}
+
+// ---- (scene) drawing the overworld past the table (docs/af/SCENE.md). The game keeps the 7 x 7 rooms around Link's room
+// resident, so a reach of up to 3 rooms needs nothing loaded: Low and Full widen the culling to the EXTENT box of (rooms +
+// 0.5) rooms about the table centre (rooms are 15 x 12 units), clipped as always by both eyes' frusta and their margin, with
+// the widest tangent raised to 20 (the box reaches under and behind the game camera, whose frustum can't pass 90 degrees:
+// tan 4 left the south rows out) and ring draws (margin 4) so the extra rooms stay out of the shadow and depth pre-passes.
+// The values the environment gives (LARECOMP_VR_CULL_EXTENT / _TMAX / LARECOMP_VR_RING) win in every mode.
+// Read live: the fit (render thread) and the ring routing (executor) take them per frame.
+static _Atomic int g_scene = VR_SCENE_OFF;
+static _Atomic float g_ex, g_ez, g_tmax, g_ring;
+static void scene_params(bool wide) {  // the box, tangent cap and ring margin: wide (Low, Full, Backdrop capturing) or not
+    float r = C.rooms;
+    atomic_store(&g_ex, C.given_ex || !wide ? C.env_ex : 15.0f * (r + 0.5f));
+    atomic_store(&g_ez, C.given_ex || !wide ? C.env_ez : 12.0f * (r + 0.5f));
+    atomic_store(&g_tmax, C.given_tmax || !wide ? C.env_tmax : 20.0f);
+    atomic_store(&g_ring, C.given_ring || !wide ? C.env_ring : 4.0f);
+}
+static void scene_apply(int m) {
+    scene_params(m == VR_SCENE_LOW || m == VR_SCENE_FULL);  // (Backdrop: narrow until scene.c asks for a capture)
+    atomic_store(&g_scene, m);
+}
+void vr_scene_set_mode(int m) {
+    if (!C.init) init();
+    if (m < 0 || m >= VR_SCENE_N || m == atomic_load(&g_scene)) return;
+    static const char *const nm[VR_SCENE_N] = {"off", "low", "backdrop", "full"};
+    LOG("[scene] mode %s (VR settings; was %s)\n", nm[m], nm[atomic_load(&g_scene)]);
+    scene_apply(m);
+}
+// (scene.c, Backdrop) the frames it captures the surroundings from are culled and drawn as Full
+void vr_scene_backdrop_wide(bool on) {
+    if (!C.init) init();
+    if (atomic_load(&g_scene) == VR_SCENE_BACKDROP) scene_params(on);
+}
+int vr_scene_mode(void) {
+    if (!C.init) init();
+    return atomic_load(&g_scene);
+}
+// the reach's smaller half-extent in game units, 0 when off (the edge fade's clear radius follows it): the box Low, Full and
+// Backdrop draw (Backdrop between its captures too), else LARECOMP_VR_CULL_EXTENT's
+float vr_cull_scene_reach(void) {
+    if (!C.init) init();
+    float r = C.rooms;
+    if (atomic_load(&g_scene) != VR_SCENE_OFF && !C.given_ex) return fminf(15.0f * (r + 0.5f), 12.0f * (r + 0.5f));
+    float ex = atomic_load(&g_ex), ez = atomic_load(&g_ez);
+    return ex > 0 && ez > 0 ? fminf(ex, ez) : 0.0f;
 }
 
 // the table fit's footprint as a world-axis box (x, z), before the EXTENT override: written by vr_cull_fit (the render
@@ -60,8 +124,13 @@ static void init(void) {
 static _Atomic unsigned g_core_seq;
 static _Atomic float g_core[4];  // lo x, lo z, hi x, hi z
 static _Atomic int g_core_ok;
-static void core_set(const float corner[4][3], bool ok) {
+static _Atomic float g_ext[4];  // (lane scene) the EXTENT box about the anchor (lo x, lo z, hi x, hi z); unset when EXTENT is off
+static void core_set(const float corner[4][3], bool ok, const float anchor[3]) {
     atomic_fetch_add(&g_core_seq, 1);
+    float ex = atomic_load(&g_ex), ez = atomic_load(&g_ez);
+    if (ok && anchor && ex > 0 && ez > 0)
+        atomic_store(&g_ext[0], anchor[0] - ex), atomic_store(&g_ext[1], anchor[2] - ez),
+        atomic_store(&g_ext[2], anchor[0] + ex), atomic_store(&g_ext[3], anchor[2] + ez);
     if (ok) {
         float lx = corner[0][0], hx = lx, lz = corner[0][2], hz = lz;
         for (int c = 1; c < 4; c++)
@@ -72,38 +141,45 @@ static void core_set(const float corner[4][3], bool ok) {
     atomic_fetch_add(&g_core_seq, 1);
 }
 
-bool vr_cull_core_box(float lo[3], float hi[3]) {
+static bool core_box(float lo[3], float hi[3], float elo[2], float ehi[2]) {
     for (int tries = 0; tries < 8; tries++) {
         unsigned s0 = atomic_load(&g_core_seq);
         if (s0 & 1) continue;
         int ok = atomic_load(&g_core_ok);
-        float b[4];
-        for (int i = 0; i < 4; i++) b[i] = atomic_load(&g_core[i]);
+        float b[4], x[4];
+        for (int i = 0; i < 4; i++) b[i] = atomic_load(&g_core[i]), x[i] = atomic_load(&g_ext[i]);
         if (atomic_load(&g_core_seq) != s0) continue;
         if (!ok) return false;
         lo[0] = b[0], lo[1] = -1e30f, lo[2] = b[1], hi[0] = b[2], hi[1] = 1e30f, hi[2] = b[3];
+        if (elo) elo[0] = x[0], elo[1] = x[1], ehi[0] = x[2], ehi[1] = x[3];
         return true;
     }
     return false;
 }
+bool vr_cull_core_box(float lo[3], float hi[3]) { return core_box(lo, hi, NULL, NULL); }
 
 bool vr_ring_on(void) {
     if (!C.init) init();
-    return C.ring > 0;
+    return atomic_load(&g_ring) > 0;
 }
 
 int vr_ring_class(const float blo[3], const float bhi[3], uint64_t frame) {
     if (!C.init) init();
     // one footprint per frame (the executor's thread only): a refit between a frame's depth pre-pass and its colour
     // pass must not turn a draw the pre-pass left out into one that tests EQUAL against it
-    static float lo[3], hi[3];
+    static float lo[3], hi[3], elo[2], ehi[2];
     static bool ok;
-    static uint64_t at = ~0ull;
-    if (frame != at) at = frame, ok = vr_cull_core_box(lo, hi);
-    if (!(C.ring > 0) || !ok) return 0;
-    float m = C.ring, c = C.ring_cast;  // (the draw's box against the footprint grown by the margin, in x and z)
+    static uint64_t at = ~0ull, at_m = ~0ull;
+    if (frame != at) at = frame, ok = core_box(lo, hi, elo, ehi);
+    static float m, ex, ez;  // (the frame's margin and box: the same for all of its draws)
+    if (frame != at_m) at_m = frame, m = atomic_load(&g_ring), ex = atomic_load(&g_ex), ez = atomic_load(&g_ez);
+    if (!(m > 0) || !ok) return 0;
+    float c = C.ring_cast;  // (the draw's box against the footprint grown by the margin, in x and z)
     if (bhi[0] >= lo[0] - m && blo[0] <= hi[0] + m && bhi[2] >= lo[2] - m && blo[2] <= hi[2] + m) return 0;
     if (c > 0 && bhi[0] >= lo[0] - c && blo[0] <= hi[0] + c && bhi[2] >= lo[2] - c && blo[2] <= hi[2] + c) return 2;
+    // (lane scene) the game culls with a frustum from its own camera, so a box that reaches behind that camera opens the
+    // frustum to tan 20 and every resident room in front of it comes through: past the EXTENT box, draw nothing
+    if (ex > 0 && ez > 0 && !(bhi[0] >= elo[0] && blo[0] <= ehi[0] && bhi[2] >= elo[1] && blo[2] <= ehi[1])) return 3;
     return 1;
 }
 
@@ -177,7 +253,7 @@ void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3],
     float wide_a = 3.2f, wide_fs = 1.5f;
     if (fabsf(g->fwd[1]) < 0.26f) {  // side view (or a level look): no floor rectangle; the old fixed widening
         atomic_store(&g_aspect, wide_a), atomic_store(&g_fs, wide_fs);
-        core_set(NULL, false);  // (no footprint: every draw is core)
+        core_set(NULL, false, NULL);  // (no footprint: every draw is core)
         g_rect.have = false;
         return;
     }
@@ -200,9 +276,10 @@ void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3],
         rx *= C.kx, rz *= C.kz;
         corner[c][0] = anchor[0] + rx * hr[0] + rz * hf[0], corner[c][1] = anchor[1], corner[c][2] = anchor[2] + rx * hr[2] + rz * hf[2];
     }
-    core_set(corner, true);  // (ring draws: the table fit's footprint, before the EXTENT box replaces it)
-    for (int c = 0; c < 4 && C.ex > 0 && C.ez > 0; c++)  // (the world box)
-        corner[c][0] = anchor[0] + (c & 1 ? 1.0f : -1.0f) * C.ex, corner[c][2] = anchor[2] + (c & 2 ? 1.0f : -1.0f) * C.ez;
+    core_set(corner, true, anchor);  // (ring draws: the table fit's footprint, before the EXTENT box replaces it)
+    float ex = atomic_load(&g_ex), ez = atomic_load(&g_ez);
+    for (int c = 0; c < 4 && ex > 0 && ez > 0; c++)  // (the world box)
+        corner[c][0] = anchor[0] + (c & 1 ? 1.0f : -1.0f) * ex, corner[c][2] = anchor[2] + (c & 2 ? 1.0f : -1.0f) * ez;
     {   // the floor quadrilateral, counter-clockwise seen from above in (x, z) (the edge pass fades to it)
         static const int rg[4] = {0, 1, 3, 2};
         float q[4][2], area = 0;
@@ -245,7 +322,7 @@ void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3],
             }
         }
     }
-    const float TMAX = C.tmax;  // (4: 76 degrees)
+    const float TMAX = atomic_load(&g_tmax);  // (4: 76 degrees; 20 with the scene's box)
     if (behind) tx = ty = TMAX;
     if (!npts) tx = tx0 * C.kx, ty = ty0 * C.kz;  // (the eyes see none of the table: keep about the table)
     tx = fminf(tx * 1.05f, TMAX), ty = fminf(ty * 1.05f, TMAX);
