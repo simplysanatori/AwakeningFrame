@@ -6614,7 +6614,7 @@ static void draw_(CmdRec *r, bool indexed);
 // (stereo) the scene's composite into the window image goes to the eye output instead (per eye: it is twinned); the
 // window image keeps the HUD, cleared transparent at the composite (eye 0). st.rt is restored after the draw.
 static NvnTexture g_eye_out;
-static bool g_eye_out_ok, st_redirected;
+static bool g_eye_out_ok, st_redirected, st_hud_alpha;
 static RtState st_rt_saved;
 static uint64_t g_eye_out_frame[2];  // renderer_exec_frame() of each eye's latest composite (+1; 0 none)
 static void stereo_composite(void) {
@@ -6636,6 +6636,7 @@ static void stereo_composite(void) {
         VkImageSubresourceRange rg = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         rec_CmdClearColorImage(cb, wb->image, VK_IMAGE_LAYOUT_GENERAL, &z, 1, &rg);
         vk_full_barrier(cb);
+        st_hud_alpha = true;
     }
     st_rt_saved = st.rt;
     st_redirected = true;
@@ -8187,8 +8188,8 @@ void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, floa
     float fx = b->scalable && b->ax > 0 ? b->sx / b->ax : 1, fy = b->scalable && b->ay > 0 ? b->sy / b->ay : 1;
     bool upscaled = false, rcas_done = true;
     bool whole = pv[4] == 0 && pv[5] == 0 && pv[6] == 1 && pv[7] == 1;  // (no crop: the upscaled image lands 1:1)
-    VkImageView src = post_process(cb, b, fx, fy, pv[6] > 0 ? vw / pv[6] : vw, pv[7] > 0 ? vh / pv[7] : vh, &upscaled, whole,
-                                   &rcas_done);
+    VkImageView src = st_hud_alpha ? raw_view(b)  // (stereo's HUD: no SMAA / FSR, which drop the alpha)
+                    : post_process(cb, b, fx, fy, pv[6] > 0 ? vw / pv[6] : vw, pv[7] > 0 ? vh / pv[7] : vh, &upscaled, whole, &rcas_done);
     float pvc[8];
     memcpy(pvc, pv, sizeof pvc);
     if (!upscaled) { pvc[4] *= fx; pvc[5] *= fy; pvc[6] *= fx; pvc[7] *= fy; }
@@ -8208,6 +8209,8 @@ void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, floa
     float pc[12];
     memcpy(pc, pv, 32);
     screen_filter_params(pc + 8);
+    pc[11] = st_hud_alpha ? 1.0f : 0.0f;  // (stereo: this frame's window image is the HUD over a transparent clear)
+    st_hud_alpha = false;
     rec_CmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, pc);
     fullscreen_vertex_bind(cb);
     rec_CmdDraw(cb, 3, 1, 0, 0);

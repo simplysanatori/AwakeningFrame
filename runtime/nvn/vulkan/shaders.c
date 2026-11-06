@@ -298,9 +298,10 @@ static const char *builtin_src(const char *name, int *stage) {
                "layout(location = 0) in vec2 uv;\n"
                "layout(location = 0) out vec4 o;\n"
                "void main() {\n"
-               "  vec3 c = texture(t, uv).rgb;\n"
+               "  vec4 s = texture(t, uv);\n"
+               "  vec3 c = s.rgb;\n"
                SCREEN_FILTER_SRC("vec3")
-               "  o = vec4(c, 1.0);\n"
+               "  o = vec4(c, pf.w > 0.5 ? s.a : 1.0);\n"  // (pf.w: the VR mode's HUD keeps its alpha: exec.c vk_present_draw)
                "}\n";
     }
     // ---- decoded video, NV12 -> RGBA (exec.c vk_convert_nv12): limited range BT.601, as swscale did (the movies

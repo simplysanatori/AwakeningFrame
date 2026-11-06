@@ -163,6 +163,7 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
         const XrChain *hc = &g_xr.hud[s->pair];
         float w = g_xr.quad_width, h = w * (float)hc->h / (float)hc->w;
         quad.space = g_xr.app;
+        quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;  // (the stereo executor's HUD is transparent around the layout)
         quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
         quad.subImage = (XrSwapchainSubImage){hc->sc, {{0, 0}, {(int32_t)hc->w, (int32_t)hc->h}}, 0};
         quad.pose = (XrPosef){.orientation = {0, 0, 0, 1}, .position = {0, 0, -g_xr.quad_dist}};
