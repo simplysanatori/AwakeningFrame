@@ -2093,10 +2093,6 @@ static VkPipelineLayout make_layout(Prog *p, int nsets, VkShaderStageFlags s0, V
     uint32_t npcr = 0;
     if (!direct && p->vi && p->vi->npush) pcr[npcr++] = (VkPushConstantRange){VK_SHADER_STAGE_VERTEX_BIT, 0, p->vi->npush * 4u};
     if (!direct && p->fi && p->fi->npush) pcr[npcr++] = (VkPushConstantRange){VK_SHADER_STAGE_FRAGMENT_BIT, p->fi->push_base, p->fi->npush * 4u};
-#ifdef MV_PUSH_BYTES  // (first translator interface: the per-view cbuf masks as push constants, no promoted words)
-    if (p->vkey.mv && !direct)
-        npcr = 1, pcr[0] = (VkPushConstantRange){VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, MV_PUSH_BYTES};
-#endif
     VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = (uint32_t)nsets,
                                      .pSetLayouts = p->set_layout, .pushConstantRangeCount = direct ? 1 : npcr,
                                      .pPushConstantRanges = direct ? &gd : npcr ? pcr : NULL};
@@ -2263,6 +2259,7 @@ static uint64_t prog_content_key(uint64_t vh, uint64_t fh, const ShaderKey *vkey
     b = (const uint8_t *)vkey;
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
+    if (fkey->mv) { h ^= 0x100u | fkey->mv; h *= 0x100000001B3ull; }  // (multiview: the fragment stage's own mask; none: as before)
     return h;
 }
 
@@ -2288,10 +2285,10 @@ static bool key_memo_on(void) {
 
 static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey);
 static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
-    static struct { uint64_t code[2]; ShaderKey vkey; uint8_t rt[8]; uint32_t gen; Prog *prog; } m;
+    static struct { uint64_t code[2]; ShaderKey vkey; uint8_t rt[8], fmv; uint32_t gen; Prog *prog; } m;
     bool on = key_memo_on();
     if (on && m.prog && m.gen == key_gen && (np->stage_mask & 3) == 3 && m.code[0] == np->stages[0].code_addr &&
-        m.code[1] == np->stages[1].code_addr && !memcmp(&m.vkey, vkey, sizeof *vkey) && !memcmp(m.rt, fkey->rt_kind, 8)) {
+        m.code[1] == np->stages[1].code_addr && !memcmp(&m.vkey, vkey, sizeof *vkey) && !memcmp(m.rt, fkey->rt_kind, 8) && m.fmv == fkey->mv) {
         prof_prog_memo++;
         prog_fp_check(m.prog, np);  // (as a table hit)
         return m.prog;
@@ -2299,7 +2296,7 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     Prog *p = get_program_(np, vkey, fkey);
     if (on && p) {
         m.code[0] = np->stages[0].code_addr; m.code[1] = np->stages[1].code_addr;
-        m.vkey = *vkey; memcpy(m.rt, fkey->rt_kind, 8); m.gen = key_gen; m.prog = p;
+        m.vkey = *vkey; memcpy(m.rt, fkey->rt_kind, 8); m.fmv = fkey->mv; m.gen = key_gen; m.prog = p;
     }
     return p;
 }
@@ -2311,6 +2308,7 @@ static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     const uint8_t *vb = (const uint8_t *)vkey;
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= vb[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
+    if (fkey->mv) { h ^= 0x100u | fkey->mv; h *= 0x100000001B3ull; }  // (multiview: the fragment stage's own mask)
     if (!h) h = 1;
     uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
     while (prog_tab[slot].key && prog_tab[slot].key != h) slot = (slot + 1) & (PROG_TAB - 1);
@@ -2743,7 +2741,7 @@ static void build_pipeline(void *arg) {
         uint64_t fa = k->prog->code[1];
         uint64_t fh = k->prog->fs_rt_hash ? k->prog->fs_rt_hash : fa ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(fa + 0x30), 0x200) : 0;
         snprintf(g_stats_label, sizeof g_stats_label, "vs %llx fs %llx fsh %016llx%s%s", (unsigned long long)k->prog->code[0],
-                 (unsigned long long)fa, (unsigned long long)fh, k->view_mask ? " multiview" : "", k->prog->vkey.mv ? " mv-program" : "");
+                 (unsigned long long)fa, (unsigned long long)fh, k->view_mask ? " multiview" : "", k->prog->vkey.mv || k->prog->fkey.mv || k->prog->fkey.tex_amask[0] || k->prog->fkey.tex_amask[1] || k->prog->fkey.tex_amask[2] ? " mv-program" : "");
     }
     VkResult r = vk_create_graphics_pipeline(&c.pi, &pp->pipe);
     SLOW_FEEDBACK_HIT();
@@ -6298,7 +6296,7 @@ bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlo
     vkey.flip_x = fkey.flip_x = (r->flags & SR_FLIP_X) != 0;
     if (r->flags & SR_MVP) {  // (a multiview program, mv_program)
         if (!g_vk.multiview) return false;
-        vkey.mv = fkey.mv = 1;
+        vkey.mv = r->mv_cb[0], fkey.mv = r->mv_cb[1];
         for (int b = 0; b < 3; b++) vkey.tex_amask[b] = fkey.tex_amask[b] = (uint8_t)(r->mv_amask >> (b * 8));
     }
     if ((r->flags & SR_MV) && !g_vk.multiview) return false;
@@ -6547,6 +6545,7 @@ static void rec_from_state(ShaderRec *r, bool flip_x, uint32_t mode) {
     r->flags = (nvn_window_origin() == 0 ? SR_FLIP_Y : 0) | (nvn_depth_mode() == 0 ? SR_DEPTH_MINUS_ONE : 0) | (flip_x ? SR_FLIP_X : 0) |
                (pass_view_mask ? SR_MV : 0) | (g_mvp ? SR_MVP : 0);
     r->mv_amask = g_mvp ? g_tex_amask : 0;
+    r->mv_cb[0] = g_mvp ? (uint8_t)(g_mv_bits[0] >> 3) : 0, r->mv_cb[1] = g_mvp ? (uint8_t)(g_mv_bits[1] >> 3) : 0;
     r->nattrib = (uint8_t)(st.nattrib < 16 ? st.nattrib : 16);
     memcpy(r->attrib, st.attrib, sizeof r->attrib[0] * r->nattrib);
     r->nstream = (uint8_t)(st.nstream < 16 ? st.nstream : 16);
@@ -7257,22 +7256,16 @@ static Prog *mv_program(Prog *pr, const ShaderKey *vkey, const ShaderKey *fkey) 
                     if (mvs.bad_cb++ < 8) LOG("[mv] camera block cbuf %d (stage %d, %llu bytes) can't take a second eye's copy\n", k, sg, (unsigned long long)size);
                     continue;
                 }
-#ifndef MV_PUSH_BYTES
                 if (k > 10) {  // (ShaderKey.mv: a mask of cbufs 3-10)
                     if (mvs.bad_cb++ < 8) LOG("[mv] camera block cbuf %d (stage %d) is past the multiview key's mask: eye 0's in both\n", k, sg);
                     continue;
                 }
-#endif
                 bits[sg] |= 1u << k;
             }
         }
     if (!amask && !bits[0] && !bits[1]) { mvs.baseprog++; return pr; }
     ShaderKey vk2 = *vkey, fk2 = *fkey;
-#ifdef MV_PUSH_BYTES
-    vk2.mv = fk2.mv = 1;
-#else  // (the stage's per-eye cbufs, known when the program is made: their reads keep constant indices)
-    vk2.mv = (uint8_t)(bits[0] >> 3), fk2.mv = (uint8_t)(bits[1] >> 3);
-#endif
+    vk2.mv = (uint8_t)(bits[0] >> 3), fk2.mv = (uint8_t)(bits[1] >> 3);  // (the stage's per-eye cbufs: constant-index reads)
     for (int b = 0; b < 3; b++) vk2.tex_amask[b] = fk2.tex_amask[b] = (uint8_t)(amask >> (b * 8));
     Prog *mp = get_program(st.program, &vk2, &fk2);
     int ps = mp ? atomic_load(&mp->state) : 2;
@@ -7794,10 +7787,6 @@ static void draw_(CmdRec *r, bool indexed) {
         rec_CmdPushConstants(cb, pr->layout, sg ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT, si->push_base,
                              si->npush * 4u, pw);
     }
-#ifdef MV_PUSH_BYTES
-    if (g_mvp)  // (multiview program: which cbufs have both eyes' copies)
-        rec_CmdPushConstants(cb, pr->layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, MV_PUSH_BYTES, g_mv_bits);
-#endif
     if (gc_shift && (pr->vi->uses_gmem || pr->fi->uses_gmem))
         gmem_chunk_bind(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, GMEM_CHUNK_SET(STAGE_FRAGMENT),
                         (pr->vi->uses_gmem ? 1u << STAGE_VERTEX : 0) | (pr->fi->uses_gmem ? 1u << STAGE_FRAGMENT : 0));
