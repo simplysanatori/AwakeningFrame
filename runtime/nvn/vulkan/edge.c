@@ -107,11 +107,33 @@ static void cfg_init(void) {
         cfg.fog_start, cfg.fog_end, cfg.soft, cfg.strength, cfg.desat, cfg.bright, cfg.fixed_colours ? ", colours fixed" : "");
 }
 
+// The mode is read by three threads (the present: stereo_eye_post / edge_eye; the XR thread: edge_passthrough_wanted)
+// and changed by the VR tab (edge_set_mode): atomic. The passes' pipelines are one shader for every mode (the mode is a
+// uniform) and made at the first treated eye, so a switch only changes what the next eye is drawn with.
+static int g_mode = -1;
 EdgeMode edge_mode(void) {
     if (!cfg.init) cfg_init();
-    return cfg.mode;
+    int m = __atomic_load_n(&g_mode, __ATOMIC_ACQUIRE);
+    if (m < 0) {
+        int want = -1;
+        __atomic_compare_exchange_n(&g_mode, &want, (int)cfg.mode, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        m = __atomic_load_n(&g_mode, __ATOMIC_ACQUIRE);
+    }
+    return (EdgeMode)m;
 }
 bool edge_passthrough_wanted(void) { return edge_mode() == EDGE_PASSTHROUGH; }
+
+// The VR tab's Table Edge (runtime/vr_settings.c; VRS_EDGE_OFF / FADE / PASSTHROUGH = black, fade, passthrough).
+static _Atomic bool g_mode_changed;
+void edge_set_mode(int vrs) {
+    static const EdgeMode k[3] = {EDGE_BLACK, EDGE_FADE, EDGE_PASSTHROUGH};
+    if (vrs < 0 || vrs > 2) return;
+    EdgeMode old = edge_mode();
+    if (old == k[vrs]) return;
+    __atomic_store_n(&g_mode, (int)k[vrs], __ATOMIC_RELEASE), g_mode_changed = true;
+    LOG("[edge] mode %s (VR settings; was %s)\n", vrs == 0 ? "black" : vrs == 1 ? "fade" : "passthrough",
+        old == EDGE_BLACK ? "black" : old == EDGE_FADE ? "fade" : old == EDGE_PASSTHROUGH ? "passthrough" : old == EDGE_FOG ? "fog" : "gradient");
+}
 
 // ------------------------------------------------------------------------------------------------ shaders
 // One descriptor set for every pass: 0 the frame's values, 1 depth, 2 colour, 3 mask, 4 backdrop colours.
@@ -521,13 +543,13 @@ static struct {
 void stereo_eye_post(const StereoEyePost *e) {
     if (e->eye < 0 || e->eye > 1) return;
     if (!cfg.init) cfg_init();
-    if (cfg.mode == EDGE_BLACK) return;
+    // (noted in every mode, black too: a switch from the VR tab then finds the current images, never stale ones)
     __typeof__(noted[0]) *n = &noted[e->eye];
     n->have = e->depth && e->have_matrices;
     n->color = e->color, n->depth = e->depth, n->ax = e->ax, n->ay = e->ay, n->zn = e->zn, n->zf = e->zf;
     memcpy(n->V, e->V, 64), memcpy(n->P, e->P, 64);
     static bool said;
-    if (!said && (!e->depth || !e->have_matrices)) LOG("[edge] eye %d: no %s noted: the edge pass waits for it\n", e->eye, e->depth ? "matrices" : "depth"), said = true;
+    if (!said && edge_mode() != EDGE_BLACK && (!e->depth || !e->have_matrices)) LOG("[edge] eye %d: no %s noted: the edge pass waits for it\n", e->eye, e->depth ? "matrices" : "depth"), said = true;
 }
 
 typedef struct {
@@ -540,16 +562,17 @@ typedef struct {
 extern uint32_t nvn_depth_mode(void);
 bool renderer_origin_lower_left(void);
 
+static bool g_tint_restart;
 bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uint32_t w, uint32_t h) {
-    if (!cfg.init) cfg_init();
-    if (cfg.mode == EDGE_BLACK || eye < 0 || eye > 1 || !noted[eye].have) return false;
+    EdgeMode mode = edge_mode();
+    if (g_mode_changed) g_mode_changed = false, g_tint_restart = true;  // (a switch: the backdrop colours start from the scene again)
+    if (mode == EDGE_BLACK || eye < 0 || eye > 1 || !noted[eye].have) return false;
+    // outdoors only: an interior or a dungeon (or the title) keeps its dark void and the game's own glow, drawn by the present as before
     extern int game_level_overworld(void);  // (widescreen.c) 1 the overworld, 0 another level, -1 not in play
     int ow = game_level_overworld();
-    // outdoors only: an interior or a dungeon (or the title) keeps its dark void and the game's own glow, drawn by the
-    // present as before (fade: everywhere in play)
-    if (cfg.mode == EDGE_FADE ? ow < 0 : !cfg.indoors && ow != 1) return false;
+    if (mode == EDGE_FADE ? ow < 0 : !cfg.indoors && ow != 1) return false;  // (fade: everywhere in play)
     float fade_c[3] = {0}, fade_r = cfg.radius;  // (fade) the table's centre and the clear radius
-    if (cfg.mode == EDGE_FADE) {
+    if (mode == EDGE_FADE) {
         float lo[3], hi[3];
         bool room, zone;
         if (!stereo_table(fade_c, &room, &zone, lo, hi)) return false;
@@ -587,6 +610,7 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
         if (!said) LOG("[edge] passes unavailable: the eye is drawn without them\n"), said = true;
         return false;
     }
+    if (g_tint_restart) g.tint_first = true, g_tint_restart = false;
     ts_resolve();
     uint32_t tq = ts_begin(cb);
 
@@ -596,7 +620,7 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
     u.proj[0] = P[0], u.proj[1] = P[5], u.proj[2] = P[2], u.proj[3] = P[6];
     u.zt[0] = P[10], u.zt[1] = P[11], u.zt[2] = in->zn, u.zt[3] = in->zf - in->zn;
     u.fl[0] = in->depth_minus1 ? 1.0f : 0.0f, u.fl[1] = in->origin_lower_left ? 1.0f : 0.0f;
-    u.fl[2] = cfg.mode == EDGE_FOG ? 1.0f : cfg.mode == EDGE_GRADIENT ? 2.0f : cfg.mode == EDGE_PASSTHROUGH ? 3.0f : 4.0f;
+    u.fl[2] = mode == EDGE_FOG ? 1.0f : mode == EDGE_GRADIENT ? 2.0f : mode == EDGE_PASSTHROUGH ? 3.0f : 4.0f;
     u.fl[3] = (float)(g.frame++ % 64);
     u.up[0] = V[1], u.up[1] = V[5], u.up[2] = V[9];  // the world's up in eye space (the view's second column)
     float pd = in->pivot_dist > 0 ? in->pivot_dist : cfg.pivot_default;
@@ -641,7 +665,7 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
     screen_filter_params(u.pf);  // (the present's screen filter and the rig's blink, as the present draw would apply them)
     {
         static float said_r = -1;
-        if (cfg.mode == EDGE_FADE && fabsf(fade_r - said_r) > 0.5f)
+        if (mode == EDGE_FADE && fabsf(fade_r - said_r) > 0.5f)
             LOG("[edge] fade: centre (%.1f %.1f %.1f), clear to %.1f units, black past %.1f\n", fade_c[0], fade_c[1], fade_c[2], fade_r,
                 fade_r + cfg.width), said_r = fade_r;
     }
@@ -652,7 +676,7 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
     vk_full_barrier(cb);  // (the scene and the eye output)
     static int bench = -1;  // (LARECOMP_VR_EDGE_BENCH: 1 no backdrop colours, 2 no mask, 4 no main pass: timing only)
     if (bench < 0) bench = getenv("LARECOMP_VR_EDGE_BENCH") ? atoi(getenv("LARECOMP_VR_EDGE_BENCH")) : 0;
-    bool fade = cfg.mode == EDGE_FADE;  // (fade: the main pass alone, no backdrop colours or mask)
+    bool fade = mode == EDGE_FADE;  // (fade: the main pass alone, no backdrop colours or mask)
     if (in->eye == 0 && !(bench & 1) && !fade) {
         VkDescriptorSet set = make_set(&u, in->depth, in->color, g.mask[0].view, g.tint[prev].view);
         begin(cb, g.tint[cur].view, VK_IMAGE_LAYOUT_GENERAL, 2, 1);
