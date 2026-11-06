@@ -142,7 +142,7 @@ float rt_indoor_aspect(void) {
     return 16.0f / 9.0f;
 }
 
-void romfs_file_read_hook(const char *path) { (void)path; }
+// (romfs_file_read_hook: runtime/hle/stream.c)
 
 // Interior backdrop (16:9 quad covering the overworld behind rooms), identified by shader code hash.
 static uint64_t g_backdrop_hash = 0;  // set below once known
@@ -163,6 +163,16 @@ static bool level_is_interior(void) {
     if (!ps) return false;
     const char *lv = (const char *)(uintptr_t)ps;
     return lv[0] && strcmp(lv, "Field") != 0;
+}
+
+// (the VR rig, runtime/xr/xr_rig.c) 1: the level in play is the overworld ("Field"), 0: another level, -1: not in play
+int game_level_overworld(void) {
+    extern int game_in_play(void);
+    if (!game_in_play()) return -1;
+    uint64_t ps = LD64(GA(PLAYER_STATUS_PTR));
+    if (!ps) return -1;
+    const char *lv = (const char *)(uintptr_t)ps;
+    return lv[0] ? !strcmp(lv, "Field") : -1;
 }
 
 bool widescreen_frame_boxed(uint64_t frame) {

@@ -72,23 +72,25 @@ bool xr_instance_create(void) {
     XrExtensionProperties *xp = calloc(n ? n : 1, sizeof *xp);
     for (uint32_t i = 0; i < n; i++) xp[i].type = XR_TYPE_EXTENSION_PROPERTIES;
     p_xrEnumerateInstanceExtensionProperties(NULL, n, &n, xp);
-    bool en2 = false, refresh = false, fmtlist = false, timespec = false, valve = false;
+    bool en2 = false, refresh = false, fmtlist = false, timespec = false, valve = false, gaze = false;
     for (uint32_t i = 0; i < n; i++) {
         en2 |= !strcmp(xp[i].extensionName, XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME);
         refresh |= !strcmp(xp[i].extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
         fmtlist |= !strcmp(xp[i].extensionName, XR_KHR_VULKAN_SWAPCHAIN_FORMAT_LIST_EXTENSION_NAME);
         timespec |= !strcmp(xp[i].extensionName, XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME);
         valve |= !strcmp(xp[i].extensionName, XR_INPUT_VALVE_EXT);
+        gaze |= !strcmp(xp[i].extensionName, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
     }
     free(xp);
     if (!en2) { LOG("[xr] the OpenXR runtime has no Vulkan binding (XR_KHR_vulkan_enable2)\n"); return false; }
-    const char *ext[5];
+    const char *ext[6];
     uint32_t ne = 0;
     ext[ne++] = XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME;
     if (refresh) ext[ne++] = XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME;
     if (fmtlist) ext[ne++] = XR_KHR_VULKAN_SWAPCHAIN_FORMAT_LIST_EXTENSION_NAME;
     if (timespec) ext[ne++] = XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME;  // (xr_timing.log: display times on our clock)
     if (valve) ext[ne++] = XR_INPUT_VALVE_EXT;  // (the Frame controllers' own profile: xr_input.c)
+    if (gaze) ext[ne++] = XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME;  // (the eye tracker: foveation, xr_input.c)
     XrInstanceCreateInfo ci = {.type = XR_TYPE_INSTANCE_CREATE_INFO, .enabledExtensionCount = ne, .enabledExtensionNames = ext};
     snprintf(ci.applicationInfo.applicationName, sizeof ci.applicationInfo.applicationName, "AwakeningFrame");
     snprintf(ci.applicationInfo.engineName, sizeof ci.applicationInfo.engineName, "LARecomp");
@@ -106,6 +108,7 @@ bool xr_instance_create(void) {
         p_xrGetInstanceProcAddr(g_xr.inst, "xrRequestDisplayRefreshRateFB", (PFN_xrVoidFunction *)&p_xrRequestDisplayRefreshRateFB);
     }
     if (timespec) p_xrGetInstanceProcAddr(g_xr.inst, "xrConvertTimeToTimespecTimeKHR", (PFN_xrVoidFunction *)&p_xrConvertTimeToTimespecTimeKHR);
+    g_xr.has_gaze = gaze;
     xr_input_init(p_xrGetInstanceProcAddr, valve);
     g_xr.has_refresh_fb = refresh && p_xrRequestDisplayRefreshRateFB;
     g_xr.has_format_list = fmtlist;
@@ -116,10 +119,12 @@ bool xr_instance_create(void) {
         refresh ? "yes" : "no", fmtlist ? "yes" : "no");
     XrSystemGetInfo sgi = {.type = XR_TYPE_SYSTEM_GET_INFO, .formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY};
     if (!XR_OK(p_xrGetSystem(g_xr.inst, &sgi, &g_xr.sys))) return false;
-    XrSystemProperties sp = {.type = XR_TYPE_SYSTEM_PROPERTIES};
+    XrSystemEyeGazeInteractionPropertiesEXT gp = {.type = XR_TYPE_SYSTEM_EYE_GAZE_INTERACTION_PROPERTIES_EXT};
+    XrSystemProperties sp = {.type = XR_TYPE_SYSTEM_PROPERTIES, .next = gaze ? &gp : NULL};
     if (XR_SUCCEEDED(p_xrGetSystemProperties(g_xr.inst, g_xr.sys, &sp)))
-        LOG("[xr] system: %s (max swapchain %ux%u, %u layers)\n", sp.systemName, sp.graphicsProperties.maxSwapchainImageWidth,
-            sp.graphicsProperties.maxSwapchainImageHeight, sp.graphicsProperties.maxLayerCount);
+        LOG("[xr] system: %s (max swapchain %ux%u, %u layers; eye gaze %s)\n", sp.systemName, sp.graphicsProperties.maxSwapchainImageWidth,
+            sp.graphicsProperties.maxSwapchainImageHeight, sp.graphicsProperties.maxLayerCount,
+            !gaze ? "no extension" : gp.supportsEyeGazeInteraction ? "supported" : "extension, but not supported");
     return true;
 }
 
@@ -286,6 +291,11 @@ void xr_update_app_space(XrTime time) {
     pthread_mutex_unlock(&g_xr.mu);
     LOG("[xr] the view starts where the player faces: %.0f deg round from the runtime's own, head at %.2f %.2f %.2f m\n",
         yaw * 57.29578f, p->x, p->y, p->z);
+}
+
+void xr_recentre(void) {  // (any thread; read by xr_update_app_space on the XR thread)
+    __atomic_store_n(&g_xr.face_after, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_xr.face_due, true, __ATOMIC_RELEASE);
 }
 
 void xr_session_destroy(void) {

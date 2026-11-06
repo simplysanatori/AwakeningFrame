@@ -99,7 +99,7 @@ static const int8_t k_bool_ctl[A_GRIP_L] = {[A_A] = C_A, [A_B] = C_B, [A_X] = C_
 #define XRIN_FUNCS(F)                                                                                                 \
     F(xrStringToPath) F(xrCreateActionSet) F(xrDestroyActionSet) F(xrCreateAction) F(xrSuggestInteractionProfileBindings) \
     F(xrAttachSessionActionSets) F(xrSyncActions) F(xrGetActionStateBoolean) F(xrGetActionStateFloat)                 \
-    F(xrGetActionStateVector2f) F(xrApplyHapticFeedback) F(xrStopHapticFeedback)
+    F(xrGetActionStateVector2f) F(xrApplyHapticFeedback) F(xrStopHapticFeedback) F(xrCreateActionSpace)
 #define XRIN_DECL(n) static PFN_##n p_##n;
 XRIN_FUNCS(XRIN_DECL)
 #undef XRIN_DECL
@@ -107,6 +107,9 @@ XRIN_FUNCS(XRIN_DECL)
 static struct {
     bool ready, attached, valve, log, comfort;
     XrActionSet set;
+    XrActionSet gaze_set;      // the eye gaze (XR_EXT_eye_gaze_interaction: foveation), a set of its own
+    XrAction gaze_act;
+    XrSpace gaze_space;
     XrAction act[A_COUNT];
     XrPath hand[2];
     bool down[C_COUNT];        // the virtual buttons now (thresholds applied)
@@ -195,12 +198,35 @@ void xr_input_init(PFN_xrGetInstanceProcAddr gipa, bool valve) {
     ok |= suggest("/interaction_profiles/oculus/touch_controller", false, NULL);
     S.ready = ok;
     if (!ok) LOG("[xr] controllers: no interaction profile accepted the bindings\n");
+    if (ok && g_xr.has_gaze) {  // (the eye tracker: one pose action, for the foveation of the eye passes)
+        snprintf(si.actionSetName, sizeof si.actionSetName, "eye_gaze");
+        snprintf(si.localizedActionSetName, sizeof si.localizedActionSetName, "Eye Gaze");
+        XrActionCreateInfo ai = {.type = XR_TYPE_ACTION_CREATE_INFO, .actionType = XR_ACTION_TYPE_POSE_INPUT};
+        snprintf(ai.actionName, sizeof ai.actionName, "gaze");
+        snprintf(ai.localizedActionName, sizeof ai.localizedActionName, "Gaze");
+        XrActionSuggestedBinding b = {XR_NULL_HANDLE, path("/user/eyes_ext/input/gaze_ext/pose")};
+        XrInteractionProfileSuggestedBinding sb = {.type = XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING,
+                                                   .interactionProfile = path("/interaction_profiles/ext/eye_gaze_interaction"),
+                                                   .suggestedBindings = &b, .countSuggestedBindings = 1};
+        XrResult r = XR_ERROR_RUNTIME_FAILURE;
+        if (XR_OK(p_xrCreateActionSet(g_xr.inst, &si, &S.gaze_set)) && XR_OK(p_xrCreateAction(S.gaze_set, &ai, &S.gaze_act)))
+            b.action = S.gaze_act, r = p_xrSuggestInteractionProfileBindings(g_xr.inst, &sb);
+        LOG("[xr] eye gaze binding: %s\n", XR_SUCCEEDED(r) ? "ok" : xr_result_str(r));
+        if (XR_FAILED(r) && S.gaze_set) p_xrDestroyActionSet(S.gaze_set), S.gaze_set = XR_NULL_HANDLE;
+    }
 }
 
 void xr_input_attach(void) {
     if (!S.ready || S.attached) return;
-    XrSessionActionSetsAttachInfo ai = {.type = XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO, .countActionSets = 1, .actionSets = &S.set};
+    XrActionSet sets[2] = {S.set, S.gaze_set};
+    XrSessionActionSetsAttachInfo ai = {.type = XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO, .countActionSets = S.gaze_set ? 2 : 1,
+                                        .actionSets = sets};
     S.attached = XR_OK(p_xrAttachSessionActionSets(g_xr.session, &ai));
+    if (S.attached && S.gaze_set) {
+        XrActionSpaceCreateInfo sc = {.type = XR_TYPE_ACTION_SPACE_CREATE_INFO, .action = S.gaze_act,
+                                      .poseInActionSpace = {.orientation = {0, 0, 0, 1}}};
+        if (!XR_OK(p_xrCreateActionSpace(g_xr.session, &sc, &S.gaze_space))) S.gaze_space = XR_NULL_HANDLE;
+    }
     if (S.attached) LOG("[xr] controllers: %d actions attached (%s)\n", A_COUNT, S.valve ? "Steam Frame profile" : "Touch profile only");
 }
 
@@ -210,8 +236,10 @@ void xr_input_shutdown(void) {
             XrHapticActionInfo hi = {.type = XR_TYPE_HAPTIC_ACTION_INFO, .action = S.act[A_HAPTIC], .subactionPath = S.hand[h]};
             p_xrStopHapticFeedback(g_xr.session, &hi);
         }
+    if (S.gaze_space) p_xrDestroySpace(S.gaze_space);
+    if (S.gaze_set) p_xrDestroyActionSet(S.gaze_set);
     if (S.set) p_xrDestroyActionSet(S.set);
-    S.set = XR_NULL_HANDLE, S.ready = S.attached = S.buzzing = false;
+    S.set = S.gaze_set = XR_NULL_HANDLE, S.gaze_space = XR_NULL_HANDLE, S.ready = S.attached = S.buzzing = false;
 }
 
 // ---- reading
@@ -285,8 +313,8 @@ static void haptics(void) {
 
 void xr_input_frame(void) {
     if (!S.attached) return;
-    XrActiveActionSet as = {.actionSet = S.set, .subactionPath = XR_NULL_PATH};
-    XrActionsSyncInfo si = {.type = XR_TYPE_ACTIONS_SYNC_INFO, .countActiveActionSets = 1, .activeActionSets = &as};
+    XrActiveActionSet as[2] = {{.actionSet = S.set, .subactionPath = XR_NULL_PATH}, {.actionSet = S.gaze_set, .subactionPath = XR_NULL_PATH}};
+    XrActionsSyncInfo si = {.type = XR_TYPE_ACTIONS_SYNC_INFO, .countActiveActionSets = S.gaze_set ? 2 : 1, .activeActionSets = as};
     XrResult r = p_xrSyncActions(g_xr.session, &si);
     bool focused = r == XR_SUCCESS;  // (XR_SESSION_NOT_FOCUSED: another app has the controllers: everything is released)
     if (XR_FAILED(r)) { xr_ok_(r, "xrSyncActions"); focused = false; }
@@ -347,4 +375,18 @@ void xr_input_frame(void) {
     S.last_host = host, S.last_lx = lx, S.last_ly = ly;
     input_xr_set(host, lx, ly);
     haptics();
+}
+
+// (xr_vk.c xr_latch_gaze) the eye gaze's direction in `base` at `t` (unit, -z of the gaze pose); false: no gaze then
+// (no eye tracker, the session not focused, or not tracked).
+bool xr_input_gaze(XrSpace base, XrTime t, float dir[3]) {
+    if (!S.gaze_space || !base) return false;
+    XrSpaceLocation loc = {.type = XR_TYPE_SPACE_LOCATION};
+    const XrSpaceLocationFlags need = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+    if (XR_FAILED(p_xrLocateSpace(S.gaze_space, base, t, &loc)) || (loc.locationFlags & need) != need) return false;
+    const XrQuaternionf q = loc.pose.orientation;  // rotate (0, 0, -1) by q
+    dir[0] = -2 * (q.x * q.z + q.w * q.y);
+    dir[1] = -2 * (q.y * q.z - q.w * q.x);
+    dir[2] = -(1 - 2 * (q.x * q.x + q.y * q.y));
+    return true;
 }

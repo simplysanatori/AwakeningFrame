@@ -1,6 +1,7 @@
 // User settings (larecomp.ini next to the executable's working directory), edited from the in-game menu.
 #pragma once
 #include "cosmetic_colour.h"
+#include "vr_settings.h"
 #include <stdbool.h>
 
 enum { ASPECT_UNLOCKED = 0, ASPECT_ORIGINAL = 1 };
@@ -105,6 +106,7 @@ typedef struct {
     char rando_options[48];  // the Randomizer tab's New seed options: a seed ID without its random part (empty = defaults)
     // the player's own randomizer presets (rando_preset lines): "<name>|<options key>|<tracker><map letters>", "" = free
     char rando_presets[RANDO_PRESETS_MAX][100];
+    VrSettings vr;       // the VR tab (runtime/vr_settings.c, runtime/ui/vr_tab.mm): vr_* keys
 } Settings;
 
 

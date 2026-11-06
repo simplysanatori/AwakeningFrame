@@ -53,6 +53,7 @@ Settings g_settings = {
     .upscaler_auto = true,
     .res_auto = true,
     .livesplit_host = "localhost:16834",
+    .vr = VR_DEFAULTS,
 #ifndef __APPLE__
     .bg_input = true,  // (as before the setting; on macOS it needs Input Monitoring permission, so Off there)
 #endif
@@ -185,7 +186,7 @@ void settings_load(void) {
     if (loaded) return;
     loaded = true;
     FILE *f = fopen(SETTINGS_FILE, "r");
-    if (!f) return;
+    if (!f) { vr_settings_apply_env(); return; }
     char line[256];
     bool tip_key = false, aspect_key = false;
     while (fgets(line, sizeof line, f)) {
@@ -203,6 +204,7 @@ void settings_load(void) {
             continue;
         }
         if (fields != 2) continue;
+        if (vr_settings_parse(key, val)) continue;
         if (!strcmp(key, "aspect")) g_settings.aspect = !strcmp(val, "original") ? ASPECT_ORIGINAL : ASPECT_UNLOCKED;
         else if (!strcmp(key, "fullscreen")) g_settings.fullscreen = atoi(val) != 0;
         else if (!strcmp(key, "volume")) g_settings.volume = (float)atof(val);
@@ -306,6 +308,7 @@ void settings_load(void) {
         else bind_settings_load(key, val);  // bind_pad_* / bind_key_*: runtime/hle/bindings.c
     }
     fclose(f);
+    vr_settings_apply_env();  // (the VR options into the environment the VR code reads)
     if (!tip_key) g_settings.menu_tip_seen = true;  // (a settings file from before the note: not a first launch)
     if (!aspect_key) g_settings.aspect_asked = true;  // (likewise: the aspect ratio was chosen already)
     if (g_settings.volume < 0) g_settings.volume = 0;
@@ -385,6 +388,7 @@ void settings_save(void) {
     fprintf(f, "screen_filter = %s\n", k_screen_filter_keys[g_settings.screen_filter]);
     fprintf(f, "weather = %s\n", k_weather_keys[g_settings.weather]);
     if (g_settings.cosmetics_seed[0]) fprintf(f, "cosmetics_seed = %s\n", g_settings.cosmetics_seed);
+    vr_settings_save(f);
     bind_settings_save(f);
     fprintf(f, "rando_seed = %s\n", g_settings.rando_seed);
     if (g_settings.rando_options[0]) fprintf(f, "rando_options = %s\n", g_settings.rando_options);

@@ -20,6 +20,7 @@
 static struct {
     int init, mode, eyes;   // mode: VR_CULL_FIT / WIDE / STOCK
     float kx, kz, hlo, hhi, margin;
+    float ex, ez, tmax;     // LARECOMP_VR_CULL_EXTENT (world half-extents about the table centre, 0 = off), _TMAX
 } C;
 static struct { bool have; float quad[4][2], floor_y, hlo, hhi, shrink[4]; } g_rect;  // the latest fit's floor quadrilateral (vr_cull_rect)
 static _Atomic float g_aspect, g_fs;   // the fitted culling aspect (absolute) and fovy scale; 0 = none yet
@@ -36,6 +37,13 @@ static void init(void) {
     if ((e = getenv("LARECOMP_VR_CULL_HEIGHT"))) sscanf(e, "%f,%f", &C.hlo, &C.hhi);
     if ((e = getenv("LARECOMP_VR_CULL_MARGIN"))) C.margin = (float)atof(e);
     if ((e = getenv("LARECOMP_VR_CULL_EYES"))) C.eyes = atoi(e) != 0;
+    // (lane stream) LARECOMP_VR_CULL_EXTENT=<x>,<z>: the culled-to rectangle is the world-axis box of these half-extents about
+    // the table centre instead of the scaled stock footprint, e.g. 52,42 for the overworld's resident 7x7 rooms around Link
+    // (rooms are 15 x 12; docs/af/STREAM.md). LARECOMP_VR_CULL_TMAX=<tan>: the widest half-angle tangent (default 4, 76 deg).
+    C.ex = C.ez = 0, C.tmax = 4.0f;
+    if ((e = getenv("LARECOMP_VR_CULL_EXTENT"))) sscanf(e, "%f,%f", &C.ex, &C.ez);
+    if ((e = getenv("LARECOMP_VR_CULL_TMAX"))) C.tmax = (float)atof(e);
+    if (!(C.tmax > 0.5f)) C.tmax = 4.0f;
 }
 
 int vr_cull_mode(void) {
@@ -129,6 +137,7 @@ void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3],
         float rx = (p[0] - pivot[0]) * hr[0] + (p[2] - pivot[2]) * hr[2], rz = (p[0] - pivot[0]) * hf[0] + (p[2] - pivot[2]) * hf[2];
         rx *= C.kx, rz *= C.kz;
         corner[c][0] = anchor[0] + rx * hr[0] + rz * hf[0], corner[c][1] = anchor[1], corner[c][2] = anchor[2] + rx * hr[2] + rz * hf[2];
+        if (C.ex > 0 && C.ez > 0) corner[c][0] = anchor[0] + sx * C.ex, corner[c][2] = anchor[2] + sy * C.ez;  // (the world box)
     }
     {   // the floor quadrilateral, counter-clockwise seen from above in (x, z) (the edge pass fades to it)
         static const int rg[4] = {0, 1, 3, 2};
@@ -172,7 +181,7 @@ void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3],
             }
         }
     }
-    const float TMAX = 4.0f;  // (76 degrees)
+    const float TMAX = C.tmax;  // (4: 76 degrees)
     if (behind) tx = ty = TMAX;
     if (!npts) tx = tx0 * C.kx, ty = ty0 * C.kz;  // (the eyes see none of the table: keep about the table)
     tx = fminf(tx * 1.05f, TMAX), ty = fminf(ty * 1.05f, TMAX);

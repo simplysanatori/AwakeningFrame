@@ -5,6 +5,7 @@
 
 #include "../rt.h"
 #include "xr_internal.h"
+#include "xr_input.h"
 
 // The Vulkan entry points the runtime gets (pfnGetInstanceProcAddr): its queue calls take the queue lock. SteamVR
 // submits to the app's queue from inside xrWaitFrame too (validation: THREADING ERROR with the recorder's
@@ -302,6 +303,11 @@ bool xr_latch_views_id(XrEyeView out[2], uint64_t *id) {
     views_out(v, out);
     if (id) *id = n;
     return true;
+}
+
+bool xr_latch_gaze(uint64_t id, float dir[3]) {
+    const XrLatch *l = &g_xr.latch[id % XR_LATCHES];
+    return id && l->id == id && xr_input_gaze(l->space, l->time, dir);
 }
 
 static int pose_differs(const XrView *v, const XrEyeView *e) {

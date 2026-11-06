@@ -9,8 +9,10 @@
 #include "../../platform.h"
 #include "../../rt.h"
 #include "../cam_override.h"
+#include "foveation.h"
 #ifdef LARECOMP_HAVE_XR
 #include "../../xr/xr.h"
+#include "../../xr/xr_rig.h"
 #else
 typedef struct { float orientation[4], position[3], fov[4]; } XrEyeView;
 #endif
@@ -49,20 +51,17 @@ bool stereo_active(void) {
     return stereo_wanted() && stereo_eye_size(&w, &h);
 }
 
-// ---------------------------------------------------------------- the v1 diorama (fixed table; lane 6: the rig)
-// World (game units) to the app's LOCAL space (metres; origin = the head at the session's start, y up, -z ahead):
-//   app = A + s * Ry(yaw) * (world - pivot)
-// pivot = the game camera's screen centre on the floor (latched per game frame: the table follows the game's camera,
-// moving only on new game frames). A = the table point the pivot sits on: LARECOMP_VR_DIST metres from the head at
-// LARECOMP_VR_PITCH degrees below the horizon (default: the game camera's own pitch at the first frame, so the first
-// look at the table is the game's view), or LARECOMP_VR_TABLE=x,y,z. s = LARECOMP_VR_SCALE metres per game unit
-// (0.067: a 1.5-unit tile ~10 cm). The eye cameras keep the game's depth terms (near / far: the shaders that linearise
-// depth with the game's constants stay right) unless LARECOMP_VR_NEAR=<units>.
+// ---------------------------------------------------------------- the diorama's eye cameras
+// World (game units) to the app's space (metres; origin = the head at the last recentre, y up, -z ahead):
+//   app = A + s * R * (world - anchor)
+// A, s, R and the anchor are the rig's (runtime/xr/xr_rig.c, docs/af/RIG.md), once per game frame: the table moves only
+// on new game frames. The raw pivot is the game camera's screen centre at Link's height. The eye cameras keep the
+// game's depth terms (near / far: the shaders that linearise depth with the game's constants stay right) unless
+// LARECOMP_VR_NEAR=<units>.
 static struct {
-    bool init, have_pitch, have_table;
-    float s, dist, pitch, yaw, near_;
-    float A[3];
-    int follow;        // LARECOMP_VR_FOLLOW: FOLLOW_SMOOTH (default), FOLLOW_ROOM, FOLLOW_FIXED
+    bool init, explicit_follow;
+    float near_;
+    int follow;        // LARECOMP_VR_FOLLOW: FOLLOW_SMOOTH, FOLLOW_ROOM, FOLLOW_FIXED (unset: the rig's per-area anchoring)
     float tau;         // LARECOMP_VR_FOLLOW_TAU: seconds (smooth)
 } cfg;
 enum { FOLLOW_SMOOTH, FOLLOW_ROOM, FOLLOW_FIXED };
@@ -70,16 +69,13 @@ enum { FOLLOW_SMOOTH, FOLLOW_ROOM, FOLLOW_FIXED };
 static void cfg_init(void) {
     const char *e;
     cfg.init = true;
-    cfg.s = (e = getenv("LARECOMP_VR_SCALE")) && atof(e) > 0 ? (float)atof(e) : 0.067f;
-    cfg.dist = (e = getenv("LARECOMP_VR_DIST")) && atof(e) > 0 ? (float)atof(e) : 1.0f;
-    cfg.yaw = (e = getenv("LARECOMP_VR_YAW")) ? (float)atof(e) : 0.0f;
     cfg.near_ = (e = getenv("LARECOMP_VR_NEAR")) ? (float)atof(e) : 0.0f;
-    if ((e = getenv("LARECOMP_VR_PITCH"))) cfg.pitch = (float)atof(e), cfg.have_pitch = true;
-    if ((e = getenv("LARECOMP_VR_TABLE")) && sscanf(e, "%f,%f,%f", &cfg.A[0], &cfg.A[1], &cfg.A[2]) == 3) cfg.have_table = true;
     e = getenv("LARECOMP_VR_FOLLOW");
+    cfg.explicit_follow = e && *e && strcmp(e, "auto");
     cfg.follow = e && !strcmp(e, "room") ? FOLLOW_ROOM : e && !strcmp(e, "fixed") ? FOLLOW_FIXED : FOLLOW_SMOOTH;
     cfg.tau = (e = getenv("LARECOMP_VR_FOLLOW_TAU")) && atof(e) > 0 ? (float)atof(e) : 0.5f;
-    LOG("[stereo] the table follows the game's camera: %s (%.2f s time constant; a cut snaps it)\n",
+    if (cfg.explicit_follow)
+        LOG("[stereo] the table follows the game's camera: %s (%.2f s time constant; a cut snaps it)\n",
         cfg.follow == FOLLOW_ROOM ? "room (held; glides to a new camera zone)" : cfg.follow == FOLLOW_FIXED ? "fixed (held)" : "smooth", cfg.tau);
 }
 
@@ -149,31 +145,27 @@ static bool eye_fn(const CamLatch *l, const float pivot_in[3], float V[2][16], f
     if (!xr_latch_views_id(ev, &vid)) return false;
     if (!cfg.init) cfg_init();
     float pivot_raw[3] = {pivot_in[0], pivot_in[1], pivot_in[2]}, pivot[3];
-    anchor_update(pivot_raw, pivot);
+    if (cfg.explicit_follow) anchor_update(pivot_raw, pivot);
+    else memcpy(pivot, pivot_raw, sizeof pivot);
+    XrRigIn ri = {.explicit_follow = cfg.explicit_follow, .frame = l->frame};  // (the rig: area anchoring, the player's controls, the blink)
+    memcpy(ri.raw, pivot_raw, 12), memcpy(ri.followed, pivot, 12), memcpy(ri.fwd, l->ref.fwd, 12);
+    ri.zone = cam_override_zone(ri.zlo, ri.zhi);
+    extern int game_level_overworld(void);  // (widescreen.c)
+    ri.overworld = game_level_overworld();
+    XrRigPose rp;
+    xr_rig_update(&ri, &rp);
+    memcpy(pivot, rp.anchor, 12);
     cam_override_table_anchor(pivot);  // (perf lane: the culling fit centres the table here)
-    if (!cfg.have_table) {
-        if (!cfg.have_pitch) {
-            float p = asinf(fminf(fmaxf(-l->ref.fwd[1], -1.0f), 1.0f)) * (float)(180.0 / M_PI);
-            cfg.pitch = fminf(fmaxf(p, 25.0f), 65.0f), cfg.have_pitch = true;
-        }
-        float pr = cfg.pitch * (float)(M_PI / 180.0);
-        cfg.A[0] = 0, cfg.A[1] = -cfg.dist * sinf(pr), cfg.A[2] = -cfg.dist * cosf(pr);
-        cfg.have_table = true;
-        LOG("[stereo] diorama: %.3f m per unit, pivot at (%.2f %.2f %.2f) m in the head's start space (%.0f deg down, %.2f m), yaw %.0f\n",
-            cfg.s, cfg.A[0], cfg.A[1], cfg.A[2], cfg.pitch, cfg.dist, cfg.yaw);
-    }
-    float cy = cosf(-cfg.yaw * (float)(M_PI / 180.0)), sy = sinf(-cfg.yaw * (float)(M_PI / 180.0));  // Ry(-yaw): app -> world
+    const float *Rw = rp.R;  // world -> app (row-major); its transpose takes app to world
     const float *gp = l->ref.P;
     for (int e = 0; e < 2; e++) {
         float m[3][3], w[3][3];
         quat_mat(ev[e].orientation, m);
-        for (int c = 0; c < 3; c++) {  // world rotation = Ry(-yaw) * m
-            w[0][c] = cy * m[0][c] + sy * m[2][c];
-            w[1][c] = m[1][c];
-            w[2][c] = -sy * m[0][c] + cy * m[2][c];
-        }
-        float d[3] = {(ev[e].position[0] - cfg.A[0]) / cfg.s, (ev[e].position[1] - cfg.A[1]) / cfg.s, (ev[e].position[2] - cfg.A[2]) / cfg.s};
-        float E[3] = {pivot[0] + cy * d[0] + sy * d[2], pivot[1] + d[1], pivot[2] - sy * d[0] + cy * d[2]};
+        for (int r = 0; r < 3; r++)  // world rotation = R^T * m
+            for (int c = 0; c < 3; c++) w[r][c] = Rw[0 * 3 + r] * m[0][c] + Rw[1 * 3 + r] * m[1][c] + Rw[2 * 3 + r] * m[2][c];
+        float d[3] = {(ev[e].position[0] - rp.A[0]) / rp.s, (ev[e].position[1] - rp.A[1]) / rp.s, (ev[e].position[2] - rp.A[2]) / rp.s};
+        float E[3];
+        for (int r = 0; r < 3; r++) E[r] = pivot[r] + Rw[0 * 3 + r] * d[0] + Rw[1 * 3 + r] * d[1] + Rw[2 * 3 + r] * d[2];
         float *v = V[e];
         for (int r = 0; r < 3; r++) {  // rows: the eye's right, up, back in world; rigid, game units
             v[r * 4 + 0] = w[0][r], v[r * 4 + 1] = w[1][r], v[r * 4 + 2] = w[2][r];
@@ -223,6 +215,10 @@ static bool eye_fn(const CamLatch *l, const float pivot_in[3], float V[2][16], f
     }
     g_rv.ok = true, g_rv.id = vid;
     memcpy(g_rv.ev, ev, sizeof ev);
+    fov_note_views((const float[2][4]){{ev[0].orientation[0], ev[0].orientation[1], ev[0].orientation[2], ev[0].orientation[3]},
+                                      {ev[1].orientation[0], ev[1].orientation[1], ev[1].orientation[2], ev[1].orientation[3]}},
+                   (const float[2][4]){{ev[0].fov[0], ev[0].fov[1], ev[0].fov[2], ev[0].fov[3]},
+                                      {ev[1].fov[0], ev[1].fov[1], ev[1].fov[2], ev[1].fov[3]}}, vid);  // (foveation.c)
     memcpy(g_rv.V, V, sizeof g_rv.V), memcpy(g_rv.P, P, sizeof g_rv.P);
     return true;
 }

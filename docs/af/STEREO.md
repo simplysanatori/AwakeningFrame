@@ -9,6 +9,10 @@ layer. Design: `~/.claude/plans/awakeningframe-vr-design.md` sections 2-6. Code:
 
 - **Each list runs once per eye** (`exec.c stereo_execute`). Before eye 1, the bound state is restored. The game's
   memory writes from eye 0 (uniform updates, buffer-to-buffer copies) are undone, and eye 1 then redoes them.
+- **Fences after both eyes:** a list's fence syncs are signalled once both eyes ran (the submission after eye 1).
+  Signalled in eye 0, a flush later in the list let the game see the fence done and write the next frame's scene
+  blocks while eye 0 still read them: eye 0's blocks then did not match the latched camera, so eye 0 drew with the
+  game's own camera whenever the camera moved (one eye flat: "cross-eyed when moving").
 - **Eye 1 runs a draw, clear or copy only when a target is twinned.** Twinned targets are the 16:9 render targets
   (the scalable ones) and the guest-sized AO targets. Shadow maps, cube maps and small offscreen targets are drawn
   once, in eye 0, and shared. Compute, counters and read-backs run in eye 0 only.
@@ -49,7 +53,43 @@ layer. Design: `~/.claude/plans/awakeningframe-vr-design.md` sections 2-6. Code:
 - **Timing:** each eye run of a list is wrapped in timestamps. Results are summed per game frame. `[stereo] GPU per
   game frame` is logged every 2 s, and `xr_timing.log` gets `gpu0` / `gpu1`. Eye 0 includes the shared passes.
 
-## v1 diorama (fixed table; lane 6 replaces it)
+## Foveation (eye-tracked; `runtime/nvn/vulkan/foveation.c`)
+
+`LARECOMP_VR_FOVEATION=off|low|medium|high` (default medium in VR; flat mode is unchanged). Foveation is eye-tracked
+only. Each eye pass whose attachments are all twinned and scalable, and at least `LARECOMP_VR_FOVEATION_MIN` (0.75) of
+the eye size, gets a per-eye shading-rate attachment (VK_KHR_fragment_shading_rate, 8 px texels). Away from the focus,
+pixels are shaded at a coarser rate (2x1 up to 4x4). Rasterisation, depth and geometry edges stay at full resolution,
+and it works in both of Turnip's modes (sysmem and GMEM).
+
+- **Focus:** the eye gaze (XR_EXT_eye_gaze_interaction: a pose action in its own set, `xr_input.c`), located in the
+  latch's app space at the latch's display time (`xr_latch_gaze`). It is projected through each eye's fov and smoothed
+  (40 ms; a jump over 0.25 NDC snaps).
+- **No gaze, no foveation:** with no gaze (no extension, no permission, not tracked) for 200 ms, no map is attached and
+  everything renders at full density. There is no fixed or centred fallback. When the gaze comes back, the rings ramp in
+  over 0.5 s, starting 4 x wider. `[fov] eye gaze lost: ...` / `[fov] eye gaze back: ...` log each change.
+- **Mock (xrmock has no eye tracker):** `LARECOMP_VR_GAZE_MOCK=tx,ty` (tangents in the eye's frame) or `sweep` (a
+  circle) stands in for the gaze. `LARECOMP_VR_GAZE_MOCK_DROP=on,off` (seconds) drops it in a cycle, to test the lost
+  and ramp-in path.
+- **Rings** (NDC radius from the focus; density per axis): low: 1 inside 0.6, 2x1 to 0.95, then 2x2. medium: 1 inside
+  0.45, 2x2 to 0.8, then 4x2. high: 1 inside 0.35, 2x2 to 0.65, then 4x4.
+- **Maps:** R8_UINT, optimal tiling (Turnip has no linear shading-rate images), one per eye and pass size. A change (a
+  focus move of 8 px or more, the ramp) is copied in from transient memory at the start of the pending submission, at
+  most once per submission. Every game pipeline gets `VK_PIPELINE_CREATE_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR`
+  and combiner ops KEEP / REPLACE. Passes without an attachment shade at 1x1.
+- **`LARECOMP_VR_FOVEATION_MODE=fdm`:** VK_EXT_fragment_density_map instead (non-subsampled). On Turnip 26.3 it draws
+  whole bins black in a checkerboard whenever one map holds more than one density. A uniform map is fine, and hw
+  binning, bin merging and concurrent binning are not the cause. It is kept for later drivers. Turnip reads density maps
+  on the CPU when the pass is recorded, one density per bin, and forces those passes into GMEM.
+- **VR tab:** `fov_set_level` changes the level live. If foveation was off when the game started, the extension is
+  not enabled, so turning it on needs a restart.
+- **Log:** `[fov] eye gaze in N of M game frames ... ; X of Y eye passes foveated` every 10 s.
+  `LARECOMP_VR_FOVEATION_LOG=1` logs each pass decision (the first 400).
+
+## Diorama placement
+
+The rig (`runtime/xr/xr_rig.c`, docs/af/RIG.md) now places the table: per-area anchoring, the player's snap turn,
+tilt, height, size and recentre, and the blink. What follows is the v1 placement it grew from; the switches below
+still apply (`LARECOMP_VR_FOLLOW` set: the comfort follow instead of the rig's per-area anchoring).
 
 `app = A + s * Ry(yaw) * (world - pivot)`:
 
@@ -77,6 +117,9 @@ layer. Design: `~/.claude/plans/awakeningframe-vr-design.md` sections 2-6. Code:
 | `LARECOMP_STEREO_DUMP_AT=<frame>,...`, `LARECOMP_STEREO_DUMP_DIR` | eye outputs, the HUD clone and the window image as PNG |
 | `LARECOMP_VR_FOLLOW=smooth\|room\|fixed`, `LARECOMP_VR_FOLLOW_TAU=<s>` | how the table follows the game camera (above) |
 | `LARECOMP_XR_PREDICT=measured\|vsync` | the display time the eye poses are located for |
+| `LARECOMP_VR_DIET=0\|dof,merge,smaa` | the VR pass diet (default all; docs/af/PASSES.md) |
+| `LARECOMP_VR_DYNRES=1`, `_MIN` / `_MAX` / `_MS` | dynamic eye resolution (off by default; docs/af/PASSES.md) |
+| `LARECOMP_VR_FOVEATION=off\|low\|medium\|high` | eye-tracked foveation of the eye passes (above) |
 
 Mock run: `XR_RUNTIME_JSON=build/xrmock/runtime.json LARECOMP_XR=1 MOCK_XR_EYE_SIZE=1728x1728
 MOCK_XR_POSE=static:0,1.6,0,0,-45 SDL_VIDEODRIVER=offscreen ENABLE_GAMESCOPE_WSI=0 ...`. The head looks 45 degrees down
