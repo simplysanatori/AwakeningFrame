@@ -293,6 +293,11 @@ void xr_update_app_space(XrTime time) {
         yaw * 57.29578f, p->x, p->y, p->z);
 }
 
+void xr_recentre(void) {  // (any thread; read by xr_update_app_space on the XR thread)
+    __atomic_store_n(&g_xr.face_after, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_xr.face_due, true, __ATOMIC_RELEASE);
+}
+
 void xr_session_destroy(void) {
     xr_input_shutdown();
     if (g_xr.session) {

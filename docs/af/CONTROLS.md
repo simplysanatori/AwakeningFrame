@@ -29,6 +29,8 @@ Plus, Minus) name the Frame control that does it:
 | right stick up / down | (rig) | table tilt (`XrRigInput.tilt`) |
 | left grip held | (rig modifier) | the left D-pad becomes height (up / down) and size (right / left); a click of the right stick recentres the table |
 
+What the rig does with these (ranges, the blink, side views): docs/af/RIG.md.
+
 The shield is R and the Pegasus Boots are L (they have no slot on the Items page, so they are fixed buttons; the touch
 build's prompts say the same: "R appears with the shield, L with the Pegasus Boots"). In the Switch version ZL and ZR have no
 function in play that this port knows of (the tracker overlay uses ZR on the map page). At the start of the game Link has only

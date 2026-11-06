@@ -3,14 +3,14 @@
 // environment: at startup vr_settings_apply_env sets that variable from the saved value (only when the value is not the
 // default and the variable is not already set: an environment variable always wins, and the tab shows the row greyed
 // out). A change made in the menu reaches the running VR code through the hooks in vr_settings.c (weak symbols: a lane
-// that has not landed yet leaves its row at "Applies After Restart"). docs/af/VR_SETTINGS.md.
+// that is absent leaves its row at "Applies After Restart"; Height, Size and Tilt are the rig's, vr_rig.ini). docs/af/VR_SETTINGS.md.
 #pragma once
 #include <stdbool.h>
 #include <stdio.h>
 
 enum { VRS_LAYOUT_SWITCH, VRS_LAYOUT_COMFORT, VRS_N_LAYOUT };               // LARECOMP_XR_LAYOUT
 enum { VRS_FOLLOW_SMOOTH, VRS_FOLLOW_ROOM, VRS_FOLLOW_FIXED, VRS_N_FOLLOW };  // LARECOMP_VR_FOLLOW
-enum { VRS_EDGE_FOG, VRS_EDGE_GRADIENT, VRS_EDGE_BLACK, VRS_EDGE_PASSTHROUGH, VRS_N_EDGE };  // LARECOMP_VR_EDGE
+enum { VRS_EDGE_OFF, VRS_EDGE_HAZE, VRS_EDGE_SKY, VRS_EDGE_PASSTHROUGH, VRS_N_EDGE };  // LARECOMP_VR_EDGE (outdoors only)
 // LARECOMP_VR_FOVEATION: eye-tracked only (no fixed mode); without gaze the foveation lane renders full density
 enum { VRS_FOV_OFF, VRS_FOV_LOW, VRS_FOV_MEDIUM, VRS_FOV_HIGH, VRS_N_FOV };
 enum { VRS_CULL_FIT, VRS_CULL_WIDE, VRS_CULL_STOCK, VRS_N_CULL };            // LARECOMP_VR_CULL
@@ -20,9 +20,9 @@ typedef struct {
     int refresh;       // VRS_REFRESH_*: the headset's refresh and the game's rate (120 Hz: 60 FPS, 90 Hz: 30 FPS); a relaunch
     int layout;        // VRS_LAYOUT_*
     int follow;        // VRS_FOLLOW_*
-    int height_cm;     // the table's height, centimetres from where the table starts (rig lane)
-    int size_pct;      // the table's size, percent of the default (LARECOMP_VR_SCALE 0.067 m per game unit)
-    int tilt_deg;      // the table's tilt, degrees from the default view (rig lane)
+    int height_cm;     // the table's height, cm from the default (the rig's: not saved here, read back by vr_settings_sync_rig)
+    int size_pct;      // the table's size, percent of the default (0.067 m per game unit); the rig's, not saved here
+    int tilt_deg;      // the table's tilt, degrees from the default view; the rig's, not saved here
     int edge;          // VRS_EDGE_*
     int foveation;     // VRS_FOV_*
     bool dynres;       // dynamic resolution of the eye images (diet lane)
@@ -32,7 +32,7 @@ typedef struct {
 } VrSettings;
 
 #define VR_DEFAULTS {.refresh = VRS_REFRESH_120, .layout = VRS_LAYOUT_SWITCH, .follow = VRS_FOLLOW_SMOOTH, .height_cm = 0, \
-                     .size_pct = 100, .tilt_deg = 0, .edge = VRS_EDGE_FOG, .foveation = VRS_FOV_MEDIUM, .dynres = false, \
+                     .size_pct = 100, .tilt_deg = 0, .edge = VRS_EDGE_OFF, .foveation = VRS_FOV_MEDIUM, .dynres = false, \
                      .cull = VRS_CULL_FIT, .hud_dist = 2.0f, .hud_width = 2.2f}
 
 #ifdef __cplusplus
@@ -64,6 +64,8 @@ bool vr_opt_overridden(VrOpt o);
 bool vr_opt_live(VrOpt o);
 // A change made in the menu (g_settings.vr already holds the new value): to the running VR code.
 void vr_settings_changed(VrOpt o);
+// The tab's Height / Size / Tilt rows show the rig's live values (xr_rig_get_user, weak: a flat build keeps the defaults).
+void vr_settings_sync_rig(void);
 // The Recentre Table button.
 void vr_settings_recentre(void);
 

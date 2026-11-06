@@ -480,3 +480,72 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
     }
     o->vx = (dw - o->vw) / 2; o->vy = (dh - o->vh) / 2;
 }
+
+// VR mode's eye resolution (AwakeningFrame; LARECOMP_VR_DYNRES=1, off by default). The eye images keep their size; the
+// eyes are drawn into the top-left part of their targets at the factor and the eye present scales that part up to the
+// whole eye image (the same plumbing as Dynamic above: allocation scale = the eye's, render scale = the factor times it).
+// Width in pixels between LARECOMP_VR_DYNRES_MIN (1400) and LARECOMP_VR_DYNRES_MAX (the eye width) in 32-pixel steps.
+// The budget is the game's GPU time per game frame (device.c: LARECOMP_VR_DYNRES_MS, 14.5, at 60 fps / 120 Hz; 87% of
+// 33.3 ms at 30 fps / 90 Hz: fill it). Decisions every half second on the median frame in it (spikes left out):
+//   down  2 of the last 3 halves over budget: straight to where the median is predicted to fit with 8% room
+//   up    one step, when it is predicted under 85% of the budget for 4 halves in a row and 3 s after the last change
+// The prediction counts half of G as fixed, half as area (Mabe, 1728 -> 1400: 21.9 -> 18.0 ms). The gap between the
+// two thresholds is the hysteresis: no back-and-forth step every second (shimmer).
+#define VRD_STEP 32
+static double vrd_pred(double G, double from, double to) { double r = to / from; return G * (0.5 + 0.5 * r * r); }
+static int vrd_on = -1, vrd_set = -1;
+// (runtime/vr_settings.c, the VR tab's Dynamic Resolution row) on / off while the game runs; on starts at full size
+void diet_set_dynres(int on) { __atomic_store_n(&vrd_set, on != 0, __ATOMIC_RELAXED); }
+double output_scale_vr_factor(double now, double game_ms, double budget_ms, unsigned eye_w) {
+    static int inited;
+    static double pmin, pmax, p, t0, last_change, win[64];
+    static int nwin, up_votes;
+    static unsigned hist;
+    int set = __atomic_exchange_n(&vrd_set, -1, __ATOMIC_RELAXED);
+    if (set >= 0 && inited && set != vrd_on) {
+        vrd_on = set, p = pmax, last_change = now, hist = 0, up_votes = 0, nwin = 0;
+        LOG("[vrdyn] %s (VR tab)\n", set ? "on" : "off");
+    }
+    if (!inited) {
+        inited = 1;
+        const char *e = getenv("LARECOMP_VR_DYNRES");
+        vrd_on = set >= 0 ? set : e && atoi(e) != 0;
+        pmin = getenv("LARECOMP_VR_DYNRES_MIN") ? atof(getenv("LARECOMP_VR_DYNRES_MIN")) : 1400;
+        pmax = getenv("LARECOMP_VR_DYNRES_MAX") ? atof(getenv("LARECOMP_VR_DYNRES_MAX")) : eye_w;
+        if (pmax > eye_w) pmax = eye_w;
+        if (pmin > pmax) pmin = pmax;
+        if (pmin < 256) pmin = 256;
+        p = pmax, t0 = last_change = now;
+        if (vrd_on) LOG("[vrdyn] eye resolution %.0f-%.0f of %u (LARECOMP_VR_DYNRES)\n", pmin, pmax, eye_w);
+    }
+    if (!vrd_on || !eye_w) return 1.0;
+    if (game_ms > 0 && nwin < 64) win[nwin++] = game_ms;
+    if (now - t0 >= 0.5) {
+        t0 = now;
+        if (nwin >= 4) {
+            for (int i = 1; i < nwin; i++)  // (median: insertion sort of <= 64)
+                for (int j = i; j > 0 && win[j] < win[j - 1]; j--) { double x = win[j]; win[j] = win[j - 1]; win[j - 1] = x; }
+            double G = win[nwin / 2];
+            hist = (hist << 1 | (G > budget_ms)) & 7;
+            int over = (hist & 1) + (hist >> 1 & 1) + (hist >> 2 & 1);
+            double np = p;
+            if (over >= 2 && p > pmin) {
+                double r2 = (0.92 * budget_ms / G - 0.5) / 0.5;  // (vrd_pred(G, p, np) = 0.92 budget)
+                np = r2 > 0 ? floor(p * sqrt(r2) / VRD_STEP) * VRD_STEP : pmin;
+                if (np > p - VRD_STEP) np = p - VRD_STEP;
+                if (np < pmin) np = pmin;
+                hist = 0, up_votes = 0;
+            } else if (p < pmax) {
+                double up = fmin(pmax, p + VRD_STEP);
+                up_votes = vrd_pred(G, p, up) < 0.85 * budget_ms ? up_votes + 1 : 0;
+                if (up_votes >= 4 && now - last_change >= 3.0) np = up, up_votes = 0;
+            }
+            if (np != p) {
+                LOG("[vrdyn] %.0f -> %.0f px (game GPU %.1f ms per frame at %.0f, budget %.1f)\n", p, np, G, p, budget_ms);
+                p = np, last_change = now;
+            }
+        }
+        nwin = 0;
+    }
+    return p / eye_w;
+}

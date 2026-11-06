@@ -133,6 +133,12 @@ The shared and pre-pass rows get none, and the pre-pass is back to 139 draws, 1.
   went from 565 to 147 draws) it stayed at 11 ms. It is the last row before a submission boundary in eye 0 only, so it
   holds the GPU's idle time while the render thread records (render CPU went 12.7 -> 28.4 ms with EXTENT). That fs is
   also the depth-only shader of 422 of the 600 eye pre-pass draws, so skipping it by hash leaves holes (63 % void).
+- Render CPU (Mabe): the executor runs 1593 draws a game frame with the table fit, 3702 with EXTENT (about 7.4 us of
+  render CPU per extra draw) and 2084 with ring. The classification itself (`ring_route`, timed by
+  `LARECOMP_VR_RING_LOG`) is 0.7 - 0.9 ms a game frame (eye 1 mostly hits eye 0's memo; about 26 vertex boxes are made
+  again each frame). The rest of the gap to the draw count's prediction (about 4 ms) is `draw_`'s work before the
+  route on the ~1700 draws it then skips (program lookup, shader hash, camera / weather / snow bookkeeping): routing
+  earlier in `draw_` is the next lever.
 - Neither spot reaches 30 fps with EXTENT. The game holds 30 only with both the GPU and the render thread well under
   33 ms; Mabe with ring alternates (19 fps).
 

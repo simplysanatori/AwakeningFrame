@@ -30,23 +30,27 @@ The refresh rate is the one option the game cannot apply itself: SteamVR's per-a
 | Controller Layout | Switch, Comfort | `vr_layout = switch \| comfort` | `LARECOMP_XR_LAYOUT` | hook `xr_input_set_layout` (stub) |
 | Buttons Match Labels | Off, On | `face_buttons_by_label = 0 \| 1` (the Controls tab's setting) | none (`g_settings.face_by_label`, read live by `xr_input.c`) | live |
 | Follow Mode | Smooth, Room, Fixed | `vr_follow = smooth \| room \| fixed` | `LARECOMP_VR_FOLLOW` | hook `stereo_set_follow` (stub) |
-| Height | 0, -50 to +50 cm in steps of 5 | `vr_table_height = <cm>` | none | hook `xr_rig_set_height_cm` (stub) |
-| Size | 100%, 50 to 200% in steps of 5 | `vr_table_size = <percent>` | `LARECOMP_VR_SCALE` = 0.067 x percent / 100 | hook `xr_rig_set_size_pct` (stub), else restart |
-| Tilt | 0, -30 to +30 degrees in steps of 5 | `vr_table_tilt = <degrees>` | none | hook `xr_rig_set_tilt_deg` (stub) |
-| Recentre Table | button | none | none | hook `xr_rig_recentre` (stub; the row is greyed out until it exists) |
-| Table Edge | Fog, Gradient, Black, Passthrough | `vr_edge = fog \| gradient \| black \| passthrough` | `LARECOMP_VR_EDGE` | hook `edge_set_mode` (stub), else restart |
+| Height | 0, -50 to +40 cm in steps of 5 | none (the rig's, `vr_rig.ini`) | none | live (`xr_rig_set_height_cm`, `runtime/xr/xr_rig_settings.c`) |
+| Size | 100%, 40 to 300% in steps of 10 | none (the rig's, `vr_rig.ini`) | none | live (`xr_rig_set_size_pct`) |
+| Tilt | 0, -20 to +50 degrees in steps of 5 | none (the rig's, `vr_rig.ini`) | none | live (`xr_rig_set_tilt_deg`) |
+| Recentre Table | button | none | none | live (`xr_rig_recentre`; greyed out in a flat build) |
+| Table Edge | Off, Haze, Sky Only, Passthrough (outdoors only; default Off) | `vr_edge_mode = black \| fog \| gradient \| passthrough` | `LARECOMP_VR_EDGE` | restart (no live hook) |
 | Foveation | Off, Low, Medium, High (eye-tracked only) | `vr_foveation = off \| low \| medium \| high` | `LARECOMP_VR_FOVEATION` (default medium) | live (`fov_set_level`); Off at start: restart to turn it on |
 | Dynamic Resolution | Off, On | `vr_dynamic_resolution = 1 \| 0` | `LARECOMP_VR_DYNRES=0` | hook `diet_set_dynres` (stub) |
 | Culling | Fit, Wide, Stock | `vr_culling = fit \| wide \| stock` | `LARECOMP_VR_CULL` | hook `vr_cull_set_mode` (stub) |
 | Panel Distance | 2.0 m, 0.8 to 4.0 m | `vr_panel_distance = <metres>` | `LARECOMP_XR_QUAD=<dist>,<width>` | live (`vrui_set_hud_quad`) |
 | Panel Width | 2.2 m, 0.6 to 4.0 m | `vr_panel_width = <metres>` | the same | live |
 
-Height and tilt have no environment variable (the table's anchor and pitch are `LARECOMP_VR_TABLE` / `LARECOMP_VR_PITCH`,
-absolute and not derived from a default), so they are offsets from the default view, applied by the rig: it reads
-`g_settings.vr.height_cm` / `tilt_deg` / `size_pct` when it starts and the hooks update it while the game runs. A set
-`LARECOMP_VR_TABLE` / `LARECOMP_VR_PITCH` greys the Height / Tilt rows.
+Height, size and tilt belong to the rig (`docs/af/RIG.md`), which keeps them in `vr_rig.ini`; the tab neither saves them in
+`larecomp.ini` nor sets `LARECOMP_VR_SCALE` from them. Each time the tab is drawn it reads the rig's live values
+(`xr_rig_get_user`, weak), so a change made with the controller combos shows, and a change in the tab goes through the
+rig's `xr_rig_set_user`, which clamps to the rig's ranges (height -0.50 to +0.40 m, size 40 to 300%, tilt -20 to +50
+degrees). The rig applies them on top of `LARECOMP_VR_TABLE` / `_PITCH` / `_SCALE`, so those variables do not grey the
+rows. The hooks exist in VR builds only; in a flat build the rows keep their defaults and say "Applies After Restart."
+`larecomp.ini` files from before may still hold `vr_table_height` / `_size` / `_tilt`: they are read and ignored (the
+next save drops them).
 
-## State of the lanes when this was written (all hooks are stubs)
+## State of the lanes when this was written (all hooks are stubs, except the rig's)
 
 None of the rig, fov and diet lanes had committed anything (no `xr_rig.h`, no `LARECOMP_VR_FOVEATION` or
 `LARECOMP_VR_DYNRES` reader), edge had `edge.c` and `EDGE.md` (`LARECOMP_VR_EDGE=fog|gradient|black|passthrough`, default
@@ -71,11 +75,11 @@ was: the variable, or the existing menu text. Style as Moonlight / Apollo: Title
 | `LARECOMP_XR_LAYOUT=switch` / `comfort` | Controller Layout | Switch, Comfort | Switch puts every button where a Switch Pro Controller has it. Comfort puts the sword on the right trigger and the shield on the left. |
 | Buttons match labels (Controls tab) | Buttons Match Labels | Off, On | The Frame controllers' A, B, X and Y work as printed on them. Off matches the Switch's button positions. |
 | `LARECOMP_VR_FOLLOW=smooth` / `room` / `fixed` | Follow Mode | Smooth, Room, Fixed | How the table follows the game's camera. Smooth glides after it, Room holds still until the camera changes room, Fixed never moves. |
-| `LARECOMP_VR_TABLE` (y) | Height | -50 cm to +50 cm | How high the table stands. |
-| `LARECOMP_VR_SCALE` | Size | 50% to 200% | How big the table is. |
-| `LARECOMP_VR_PITCH` | Tilt | -30 to +30 degrees | How far the table leans toward you. |
+| `LARECOMP_VR_TABLE` (y) | Height | -50 cm to +40 cm | How high the table stands. |
+| `LARECOMP_VR_SCALE` | Size | 40% to 300% | How big the table is. |
+| `LARECOMP_VR_PITCH` | Tilt | -20 to +50 degrees | How far the table leans toward you. |
 | right stick click with left grip held | Recentre Table | (button) | Puts the table in front of you again. |
-| `LARECOMP_VR_EDGE=fog` / `gradient` / `black` / `passthrough` | Table Edge | Fog, Gradient, Black, Passthrough | What surrounds the table. Fog fades the world into the distance, Gradient fills the empty space with a soft backdrop, Black leaves it empty, Passthrough shows the room. |
+| `LARECOMP_VR_EDGE=black` / `fog` / `gradient` / `passthrough` | Table Edge | Off, Haze, Sky Only, Passthrough | What fills the empty space past the world outdoors. Haze fades it into the sky, Sky Only fills the space without touching the world, Passthrough shows the room. |
 | `LARECOMP_VR_FOVEATION=off` / `low` / `medium` / `high` | Foveation | Off, Low, Medium, High | Follows your eyes and draws what you aren't looking at in less detail. Higher levels save more GPU time. Without eye tracking it draws everything in full detail. |
 | `LARECOMP_VR_DYNRES` | Dynamic Resolution | Off, On | Lowers the resolution when the GPU can't keep up and raises it again when it can. |
 | `LARECOMP_VR_CULL=fit` / `wide` / `stock` | Culling | Fit, Wide, Stock | How much of the world outside the table is skipped. Fit follows the table's edges, Wide keeps more, Stock keeps everything the game would draw. |
@@ -90,7 +94,7 @@ Notes added to a description by the tab itself: "Applies After Restart." (the op
 
 The tab is an ordinary option-row page: the Frame controllers reach it through `xr_input.c`'s SDL-style events (the layout
 maps them to Switch buttons), L / R (the bumpers) switch tabs, Up / Down move between rows, A or Right steps a value, Left
-steps back, B goes back to the tab bar. Rows set by the environment and the Recentre Table row without its hook are greyed
+steps back, B goes back to the tab bar. Rows set by the environment and the Recentre Table row without its hook (a flat build) are greyed
 out and skipped.
 
 ## Testing without a headset

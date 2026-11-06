@@ -85,7 +85,11 @@ and it works in both of Turnip's modes (sysmem and GMEM).
 - **Log:** `[fov] eye gaze in N of M game frames ... ; X of Y eye passes foveated` every 10 s.
   `LARECOMP_VR_FOVEATION_LOG=1` logs each pass decision (the first 400).
 
-## v1 diorama (fixed table; lane 6 replaces it)
+## Diorama placement
+
+The rig (`runtime/xr/xr_rig.c`, docs/af/RIG.md) now places the table: per-area anchoring, the player's snap turn,
+tilt, height, size and recentre, and the blink. What follows is the v1 placement it grew from; the switches below
+still apply (`LARECOMP_VR_FOLLOW` set: the comfort follow instead of the rig's per-area anchoring).
 
 `app = A + s * Ry(yaw) * (world - pivot)`:
 
@@ -113,6 +117,8 @@ and it works in both of Turnip's modes (sysmem and GMEM).
 | `LARECOMP_STEREO_DUMP_AT=<frame>,...`, `LARECOMP_STEREO_DUMP_DIR` | eye outputs, the HUD clone and the window image as PNG |
 | `LARECOMP_VR_FOLLOW=smooth\|room\|fixed`, `LARECOMP_VR_FOLLOW_TAU=<s>` | how the table follows the game camera (above) |
 | `LARECOMP_XR_PREDICT=measured\|vsync` | the display time the eye poses are located for |
+| `LARECOMP_VR_DIET=0\|dof,merge,smaa` | the VR pass diet (default all; docs/af/PASSES.md) |
+| `LARECOMP_VR_DYNRES=1`, `_MIN` / `_MAX` / `_MS` | dynamic eye resolution (off by default; docs/af/PASSES.md) |
 | `LARECOMP_VR_FOVEATION=off\|low\|medium\|high` | eye-tracked foveation of the eye passes (above) |
 
 Mock run: `XR_RUNTIME_JSON=build/xrmock/runtime.json LARECOMP_XR=1 MOCK_XR_EYE_SIZE=1728x1728

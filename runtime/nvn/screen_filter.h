@@ -11,9 +11,16 @@
 enum { SCREEN_FILTER_OFF, SCREEN_FILTER_GB, SCREEN_FILTER_GBC, SCREEN_FILTER_GRAY };
 
 // pf for the present shader (x: the mode)
+// pf.y: the VR rig's blink (runtime/xr/xr_rig.c: 0 none .. 1 black; there only in Linux builds with the VR mode)
+#if defined(__linux__)
+extern float xr_rig_fade(void) __attribute__((weak));
+#endif
 static inline void screen_filter_params(float pf[4]) {
     pf[0] = (float)g_settings.screen_filter;
     pf[1] = pf[2] = pf[3] = 0;
+#if defined(__linux__)
+    if (xr_rig_fade) pf[1] = xr_rig_fade();
+#endif
 }
 
 #define SCREEN_FILTER_SRC(V3)                                                                                          \
@@ -30,4 +37,5 @@ static inline void screen_filter_params(float pf[4]) {
     "      l = clamp((l - 0.5) * 1.2 + 0.5, 0.0, 1.0);\n"                                                              \
     "      c = " V3 "(l * l * (3.0 - 2.0 * l) * 0.35 + l * 0.65);\n"                                                   \
     "    }\n"                                                                                                          \
-    "  }\n"
+    "  }\n"                                                                                                            \
+    "  c *= 1.0 - pf.y;\n"

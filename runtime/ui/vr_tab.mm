@@ -48,6 +48,7 @@ static void changed(VrOpt o) {
 
 extern "C" void vr_tab_draw(float scale) {
     VrSettings &v = g_settings.vr;
+    vr_settings_sync_rig();  // Height, Size and Tilt are the rig's: a controller change shows here
     opt_begin("##vr", scale);
 
     opt_section("Display");
@@ -74,22 +75,22 @@ extern "C" void vr_tab_draw(float scale) {
                                     "the camera changes room, Fixed never moves.")))
         changed(VRO_FOLLOW);
     grey(VRO_HEIGHT);
-    if (opt_int("Height", &v.height_cm, -50, 50, 5, 0, "%+d cm", desc(VRO_HEIGHT, "How high the table stands.")))
+    if (opt_int("Height", &v.height_cm, -50, 40, 5, 0, "%+d cm", desc(VRO_HEIGHT, "How high the table stands.")))
         changed(VRO_HEIGHT);
     grey(VRO_SIZE);
-    if (opt_int("Size", &v.size_pct, 50, 200, 5, 100, "%d%%", desc(VRO_SIZE, "How big the table is.")))
+    if (opt_int("Size", &v.size_pct, 40, 300, 10, 100, "%d%%", desc(VRO_SIZE, "How big the table is.")))
         changed(VRO_SIZE);
     grey(VRO_TILT);
-    if (opt_int("Tilt", &v.tilt_deg, -30, 30, 5, 0, "%+d\xC2\xB0", desc(VRO_TILT, "How far the table leans toward you.")))
+    if (opt_int("Tilt", &v.tilt_deg, -20, 50, 5, 0, "%+d\xC2\xB0", desc(VRO_TILT, "How far the table leans toward you.")))
         changed(VRO_TILT);
     if (!vr_opt_live(VRO_RECENTRE)) opt_disable_next();
     if (opt_button("Recentre Table", "Puts the table in front of you again.")) vr_settings_recentre();
 
     opt_section("Edge");
     grey(VRO_EDGE);
-    if (opt_choice("Table Edge", &v.edge, g_vr_edge_names, VRS_N_EDGE, VRS_EDGE_FOG,
-                   desc(VRO_EDGE, "What surrounds the table. Fog fades the world into the distance, Gradient fills the empty "
-                                  "space with a soft backdrop, Black leaves it empty, Passthrough shows the room.")))
+    if (opt_choice("Table Edge", &v.edge, g_vr_edge_names, VRS_N_EDGE, VRS_EDGE_OFF,
+                   desc(VRO_EDGE, "What fills the empty space past the world outdoors. Haze fades it into the sky, Sky Only "
+                                  "fills the space without touching the world, Passthrough shows the room.")))
         changed(VRO_EDGE);
 
     opt_section("Performance");
