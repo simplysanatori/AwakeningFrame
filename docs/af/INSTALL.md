@@ -47,3 +47,4 @@ logs and the data folder (game files, saves).
   scratch folder, scratch Steam folder, a stand-in for Steam's debugging port and a stand-in `vrcmd`. Touches nothing real.
 - `steam-frame/privacy-check.sh`: personal data in what this branch added (see its header; `AF_PRIVACY_PATTERNS`).
 - `steam-frame/art/gen-art.py` regenerates the placeholder art (original shapes and the name only).
+- `steam-frame/art/SOURCES.md` lists the SteamGridDB art of the library entry, and `make-art.py` builds its Frame version from it (the art itself is not committed).
