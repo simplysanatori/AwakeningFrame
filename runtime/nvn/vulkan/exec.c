@@ -7462,6 +7462,9 @@ static void draw_(CmdRec *r, bool indexed) {
         for (int i = 0; i < nskip; i++) if (last_hash == skip[i]) { SKIP(SK_DEBUG_SKIP); return; }
         extern bool pot_level_active(void);
         if (last_hash == 0xa2177dbb72197bd9ull && pot_level_active()) { SKIP(SK_HIDDEN); return; }
+        // (VR eyes) the Mysterious Woods' fog dome (a 1200-vertex dome round the game camera, no depth test): made to fill
+        // the stock view from inside, from the diorama it is a big disc with a hard rim over the table (docs/af/EDGE.md)
+        if (last_hash == FS_FOG_DOME && g_eye >= 0 && edge_fog_dome_hidden()) { SKIP(SK_HIDDEN); return; }
         if (vr_diet_wants(last_hash, st.rt.ncolor ? st.rt.color[0] : NULL) && diet_draw(pr, last_hash)) { SKIP(SK_DIET); return; }
         if (g_debug_frame && getenv("LARECOMP_LOG_FSHASH")) LOG("[fshash] fs=%llx hash %016llx\n", (unsigned long long)fs, (unsigned long long)last_hash);
         g_cur_fs_hash = last_hash;

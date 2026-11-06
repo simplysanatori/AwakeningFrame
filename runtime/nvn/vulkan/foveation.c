@@ -68,6 +68,7 @@ typedef struct {
     bool init;
     uint64_t key;
     uint64_t seq;       // the submission of its last update (one update per submission)
+    FovShade sh;        // what its content was made from (fov_shade)
 } VrsMap;
 
 static struct {
@@ -96,6 +97,9 @@ static struct {
     float mock_t[2], drop_on, drop_off;
     // stats
     unsigned st_gaze, st_frames, st_fdm, st_eye_passes;
+    // the latest eye-sized pass's shading (fov_shade)
+    bool shade_on;
+    FovShade shade;
     uint64_t st_t;
 } F = {.level = -1};
 
@@ -404,6 +408,21 @@ static const void *vrs_pass(int eye, uint32_t w, uint32_t h, const float c[2][2]
                 int lw = d[0] >= 1 ? 0 : d[0] >= 0.5f ? 1 : 2, lh = d[1] >= 1 ? 0 : d[1] >= 0.5f ? 1 : 2;
                 px[j * m->mw + i] = (uint8_t)(lw << 2 | lh);  // (log2 width << 2 | log2 height)
             }
+        {   // (fov_shade) the same rings, for the edge pass
+            static const float k[4][4] = {{0, 0, 1, 1}, {0.60f, 0.95f, 0.5f, 0.5f}, {0.45f, 0.80f, 0.25f, 0.5f}, {0.35f, 0.65f, 0.25f, 0.25f}};
+            float s = 1.0f + 3.0f * (1.0f - F.ramp);
+            FovShade *sh = &m->sh;
+            memset(sh, 0, sizeof *sh);
+            sh->w = w, sh->h = h, sh->nfoci = eye == 2 ? 2 : 1, sh->fw = fw, sh->fh = fh;
+            memcpy(sh->c, c, sizeof sh->c);
+            sh->r0 = k[F.level][0] * s, sh->r1 = k[F.level][1] * s;
+            sh->mid[0] = 1, sh->mid[1] = F.level == LV_LOW ? 0 : 1;
+            sh->out[0] = k[F.level][2] >= 0.5f ? 1 : 2, sh->out[1] = k[F.level][3] >= 0.5f ? 1 : 2;
+            if (F.uniform > 0) {
+                int l = F.uniform >= 1 ? 0 : F.uniform >= 0.5f ? 1 : 2;
+                sh->r0 = sh->r1 = -1, sh->out[0] = sh->out[1] = l;
+            }
+        }
         if (F.log_passes) {
             static int nl;
             if (nl++ % 100 < 3) {
@@ -433,6 +452,7 @@ static const void *vrs_pass(int eye, uint32_t w, uint32_t h, const float c[2][2]
     }
     if (!m->init) return NULL;
     F.st_fdm++;
+    F.shade = m->sh, F.shade_on = true;
     F.fsr_info = (VkRenderingFragmentShadingRateAttachmentInfoKHR){
         .sType = VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_INFO_KHR, .imageView = m->view,
         .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .shadingRateAttachmentTexelSize = {VRS_TEXEL, VRS_TEXEL}};
@@ -440,7 +460,7 @@ static const void *vrs_pass(int eye, uint32_t w, uint32_t h, const float c[2][2]
 }
 
 const void *fov_pass(int eye, bool per_eye, uint32_t w, uint32_t h, float fx, float fy) {
-    if (!F.dev_ok || F.level == LV_OFF || eye < 0 || eye > 2) return NULL;
+    if (!F.dev_ok || F.level == LV_OFF || eye < 0 || eye > 2) { F.shade_on = false; return NULL; }
     F.st_eye_passes++;
     uint32_t ew = 0, eh = 0;
     bool size_ok = stereo_eye_size(&ew, &eh) && w >= ew * F.min_scale && h >= eh * F.min_scale;
@@ -450,6 +470,7 @@ const void *fov_pass(int eye, bool per_eye, uint32_t w, uint32_t h, float fx, fl
         LOG("[fov] eye %d pass %ux%u (filled %.2f x %.2f): %s\n", eye, w, h, fx, fy,
             !per_eye ? "shared / not scalable" : !size_ok ? "smaller than the eye" : "foveated");
     }
+    if (per_eye && size_ok) F.shade_on = false;  // (an eye-sized pass: full rate unless the map below is attached)
     if (!per_eye || !F.have_focus || !F.tracking || !size_ok) return NULL;
     // the focus in this pass's pixels (rows from the top of the image; the filled part is its top-left fx x fy)
     if (fx <= 0 || fx > 1) fx = 1;
@@ -498,4 +519,10 @@ const void *fov_pass(int eye, bool per_eye, uint32_t w, uint32_t h, float fx, fl
     F.info = (VkRenderingFragmentDensityMapAttachmentInfoEXT){.sType = VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_INFO_EXT,
                                                               .imageView = s->view, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
     return &F.info;
+}
+
+bool fov_shade(FovShade *out) {
+    if (!F.shade_on) return false;
+    *out = F.shade;
+    return true;
 }

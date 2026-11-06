@@ -33,6 +33,10 @@ int vr_ring_class(const float lo[3], const float hi[3], uint64_t frame);
 // (edge pass, render thread) the latest fit's floor quadrilateral in world (x, z), counter-clockwise from above, the floor
 // height (the anchor's y) and the prism's extent below / above it in game units; false: none (stock / wide culling, a side view)
 bool vr_cull_rect(float quad[4][2], float *floor_y, float *hlo, float *hhi);
+// (edge pass, render thread) where the latest fit's culling frustum meets the floor (the anchor's height): the game draws
+// what lies inside it (and whole objects that reach into it), nothing past it. World (x, z), counter-clockwise from above;
+// a corner whose ray misses the floor lies at the far plane. False with no floor rectangle or a frustum reaching behind.
+bool vr_cull_drawn(float quad[4][2]);
 // Per edge of that quadrilateral, in its order: where the stock screen's own edge lies, as a share of the distance from the
 // quadrilateral's middle to the edge (1 - 1 / k, k of LARECOMP_VR_CULL_RECT: 0 when the rectangle is the stock screen).
 bool vr_cull_rect_shrink(float shrink[4]);

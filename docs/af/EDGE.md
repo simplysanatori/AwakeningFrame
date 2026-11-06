@@ -44,7 +44,7 @@ screen's edge to the culling rectangle's, so `LARECOMP_VR_CULL_RECT` bigger than
 The eye output is B10G11R11 (no alpha, 5-6 mantissa bits), so the result is not written back into it: a smooth gradient
 would band. The pass draws straight into the XR eye image instead (UNORM view, sRGB bytes, as the present did).
 
-## Fade (`LARECOMP_VR_EDGE=fade`, hudbox lane)
+## Fade (`LARECOMP_VR_EDGE=fade`, hudbox lane; edgefx lane)
 
 A round fade to black around the table's centre, like a spotlight on a tabletop: the world ends in a soft round edge
 instead of the loaded zone's straight one. One pass (the main pass alone: no backdrop colours, no void mask), in play
@@ -52,23 +52,56 @@ everywhere: the overworld, interiors, dungeons, side views.
 
 - Each pixel's point on the table: the geometry's own (its depth, through the eye's V / P), else where its ray meets
   the floor plane at the anchor's height (the game's glows and other draws that leave the depth cleared). Rays that
-  never reach the floor are black.
-- Its horizontal distance from the rig's anchor (`stereo_table`: overworld, the game camera's focus at Link's height,
-  filtered; a room, its centre) gives the factor: 1 within `R`, 0 past `R + W`, smootherstep between (no kink at
-  either end). The colour is multiplied by it (the image is gamma-encoded there, so the falloff looks even).
+  never reach the floor are black. A pixel that is already black stays black and its depth is not read (most of the eye).
+- Its horizontal distance from the fade's centre gives the factor: 1 within `R`, 0 past `R + W`, smootherstep between
+  (no kink at either end). The colour is multiplied by it (the image is gamma-encoded there, so the falloff looks even).
+  Being horizontal, the fade is a cylinder: a tree is as bright at its top as at its foot, whatever its height.
+- **Overworld: fitted to what the culling draws.** The game culls with a frustum from its own camera (widened to the
+  table by `vr_cull.c`); on the floor that is a trapezoid widening away from the camera (`vr_cull_drawn`), whose near
+  edge is often only 7-9 units from the table's centre and 2 units past the stock screen's, and its slanted sides 10-14
+  units out. With the old fixed circle (black past 25 units) those sides cut the table first: a straight-sided wedge of
+  trees with black past it, which from the diorama's angle you could see over. Now the circle is fitted inside the
+  trapezoid each game frame: its centre moves (up to 8 units, preferring the table's centre) to where it can be
+  largest, black by the sides and the far edge (`R + W` at most the settings', at least 10 units), `W` 40% of that
+  (3 units at least). The near edge may cut 3 units into it; there, and wherever else the circle reaches past the
+  trapezoid, the factor is also multiplied by a fade to its edges (2 units wide), so no cut shows hard. The fit is
+  filtered over 0.4 s (it changes with the head, through the culling's eye clipping); a level change or a table snap
+  starts it afresh. Measured: Mabe clear to about 8, black past 14; Mysterious Woods clear to about 6.5, black past 11
+  (the tightest culling seen).
 - In a room or a side view (the rig's area, with its camera zone) `R` is at least the zone's farthest corner from the
   anchor plus 1.5 units: the whole room stays clear and the fade only takes what lies past it (the next rooms, the
-  backdrop glow).
-- Dither: triangular, one 8-bit step, interleaved gradient noise with a seed that changes every frame, only where the
-  factor is below 1 and the pixel is not black (the void stays exactly black).
-- The present's screen filter and the rig's blink are applied in the edge pass too (every mode; before this the edge
-  modes skipped the blink).
+  backdrop glow). No fit there.
+- **Foveation's blocks are smoothed.** With eye-tracked foveation (VRS) the eye passes shade up to 4 x 4 pixels at once
+  away from the gaze; the composite into the eye output is one of them. Those blocks, and the stairs they leave along a
+  silhouette against the black, were the "chunky, pixely" fade: the fade is in the periphery by nature, and a dark fade
+  against black makes the blocks' steps stand out. The edge pass itself runs at full rate (its own rendering, no
+  shading-rate attachment). It gets the rings the foveated passes were drawn with (`fov_shade`, foveation.c: foci,
+  ring radii, rates, noted with each new eye output) and works out each 8 px texel's rate exactly as the map did. Where
+  a block of b pixels was shaded once, the treated colour (colour and fade factor, each from its own depth) is taken at
+  the four nearest block centres and interpolated: block edges and silhouette stairs become smooth gradients, 1 x 1
+  areas are read as before. `LARECOMP_VR_EDGE_SMOOTH=0` leaves the blocks.
+- Dither: triangular, one 8-bit step, interleaved gradient noise fixed to the pixel (no per-frame seed: it cannot crawl
+  or shimmer under head motion), only where the factor is below 1 and the pixel is not black (the void stays exactly
+  black).
+- The present's screen filter and the rig's blink are applied in the edge pass too (every mode).
 
 | Variable | Meaning |
 |---|---|
-| `LARECOMP_VR_EDGE_RADIUS=<units>` | clear radius around the anchor, game units (13; a screen is about 15 x 12, a tile 1.5) |
+| `LARECOMP_VR_EDGE_RADIUS=<units>` | clear radius around the anchor, game units (13; a screen is about 15 x 12, a tile 1.5); overworld: the fit's cap with `_WIDTH` |
 | `LARECOMP_VR_EDGE_WIDTH=<units>` | width of the fade past it (12) |
-| `LARECOMP_VR_EDGE_DEBUG=6` | the factor in red, geometry in green, over the dimmed eye |
+| `LARECOMP_VR_EDGE_FIT=0` | overworld: the fixed circle about the anchor (as before), no fit, no fade to the culled floor |
+| `LARECOMP_VR_EDGE_SMOOTH=0` | foveation's blocks left as they are |
+| `LARECOMP_VR_EDGE_DEBUG=6` | the factor in red, geometry in green, over the dimmed eye (unsmoothed, no fit's floor fade) |
+
+## The Mysterious Woods' fog dome
+
+The woods draw a fog dome round the game camera (fragment shader `ffad3b2d795231a7`, 1200 vertices, about 6.6 units
+across before its scale, no depth test, blended): from the stock camera, inside it, it is an even blue haze over the
+screen. From the diorama, outside it, it is a big translucent disc with a hard elliptical rim over the middle of the
+table ("a big circle of fog"). There is no way to make a camera-centred dome right for a viewer outside it, so the VR
+eyes leave it out (`exec.c`, `FS_FOG_DOME` in edge.h; any edge mode). The woods keep their atmosphere from what else
+they draw: three instanced mist sheets that fade against the scene's depth (`8605ce71f404bc10`), the light shafts
+(`d66b33b13b2eac29`, `1372d4fe34dd4bb4`) and the particles. `LARECOMP_VR_FOG_DOME=1` keeps the dome.
 
 ## Modes (`LARECOMP_VR_EDGE`)
 

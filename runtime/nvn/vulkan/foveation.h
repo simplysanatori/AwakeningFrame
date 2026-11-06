@@ -35,3 +35,9 @@ void fov_note_views(const float orient[2][4], const float fov[2][4], uint64_t id
 // LARECOMP_VR_FOVEATION_LOG=1 logs the first 400 decisions.
 // eye 2: a multiview pass (both eyes; one map, the finer rate of the two foci)
 const void *fov_pass(int eye, bool per_eye, uint32_t w, uint32_t h, float fx, float fy);
+// (edge pass, render thread) how the latest eye-sized pass was shaded, so the edge pass can smooth the coarse blocks
+// away; false: it had no shading-rate map (full rate). Per 8 px texel (centre x, y in that pass's pixels, rows from the
+// top) the rate is the finest over the foci of: r = |((x, y) - c) / (fw / 2, fh / 2)|, 1x1 for r < r0, `mid` for r < r1,
+// else `out`; past the filled part (x > fw + 8 or y > fh + 8) 4x4. Rates are log2 width, log2 height.
+typedef struct { uint32_t w, h; int nfoci; float c[2][2], fw, fh, r0, r1; int mid[2], out[2]; } FovShade;
+bool fov_shade(FovShade *out);
