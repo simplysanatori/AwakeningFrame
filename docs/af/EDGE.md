@@ -44,6 +44,32 @@ screen's edge to the culling rectangle's, so `LARECOMP_VR_CULL_RECT` bigger than
 The eye output is B10G11R11 (no alpha, 5-6 mantissa bits), so the result is not written back into it: a smooth gradient
 would band. The pass draws straight into the XR eye image instead (UNORM view, sRGB bytes, as the present did).
 
+## Fade (`LARECOMP_VR_EDGE=fade`, hudbox lane)
+
+A round fade to black around the table's centre, like a spotlight on a tabletop: the world ends in a soft round edge
+instead of the loaded zone's straight one. One pass (the main pass alone: no backdrop colours, no void mask), in play
+everywhere: the overworld, interiors, dungeons, side views.
+
+- Each pixel's point on the table: the geometry's own (its depth, through the eye's V / P), else where its ray meets
+  the floor plane at the anchor's height (the game's glows and other draws that leave the depth cleared). Rays that
+  never reach the floor are black.
+- Its horizontal distance from the rig's anchor (`stereo_table`: overworld, the game camera's focus at Link's height,
+  filtered; a room, its centre) gives the factor: 1 within `R`, 0 past `R + W`, smootherstep between (no kink at
+  either end). The colour is multiplied by it (the image is gamma-encoded there, so the falloff looks even).
+- In a room or a side view (the rig's area, with its camera zone) `R` is at least the zone's farthest corner from the
+  anchor plus 1.5 units: the whole room stays clear and the fade only takes what lies past it (the next rooms, the
+  backdrop glow).
+- Dither: triangular, one 8-bit step, interleaved gradient noise with a seed that changes every frame, only where the
+  factor is below 1 and the pixel is not black (the void stays exactly black).
+- The present's screen filter and the rig's blink are applied in the edge pass too (every mode; before this the edge
+  modes skipped the blink).
+
+| Variable | Meaning |
+|---|---|
+| `LARECOMP_VR_EDGE_RADIUS=<units>` | clear radius around the anchor, game units (13; a screen is about 15 x 12, a tile 1.5) |
+| `LARECOMP_VR_EDGE_WIDTH=<units>` | width of the fade past it (12) |
+| `LARECOMP_VR_EDGE_DEBUG=6` | the factor in red, geometry in green, over the dimmed eye |
+
 ## Modes (`LARECOMP_VR_EDGE`)
 
 | Value | Result |
@@ -51,6 +77,7 @@ would band. The pass draws straight into the XR eye image instead (UNORM view, s
 | `fog` | void -> haze gradient, thin fade where the loaded world meets the void |
 | `gradient` | void -> haze gradient only; geometry untouched (the straight edge stays) |
 | `black` (`off`, `0`, `none`; the default) | off: the present draws the eye as before |
+| `fade` | round fade to black around the table's centre (above); everywhere in play |
 | `passthrough` | void and fade as alpha: eye image alpha = 1 - fade, colour premultiplied; the projection layer gets `BLEND_TEXTURE_SOURCE_ALPHA_BIT` and `xrEndFrame` `ALPHA_BLEND` (xr_loop.c) |
 
 Other variables:

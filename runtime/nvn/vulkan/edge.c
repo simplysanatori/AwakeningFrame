@@ -103,7 +103,7 @@ static void cfg_init(void) {
             cfg.radius, cfg.radius + cfg.width, cfg.room_margin);
     else
     LOG("[edge] mode %s, fog %.2f..%.2f x pivot distance, edge fade radius %.3f of the height x %.2f, haze desat %.2f x%.2f%s\n",
-        cfg.mode == EDGE_BLACK ? "black" : cfg.mode == EDGE_FOG ? "fog" : cfg.mode == EDGE_GRADIENT ? "gradient" : "passthrough",
+        cfg.mode == EDGE_BLACK ? "black" : cfg.mode == EDGE_FOG ? "fog" : cfg.mode == EDGE_GRADIENT ? "gradient" : cfg.mode == EDGE_FADE ? "fade" : "passthrough",
         cfg.fog_start, cfg.fog_end, cfg.soft, cfg.strength, cfg.desat, cfg.bright, cfg.fixed_colours ? ", colours fixed" : "");
 }
 
