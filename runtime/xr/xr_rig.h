@@ -60,12 +60,14 @@ typedef struct {
     float height;  // metres
     float size;    // scale factor
     float tilt;    // degrees
-    float yaw;     // degrees, counter-clockwise seen from above (snap turns step it by 45)
+    float yaw;     // degrees, counter-clockwise seen from above (snap turns step it by 45, smooth turning moves it)
 } XrRigUser;
 void xr_rig_get_user(XrRigUser *u);
 void xr_rig_set_user(const XrRigUser *u);  // applied on the next game frame (a yaw change behind a blink)
 void xr_rig_reset_user(void);              // height 0, size 1, tilt 0, yaw 0 (saved)
 void xr_rig_recentre(void);                // the table in front of the player again, at the head's height (a blink)
+void xr_rig_reset_view(void);              // the same, and the yaw back to 0 (the game's own angle); tilt, height and size kept (a blink)
+void xr_rig_set_turn_mode(int snap);       // 1: right stick sideways snaps 45 degrees behind a blink; 0 (default): turns smoothly
 
 #ifdef __cplusplus
 }

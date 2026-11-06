@@ -75,7 +75,7 @@ export SteamAppId=$APPID
 "$APP/awakeningframe.sh" extra-arg
 RUN=$(ls "$T"/Games/AwakeningFrame/logs/run-*.log | head -1)
 check "wrapper log written" test -f "$RUN"
-check "VR on, 90 Hz (the default), data root, --play" grep -q "fake lasrecomp: XR=1 HZ=90 FPS=unset root=$T/data args=--play extra-arg" "$RUN"
+check "VR on, 120 Hz (the default), data root, --play" grep -q "fake lasrecomp: XR=1 HZ=120 FPS=unset root=$T/data args=--play extra-arg" "$RUN"
 check "wrapper set the four SteamVR keys at launch" test "$(grep -c "steam.app.$APPID" "$T/vrcmd.log")" = 4
 check "headset flag removed after exit" test ! -e "$AF_HEADSET_FLAG"
 sleep 1; echo 'AF_REFRESH_HZ=90' > "$T/Games/AwakeningFrame/session.env"
@@ -88,13 +88,13 @@ sleep 1
 check "session.env: 90 Hz asked" grep -q "HZ=90" "$RUN3"
 rm -f "$T/Games/AwakeningFrame/session.env"
 # the VR tab's Refresh Rate: vr_refresh in the data root's larecomp.ini; AF_FPS from session.env
-printf 'vr_refresh = 120\nvr_fps = 60\n' > "$T/data/larecomp.ini"
+printf 'vr_refresh = 90\nvr_fps = 30\n' > "$T/data/larecomp.ini"
 sleep 1; "$APP/awakeningframe.sh" > /dev/null; RUN4=$(ls -t "$T"/Games/AwakeningFrame/logs/run-*.log | head -1)
-check "larecomp.ini in the data root: 120 Hz asked" grep -q "HZ=120 FPS=unset" "$RUN4"
+check "larecomp.ini in the data root: 90 Hz asked" grep -q "HZ=90 FPS=unset" "$RUN4"
 rm -f "$T/data/larecomp.ini"
 echo 'AF_FPS=60' > "$T/Games/AwakeningFrame/session.env"
 sleep 1; "$APP/awakeningframe.sh" > /dev/null; RUN5=$(ls -t "$T"/Games/AwakeningFrame/logs/run-*.log | head -1)
-check "session.env AF_FPS=60: LARECOMP_XR_FPS=60" grep -q "HZ=90 FPS=60" "$RUN5"
+check "session.env AF_FPS=60: LARECOMP_XR_FPS=60" grep -q "HZ=120 FPS=60" "$RUN5"
 rm -f "$T/Games/AwakeningFrame/session.env"
 # the flag exists while the game runs, and goes when the wrapper is stopped
 sleep 1; FAKE_MODE=sleep "$APP/awakeningframe.sh" > /dev/null 2>&1 &

@@ -1,7 +1,7 @@
 // The Frame controllers in VR mode: one action set, its bindings (the Steam Frame's own profile, XR_VALVE_frame_controller
 // _interaction; the Touch profile as a fallback for other headsets), the sync once per display refresh, and the hand-off
 // of the result to the game (runtime/hle/input.c input_xr_set, as the buttons and the left stick of a gamepad) and to
-// the rig (xr.h: snap turn, tilt, height / size, recentre). The game's rumble (input_rumble_level) goes to both
+// the rig (xr.h: turn, tilt, height / size, reset view). The game's rumble (input_rumble_level) goes to both
 // controllers as short haptic pulses renewed while it lasts (GalaxyFrame's scheme: 120 ms pulses every 80 ms, stopped
 // at once when the rumble ends, so a runtime that ignores a pulse's duration can't leave a controller running).
 // Reference: GalaxyFrame's platform/src/xr/xr_app.cpp (initActions, suggestFrame, updateInput).
@@ -96,6 +96,8 @@ static const int8_t k_bool_ctl[A_GRIP_L] = {[A_A] = C_A, [A_B] = C_B, [A_X] = C_
                                            [A_BUMP_L] = C_BUMP_L, [A_BUMP_R] = C_BUMP_R, [A_CLICK_L] = C_CLICK_L,
                                            [A_CLICK_R] = C_CLICK_R, [A_TRIG_L] = C_TRIG_L, [A_TRIG_R] = C_TRIG_R};
 
+#define RESET_HOLD_NS 100000000ull  // both sticks clicked together this long: reset the view
+
 #define XRIN_FUNCS(F)                                                                                                 \
     F(xrStringToPath) F(xrCreateActionSet) F(xrDestroyActionSet) F(xrCreateAction) F(xrSuggestInteractionProfileBindings) \
     F(xrAttachSessionActionSets) F(xrSyncActions) F(xrGetActionStateBoolean) F(xrGetActionStateFloat)                 \
@@ -122,21 +124,24 @@ static struct {
     int32_t last_lx, last_ly;
     int last_axis[2];          // the left stick as last sent to the menus (SDL axis events)
     bool snap_armed;
+    int dom;                   // the right stick's dominant axis: 0 none, 1 sideways (turn), 2 up / down (tilt)
+    uint64_t both_ns;          // when both stick clicks went down together (0: not both down)
+    bool both_fired;           // the reset for this press was sent
 } S = {.snap_armed = true};
 
 static _Atomic float g_yaw;
 static _Atomic int g_snap;                // -1 / +1 pending, 0 none
-static _Atomic bool g_recentre;
-static _Atomic float g_tilt, g_height, g_size;
+static _Atomic bool g_reset;
+static _Atomic float g_tilt, g_turn, g_height, g_size;
 static _Atomic bool g_modifier;
 
 void xr_input_set_yaw(float yaw) { atomic_store(&g_yaw, yaw); }
 void xr_input_rig(XrRigInput *out) {
-    out->tilt = atomic_load(&g_tilt), out->height = atomic_load(&g_height), out->size = atomic_load(&g_size);
+    out->tilt = atomic_load(&g_tilt), out->turn = atomic_load(&g_turn), out->height = atomic_load(&g_height), out->size = atomic_load(&g_size);
     out->modifier = atomic_load(&g_modifier);
 }
 int xr_input_take_snap(void) { return atomic_exchange(&g_snap, 0); }
-bool xr_input_take_recentre(void) { return atomic_exchange(&g_recentre, false); }
+bool xr_input_take_reset_view(void) { return atomic_exchange(&g_reset, false); }
 
 // ---- set-up
 static XrPath path(const char *s) {
@@ -336,19 +341,39 @@ void xr_input_frame(void) {
     }
     bool mod = S.down[C_GRIP_L];
 
-    // the rig's: the left grip makes the D-pad (and a click of the right stick) the rig's, not the game's
+    // the rig's: the left grip makes the D-pad (and a click of the right stick) the rig's, not the game's; so does a click
+    // of both sticks, held for RESET_HOLD: a single click, or both for less than that, goes to the game as it always did
     bool rig_ctl[C_COUNT] = {0};
     if (mod) rig_ctl[C_DUP] = rig_ctl[C_DDOWN] = rig_ctl[C_DLEFT] = rig_ctl[C_DRIGHT] = rig_ctl[C_CLICK_R] = true;
     atomic_store(&g_modifier, mod);
-    atomic_store(&g_tilt, sr[1]);
+    {
+        uint64_t now = plat_now_ns();
+        if (S.down[C_CLICK_L] && S.down[C_CLICK_R]) {
+            if (!S.both_ns) S.both_ns = now, S.both_fired = false;
+            if (now - S.both_ns >= RESET_HOLD_NS) {
+                if (!S.both_fired) S.both_fired = true, atomic_store(&g_reset, true);
+                rig_ctl[C_CLICK_L] = rig_ctl[C_CLICK_R] = true;  // (the reset's: the game sees neither until both are let go)
+            }
+        } else if (S.both_fired && (S.down[C_CLICK_L] || S.down[C_CLICK_R])) {
+            rig_ctl[C_CLICK_L] = rig_ctl[C_CLICK_R] = true;      // (one let go, the other still down: still not a click of the game's)
+        } else S.both_ns = 0, S.both_fired = false;
+    }
+    // the right stick: sideways turns the table, up / down tilts it; the axis it was first pushed along wins until the other
+    // is clearly bigger (1.4 times), so a thumb that wanders does not tilt a turn or turn a tilt
+    float ax = fabsf(sr[0]), ay = fabsf(sr[1]);
+    if (ax < 0.01f && ay < 0.01f) S.dom = 0;
+    else if (S.dom == 0) S.dom = ax >= ay ? 1 : 2;
+    else if (S.dom == 1 && ay > ax * 1.4f) S.dom = 2;
+    else if (S.dom == 2 && ax > ay * 1.4f) S.dom = 1;
+    atomic_store(&g_tilt, S.dom == 2 ? sr[1] : 0.0f);
+    atomic_store(&g_turn, S.dom == 1 ? sr[0] : 0.0f);
     atomic_store(&g_height, mod ? (float)(S.down[C_DUP] - S.down[C_DDOWN]) : 0.0f);
     atomic_store(&g_size, mod ? (float)(S.down[C_DRIGHT] - S.down[C_DLEFT]) : 0.0f);
-    static bool click_was;
-    if (mod && S.down[C_CLICK_R] && !click_was) atomic_store(&g_recentre, true);
+    static bool click_was;  // (left grip + a click of the right stick: the same reset as both sticks)
+    if (mod && S.down[C_CLICK_R] && !click_was) atomic_store(&g_reset, true);
     click_was = mod && S.down[C_CLICK_R];
-    float ax = fabsf(sr[0]);
     if (ax < 0.35f) S.snap_armed = true;
-    else if (ax > 0.7f && S.snap_armed) S.snap_armed = false, atomic_store(&g_snap, sr[0] > 0 ? 1 : -1);
+    else if (ax > 0.7f && S.snap_armed && S.dom == 1) S.snap_armed = false, atomic_store(&g_snap, sr[0] > 0 ? 1 : -1);
 
     // the game's: buttons through the layout table, the left stick turned by the table's yaw
     uint32_t host = 0;

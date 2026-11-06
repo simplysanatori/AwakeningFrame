@@ -70,6 +70,21 @@ int main(int argc, char **argv) {
         settings_save();
         return 0;
     }
+    if (argc == 8 && !strcmp(argv[1], "vr-opts")) {  // edge, turning, foveation, dynamic resolution: the rows and the variables
+        // argv: edge index, turn index, LARECOMP_VR_EDGE ("-": unset), LARECOMP_VR_TURN, LARECOMP_VR_FOVEATION, LARECOMP_VR_DYNRES
+        settings_load();
+        assert(g_settings.vr.edge == atoi(argv[2]));
+        assert(g_settings.vr.turn == atoi(argv[3]));
+        const char *want[4] = {argv[4], argv[5], argv[6], argv[7]};
+        const char *vars[4] = {"LARECOMP_VR_EDGE", "LARECOMP_VR_TURN", "LARECOMP_VR_FOVEATION", "LARECOMP_VR_DYNRES"};
+        for (int i = 0; i < 4; i++) {
+            const char *got = getenv(vars[i]);
+            assert(!strcmp(want[i], "-") ? !got : got && !strcmp(got, want[i]));
+        }
+        assert(!getenv("LARECOMP_VR_CULL"));  // (the Culling row is gone: nothing sets it)
+        settings_save();
+        return 0;
+    }
     assert(argc == 3);
     settings_load();
     assert(!g_settings.upscaler_auto);

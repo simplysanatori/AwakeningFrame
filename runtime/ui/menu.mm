@@ -813,6 +813,8 @@ extern "C" bool race_overlay_wanted(void);
 extern "C" void race_overlay_draw(ImVec2 display, ImFont *font, float scale);
 extern "C" bool pickup_flyin_wanted(void);  // (silent pickups: pickup_flyin.mm)
 extern "C" void pickup_flyin_draw(ImVec2 display, ImFont *font, float scale);
+extern "C" bool view_toast_wanted(void);  // (the rig's "View Reset" label: view_toast.mm)
+extern "C" void view_toast_draw(ImVec2 display, ImFont *font, float scale);
 extern "C" bool race_overlay_key(char *out, size_t cap);
 extern "C" bool dpad_overlay_wanted(void);  // (d-pad items' HUD cross: dpad_overlay.mm)
 extern "C" void dpad_overlay_key(char *out, size_t cap);
@@ -1185,7 +1187,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool chaos = !open && chaos_overlay_wanted();
     bool kbd = g_kbd.load() == 1;
     bool race = race_overlay_wanted();  // (run timer, race seed hash: race_overlay.mm)
-    bool flyin = pickup_flyin_wanted() && !open;  // (a silent pickup's card)
+    bool flyin = (pickup_flyin_wanted() | view_toast_wanted()) && !open;  // (a silent pickup's card; the view reset's label)
     bool dpad = !open && dpad_overlay_wanted();
 #ifdef __APPLE__
     plastic_perf_note(cb, open);  // (LARECOMP_UI_PERF test only)
@@ -1307,7 +1309,10 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
 
     if (race) race_overlay_draw(io.DisplaySize, g_menu_font_big, scale);
     if (dpad) dpad_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont(), scale);
-    if (flyin) pickup_flyin_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont(), scale);
+    if (flyin) {
+        pickup_flyin_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont(), scale);
+        view_toast_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont(), scale);
+    }
     if (trk) tracker_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
     if (chaos) chaos_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
     if (trkd) tracker_dungeon_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());

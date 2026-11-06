@@ -12,7 +12,7 @@
 #               session xr_timing-<time>.log, lasrecomp-<time>.log, vrtiming-<time>.log (SteamVR's compositor)
 # Settings for one launch from the Steam library, which passes no environment of its own: VAR=value lines
 # in <program folder>/../session.env (e.g. AF_REFRESH_HZ=90, LARECOMP_XR_EYE_SCALE=0.8).
-# Variables: AF_REFRESH_HZ (72, 90 or 120; default: the VR tab's Refresh Rate, else 90), AF_FPS=60 (a test: 60 fps at
+# Variables: AF_REFRESH_HZ (72, 90 or 120; default: the VR tab's Refresh Rate, else 120), AF_FPS=60 (a test: 60 fps at
 # 90 Hz, frames alternating one and two refreshes; the VR tab's third Refresh Rate choice does the same), AF_VRTIMING=0 (no compositor log), AF_VRCMD,
 # AF_HEADSET_FLAG, AF_LOGS, AF_KEEP (sessions of logs kept, default 12), LARECOMP_DATA_ROOT.
 HERE=$(dirname "$(readlink -f "$0")")
@@ -59,7 +59,7 @@ fi
 [ "$LAUNCHER" = 1 ] || ARGS=(--play "${ARGS[@]}")
 
 # ---- VR or flat
-# The refresh rate: AF_REFRESH_HZ (session.env) wins; else the VR tab's Refresh Rate (vr_refresh in larecomp.ini); else 90.
+# The refresh rate: AF_REFRESH_HZ (session.env) wins; else the VR tab's Refresh Rate (vr_refresh in larecomp.ini); else 120.
 # The ini is the file the game reads: LARECOMP_SETTINGS, else larecomp.ini in the data root (where the game keeps it:
 # LARECOMP_DATA_ROOT, set above), else the program folder's. AF_REFRESH_FROM tells the game which, so its VR tab greys
 # the row out when session.env sets it. AF_FPS=60 (session.env) is the 60 fps test at 90 Hz; without it the ini's vr_fps
@@ -78,8 +78,8 @@ else
     [ -n "$INI_HZ" ] && log "refresh rate $INI_HZ Hz from $INI (the VR tab's Refresh Rate)"
     export AF_REFRESH_FROM=ini
 fi
-HZ=${AF_REFRESH_HZ:-${INI_HZ:-90}}
-case "$HZ" in 72 | 90 | 120) ;; *) log "AF_REFRESH_HZ=$HZ is not 72, 90 or 120, using 90"; HZ=90 ;; esac
+HZ=${AF_REFRESH_HZ:-${INI_HZ:-120}}
+case "$HZ" in 72 | 90 | 120) ;; *) log "AF_REFRESH_HZ=$HZ is not 72, 90 or 120, using 120"; HZ=120 ;; esac
 if [ -n "${AF_FPS:-}" ]; then
     export LARECOMP_XR_FPS=$AF_FPS
     log "AF_FPS=$AF_FPS: LARECOMP_XR_FPS=$AF_FPS"
