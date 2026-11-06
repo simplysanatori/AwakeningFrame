@@ -44,6 +44,8 @@ extern "C" {
 bool xr_wanted(void);
 // The session exists (xr_start succeeded) and the XR thread runs.
 bool xr_active(void);
+// Between xrBeginSession and xrEndSession (any thread).
+bool xr_session_running(void);
 // This thread is inside an OpenXR call that may use our device (xrCreateSession, swapchain calls, xrBeginFrame,
 // xrEndFrame): SteamVR makes Vulkan objects of its own on our device there - shader modules declaring
 // ShaderViewportIndexLayerEXT, fragment density map images - and device.c's validation callback tells their messages

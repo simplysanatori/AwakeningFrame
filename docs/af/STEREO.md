@@ -133,7 +133,7 @@ still apply (`LARECOMP_VR_FOLLOW` set: the comfort follow instead of the rig's p
   - `room`: held. When the camera zone changes it glides (as smooth) until the game's camera has settled, then holds.
   - `fixed`: held.
   - In every mode a cut snaps it: the raw pivot more than 24 units away (a level change, a teleport, a camera cut).
-- **A:** the point the pivot sits on. It is the player's Distance (default 1.2 m, `LARECOMP_VR_DIST`) from the head's
+- **A:** the point the pivot sits on. It is the player's Distance (default 0.8 m, `LARECOMP_VR_DIST`) from the head's
   start, at `LARECOMP_VR_PITCH` degrees down (default 15, so Link is near the forward view; the table is then tilted 30
   degrees to be seen at the game camera's 45), or `LARECOMP_VR_TABLE=x,y,z`. See RIG.md, Default placement.
 - **s:** `LARECOMP_VR_SCALE` (0.067 m per unit). `LARECOMP_VR_YAW` sets the yaw.

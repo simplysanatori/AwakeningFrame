@@ -91,7 +91,7 @@ extern "C" void vr_tab_draw(float scale) {
     if (opt_int("Height", &v.height_cm, -50, 40, 5, 0, "%+d cm", desc(VRO_HEIGHT, "How high the table stands.")))
         changed(VRO_HEIGHT);
     grey(VRO_DIST);
-    if (opt_int("Distance", &v.dist_cm, 60, 300, 10, 120, "%d cm", desc(VRO_DIST, "How far away the table stands.")))
+    if (opt_int("Distance", &v.dist_cm, 60, 300, 10, 80, "%d cm", desc(VRO_DIST, "How far away the table stands.")))
         changed(VRO_DIST);
     grey(VRO_SIZE);
     if (opt_int("Size", &v.size_pct, 40, 300, 10, 100, "%d%%", desc(VRO_SIZE, "How big the table is.")))

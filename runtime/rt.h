@@ -94,6 +94,12 @@ uint32_t ipc_connect_named_port(const char *name);
 enum { RT_REBOOT_NONE, RT_REBOOT_GAME, RT_REBOOT_TITLE };  // GAME: boot again at once (new seed); TITLE: start screen
 void rt_request_reboot(int kind);  // any thread; the window loop (ui_run) returns it and main() carries it out
 int rt_reboot_requested(void);
+// ---- quitting (main.c). The game's own menu, the XR runtime ending the session and SIGTERM / SIGINT (VR mode) call
+// rt_request_quit; a window close SDL makes itself does not, so VR mode can tell the two apart (device.c ui_run).
+void rt_request_quit(const char *why);  // any thread
+bool rt_quit_requested(void);
+bool rt_ignore_window_close(const char *what);  // VR mode with the XR session running: logs and returns true (ignore the close)
+void rt_install_quit_signals(void);     // SIGTERM / SIGINT request a quit (set SDL_HINT_NO_SIGNAL_HANDLERS before SDL_Init)
 extern volatile int g_rt_unwind;   // set while guest threads are being stopped (kernel.c)
 void rt_unwind_point(void);        // guest threads: unwind to thread_main if a reboot is stopping them
 
