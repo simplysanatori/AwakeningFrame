@@ -30,6 +30,7 @@
 #include "../weather.h"
 #include "../cam_override.h"
 #include "stereo.h"
+#include "edge.h"
 #include "vr_diet.h"
 #include "foveation.h"
 
@@ -8909,6 +8910,8 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
         VkExtent2D ext;
         if (!eye_target(eye, &img, &view, &fmt, &ext)) continue;
         vk_full_barrier(cb);
+        float fx = b->scalable && b->ax > 0 ? b->sx / b->ax : 1, fy = b->scalable && b->ay > 0 ? b->sy / b->ay : 1;
+        if (edge_eye(cb, eye, view, fmt, ext.width, ext.height)) { drawn |= 1 << eye; continue; }  // (the edge pass instead of the present draw)
         VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = view,
                                         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                         .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
@@ -8917,7 +8920,6 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
         rec_CmdBeginRendering(cb, &ri);
         VkRect2D sc = {{0, 0}, ext};
         rec_CmdSetScissor(cb, 0, 1, &sc);
-        float fx = b->scalable && b->ax > 0 ? b->sx / b->ax : 1, fy = b->scalable && b->ay > 0 ? b->sy / b->ay : 1;
         VkPipeline p = present_pipeline_ex(fmt, false);
         VkDescriptorSet ds = vk_alloc_set(present_set_layout);
         VkDescriptorImageInfo ii = {vk_default_sampler(true), raw_view(b), VK_IMAGE_LAYOUT_GENERAL};

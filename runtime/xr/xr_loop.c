@@ -11,6 +11,7 @@
 #include "../nvn/pace.h"
 #include "xr_input.h"
 #include "xr_internal.h"
+#include "../nvn/vulkan/edge.h"
 
 void vi_external_vsync(uint64_t now_ns);  // runtime/hle/vi.c
 
@@ -169,6 +170,8 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
                     .type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW, .pose = s->views[i].pose, .fov = s->views[i].fov,
                     .subImage = {g_xr.eyes[s->pair][i].sc, {{0, 0}, {(int32_t)g_xr.eyes[s->pair][i].w, (int32_t)g_xr.eyes[s->pair][i].h}}, 0}};
             proj.space = s->space;
+            // (LARECOMP_VR_EDGE=passthrough: the eye images carry premultiplied alpha, 0 in the void: runtime/nvn/vulkan/edge.c)
+            if (edge_passthrough_wanted()) proj.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
             proj.viewCount = 2;
             proj.views = pv;
             layers[n++] = (const XrCompositionLayerBaseHeader *)&proj;
@@ -188,7 +191,7 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
         st.no_render++;
     }
     XrFrameEndInfo ei = {.type = XR_TYPE_FRAME_END_INFO, .displayTime = fs->predictedDisplayTime,
-                         .environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE, .layerCount = n, .layers = layers};
+                         .environmentBlendMode = edge_passthrough_wanted() ? XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND : XR_ENVIRONMENT_BLEND_MODE_OPAQUE, .layerCount = n, .layers = layers};
     vk_queue_lock();
     XrResult r = XR_RT(p_xrEndFrame(g_xr.session, &ei));
     vk_queue_unlock();
