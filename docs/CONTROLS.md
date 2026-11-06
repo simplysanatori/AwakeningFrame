@@ -93,6 +93,15 @@ it back, and B goes back to the tab bar. Rows set by a variable in
 In menus the right face button (the Frame's B, by position) confirms, as on a
 Switch, unless the Controls tab sets the controller's own convention.
 
+**Pointer.** While this menu is open, the right controller casts a green ray
+with a gold dot where it meets the panel. Point at a row and pull the right
+trigger to click. Hold it to drag a slider. Push the right stick up or down
+to scroll. The controller ticks when the dot reaches a new control (off with
+the Controls tab's Rumble). The trigger never reaches the game while the menu
+is open, so a click on the close button doesn't swing the sword. *Pointer
+Hand* on the VR tab moves the ray to the left controller. The game's own
+menus (pause, inventory) still use the buttons.
+
 ## Rumble
 
 When the game rumbles, both controllers vibrate. The Controls tab's Rumble

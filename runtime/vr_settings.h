@@ -17,6 +17,7 @@ enum { VRS_FOV_OFF, VRS_FOV_LOW, VRS_FOV_MEDIUM, VRS_FOV_HIGH, VRS_N_FOV };
 enum { VRS_TURN_SMOOTH, VRS_TURN_SNAP, VRS_N_TURN };                         // LARECOMP_VR_TURN (the rig's right stick)
 // AF_REFRESH_HZ / LARECOMP_XR_HZ / LARECOMP_XR_FPS: 120 Hz at 60 FPS (the default), 90 Hz at 30 FPS, 90 Hz at 60 FPS (a test)
 enum { VRS_REFRESH_120, VRS_REFRESH_90, VRS_REFRESH_90_60, VRS_N_REFRESH };
+enum { VRS_HAND_RIGHT, VRS_HAND_LEFT, VRS_N_HAND };                          // LARECOMP_VR_POINTER_HAND (the menu laser)
 
 typedef struct {
     int refresh;       // VRS_REFRESH_*: the headset's refresh and the game's rate (120 Hz: 60 FPS, 90 Hz: 30 FPS or, as a test, 60); a relaunch
@@ -31,6 +32,7 @@ typedef struct {
     bool dynres;       // dynamic resolution of the eye images (diet lane)
     float hud_dist;    // the HUD / menu panel: metres from the head
     float hud_width;   // and its width in metres (LARECOMP_XR_QUAD=dist,width)
+    int pointer_hand;  // VRS_HAND_*: the controller whose laser points at the menu (xr_input.c reads it live)
 } VrSettings;
 
 #define VR_DEFAULTS {.refresh = VRS_REFRESH_120, .layout = VRS_LAYOUT_SWITCH, .turn = VRS_TURN_SMOOTH, .follow = VRS_FOLLOW_SMOOTH, \
@@ -43,13 +45,13 @@ extern "C" {
 
 typedef enum {
     VRO_REFRESH, VRO_LAYOUT, VRO_TURN, VRO_FOLLOW, VRO_HEIGHT, VRO_SIZE, VRO_TILT, VRO_RECENTRE, VRO_EDGE, VRO_FOVEATION, VRO_DYNRES,
-    VRO_HUD_DIST, VRO_HUD_WIDTH, VRO_COUNT
+    VRO_HUD_DIST, VRO_HUD_WIDTH, VRO_POINTER_HAND, VRO_COUNT
 } VrOpt;
 
 // the choices' names for the menu, and their larecomp.ini words
 extern const char *const g_vr_refresh_names[VRS_N_REFRESH], *const g_vr_layout_names[VRS_N_LAYOUT],
     *const g_vr_follow_names[VRS_N_FOLLOW], *const g_vr_edge_names[VRS_N_EDGE], *const g_vr_fov_names[VRS_N_FOV],
-    *const g_vr_turn_names[VRS_N_TURN];
+    *const g_vr_turn_names[VRS_N_TURN], *const g_vr_hand_names[VRS_N_HAND];
 
 // settings.c: one ini line (true: it was a VR key) / the VR keys
 bool vr_settings_parse(const char *key, const char *val);
