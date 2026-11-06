@@ -186,7 +186,7 @@ static bool eye_fn(const CamLatch *l, const float pivot_in[3], float V[2][16], f
     memcpy(pivot, rp.anchor, 12);
     g_table.ok = true, g_table.room = rp.area != XR_RIG_OPEN, g_table.zone = ri.zone;
     memcpy(g_table.anchor, rp.anchor, 12), memcpy(g_table.lo, ri.zlo, 12), memcpy(g_table.hi, ri.zhi, 12);
-    cam_override_table_anchor(pivot);  // (perf lane: the culling fit centres the table here)
+    cam_override_table_anchor(pivot);  // (the culling fit centres the table here)
     const float *Rw = rp.R;  // world -> app (row-major); its transpose takes app to world
     const float *gp = l->ref.P;
     for (int e = 0; e < 2; e++) {

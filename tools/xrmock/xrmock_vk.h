@@ -24,5 +24,7 @@ double mockvk_release_wait_ms(void);
 // (COLOR_ATTACHMENT_OPTIMAL / DEPTH_STENCIL_ATTACHMENT_OPTIMAL).  Writes the
 // mean colour into `stats`.  Returns 0 on success.
 int mockvk_dump_png(void* images, int index, uint32_t layer, int x, int y, int w, int h, const char* path, char* stats, size_t statcap);
+// The same image as RGBA8 in memory (malloc'd, the caller frees; NULL: failed).
+uint8_t* mockvk_read_rgba(void* images, int index, uint32_t layer, int w, int h);
 // Highest Vulkan API version offered (XR_MAKE_VERSION), default 1.3.
 void mockvk_set_max_api(uint32_t major, uint32_t minor);

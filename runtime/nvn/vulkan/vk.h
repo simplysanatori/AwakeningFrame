@@ -143,7 +143,8 @@ static inline bool vk_tex_twinned(const NvnTexture *t) {  // its backend has (or
     return b && (b->is_twin || b->twin || b->mv_tw);
 }
 // ---- multiview storage (LARECOMP_MV=1, VR mode): twins are layer 1 of their eye-0 image
-bool vk_mv_on(void);       // LARECOMP_MV=1 and the stereo executor wanted (read once)
+bool vk_mv_wanted(void);   // the stereo executor wanted and LARECOMP_MV not 0 (default on)
+bool vk_mv_on(void);       // multiview storage: wanted and the device has multiview (LARECOMP_MV=1: even without)
 extern int vk_eye_layer;   // the layer single-layer views of twinned images take (the eye being executed: 0 / 1)
 static inline bool vk_b_layered(const TexBackend *b) { return b && b->mv2 && b->mv_tw; }
 void vk_mv_latch(void);    // (an eye-1 run starts, or a multiview run) the layered candidates not presented become twins

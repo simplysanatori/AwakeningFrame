@@ -9,7 +9,7 @@ You need your own copy of the game and the keys from your own Switch. No game da
 What it does:
 
 - Puts the whole game on a table in front of you, as a miniature diorama. Link is about 10 cm tall. The game's art style already looks like toys on a table.
-- Renders each eye with its own camera, so the island is in true stereo, and follows your head.
+- Draws both eyes in one pass, each with its own camera, so the island is in true stereo, and follows your head.
 - Shows hearts, text and menus on a floating panel.
 - Holds the table still on each room in houses and dungeons, and follows Link smoothly in the overworld.
 - Stands side-scrolling passages upright, like a wall.
@@ -22,14 +22,14 @@ What it does:
 LAS Recomp runs in a window on Windows, macOS and Linux. I added a VR mode and the Frame side:
 
 - A Linux Arm64 build for the Frame, with an OpenXR session in SteamVR on the game's own Vulkan renderer.
-- Stereo: each of the game's frames is drawn twice, once per eye, with its own camera. Shadow maps and other work that doesn't depend on the eye are drawn once and shared.
-- The HUD and menus on a separate floating panel, with a transparent background.
+- Stereo in one pass: the game's draws go to both eyes at once with Vulkan multiview, each eye with its own camera. Shadow maps and other work that doesn't depend on the eye are drawn once and shared.
+- The HUD and menus on a separate floating panel, with a transparent background, and a laser pointer from a controller for the game's menu.
 - The diorama rig: where the table sits, how it follows Link, room by room or smoothly, side views stood upright, and a blink for every sudden change.
 - The Frame controllers mapped to a Switch Pro Controller by position, with rumble on both controllers.
 - Eye-tracked foveated rendering, dynamic eye resolution, and a VR mode that skips passes the headset doesn't need.
 - Shader preparation at every start, not only from the start screen.
-- A VR tab in the game's menu.
-- An optional edge for the overworld: a soft fade, or passthrough to your room.
+- A VR tab in the game's menu. Its rows apply while you play.
+- An optional table edge: a soft round fade in every room, or passthrough to your room past the edge of the overworld.
 - Scripts to extract your game, build and install it, add it to Steam with SteamVR's per-app settings, and remove it again.
 
 ## Status
@@ -38,7 +38,6 @@ AwakeningFrame is an early preview.
 
 Known issues:
 
-- The left eye can briefly show a flat view during fast camera moves.
 - The first launch takes longer while the shaders are prepared.
 
 ## Requirements
@@ -147,6 +146,10 @@ Turning is smooth by default. With Turning set to Snap, a flick of the right sti
 
 Resetting the view turns the table back to the game's own angle and puts it in front of you again. Height, distance, size and tilt stay as you set them. "View Reset" shows on the panel for a moment. If you keep both thumbsticks down for 2 seconds, the view resets again, and the height, distance, size and tilt go back to the defaults too. "Full View Reset" shows on the panel. Left grip + a right stick click does the same, with the same hold times.
 
+In the game's menu the right controller points with a green laser: pull its trigger to click, push the right stick to scroll. Pointer Hand on the VR tab moves the laser to the left controller.
+
+Menu and View act a moment after you press them, so that pressing both opens the game's menu without also opening the pause menu or the map.
+
 With Buttons Match Labels on, A, B, X and Y work as printed on the Frame controllers instead of by position. The Comfort layout puts the sword on the right trigger and the shield on the left trigger.
 
 More detail is in [docs/CONTROLS.md](docs/CONTROLS.md).
@@ -157,17 +160,18 @@ Press **View** and **Menu** together to open the game's menu. The VR tab is next
 
 | Row | Choices | What it does |
 |---|---|---|
-| Refresh Rate | 120 Hz (60 FPS), 90 Hz (30 FPS) | The headset's refresh rate, and with it the game's frame rate. 90 Hz asks less of the GPU. Applies after relaunch |
+| Refresh Rate | 120 Hz (60 FPS), 90 Hz (30 FPS), 90 Hz (60 FPS, Test) | The headset's refresh rate, and with it the game's frame rate. 90 Hz asks less of the GPU. The Test choice plays at 60 FPS on 90 Hz, with less even motion. Applies after relaunch |
 | Controller Layout | Switch, Comfort | Switch puts every button where a Switch Pro Controller has it. Comfort puts the sword on the right trigger and the shield on the left |
 | Turning | Smooth, Snap | How the right stick turns the table |
 | Buttons Match Labels | Off, On | On: A, B, X and Y work as printed on the controllers |
+| Pointer Hand | Right, Left | The controller that points the laser at the menu |
 | Follow Mode | Smooth, Room, Fixed | How the table follows the game. Smooth holds each room still and follows Link in the overworld. Room holds still until the camera changes room. Fixed never moves |
 | Height | -50 to +40 cm | How high the table stands |
 | Distance | 60 to 300 cm | How far away the table stands |
 | Size | 40% to 300% | How big the table is |
 | Tilt | 0 to +50 degrees | How far the table leans toward you |
 | Recentre Table | | Puts the table in front of you again |
-| Table Edge | Off, Fade, Passthrough | What fills the space past the world in the overworld. Fade softens the edge of the world, Passthrough shows your room |
+| Table Edge | Off, Fade, Passthrough | What fills the space past the world. Fade ends the world in a soft round edge, in every room. Passthrough shows your room past the edge of the overworld |
 | Foveation | Off, Low, Medium, High | Follows your eyes and draws what you aren't looking at in less detail. Higher levels save more GPU time |
 | Dynamic Resolution | Off, On | Lowers the resolution when the GPU can't keep up and raises it again when it can |
 | Panel Distance | 0.8 to 4.0 m | How far away the HUD and menus float |
@@ -175,11 +179,11 @@ Press **View** and **Menu** together to open the game's menu. The VR tab is next
 
 The first choice is the default. Height, Distance, Size and Tilt start at 0, 120 cm, 100% and 30 degrees. Panel Distance starts at 2.0 m and Panel Width at 2.2 m. Foveation is High and Dynamic Resolution is On.
 
-Every row but Refresh Rate applies at once. The settings are saved in `larecomp.ini`, and the table's height, distance, size and tilt in `vr_rig.ini`, both in `~/.local/share/lasrecomp`.
+Every row but Refresh Rate applies at once, while the game runs. The settings are saved in `larecomp.ini`, and the table's height, distance, size and tilt in `vr_rig.ini`, both in `~/.local/share/lasrecomp`.
 
 ## Performance
 
-- At 120 Hz the game runs at 60 frames a second, and each frame is shown for two refreshes. Both eyes of a frame are rendered from one head pose.
+- At 120 Hz the game runs at 60 frames a second, and each frame is shown for two refreshes. Both eyes of a frame are rendered from one head pose, in one pass: the game's commands are recorded and submitted once for both eyes.
 - Foveation uses the Frame's eye tracker: only where you look gets full detail. Without eye tracking, everything is drawn in full detail.
 - Dynamic Resolution lowers the eye resolution in the heaviest outdoor areas to hold 60, and raises it again indoors.
 - In VR the game skips passes the headset doesn't need, such as the tilt-shift blur and the anti-aliasing on menus. The CPU and the GPU work on consecutive frames side by side.

@@ -1,7 +1,7 @@
-# Diorama rig (AwakeningFrame lane "rig")
+# Diorama rig
 
 The rig decides where the game world sits in the player's room, what the player's controls do to it, and hides every
-sudden change behind a short blink. Design: `~/.claude/plans/awakeningframe-vr-design.md` section 6. Code:
+sudden change behind a short blink. Code:
 `runtime/xr/xr_rig.c/.h`; it is called once per game frame from the eye cameras (`runtime/nvn/vulkan/stereo.c`), and
 the blink is applied in the present shader (`runtime/nvn/screen_filter.h`, `pf.y`).
 
@@ -60,7 +60,7 @@ there, and A drops to 12 degrees below the horizon (about eye height) instead of
 at the wall rather than down onto its top edge. The player's height and size still apply. Leaving the side view
 restores the player's yaw and tilt (behind the blink of the area change).
 
-`LARECOMP_VR_FOLLOW=smooth|room|fixed` (the comfort lane's follow, `stereo.c anchor_update`) replaces the per-area
+`LARECOMP_VR_FOLLOW=smooth|room|fixed` (the follow of `stereo.c anchor_update`) replaces the per-area
 anchoring with that follow; camera jumps still blink. Unset or `auto`: the per-area anchoring above.
 
 ## Controls

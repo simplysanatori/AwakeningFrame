@@ -139,7 +139,7 @@ rm -rf "$SCAN" && cp -al "$S" "$SCAN" && rm -rf "$SCAN/zig"
 # (the Python packages' own metadata: their authors' addresses, from PyPI)
 find "$SCAN/lasgen" -type d -name '*.dist-info' -prune -exec rm -rf {} +
 PAT=${AF_PRIVACY_PATTERNS:-$HOME/.config/moonlight-xr-privacy-patterns.txt}
-if [ -f "$PAT" ]; then   # (the owner's personal values: name, e-mail, SSID, ... one regular expression per line)
+if [ -f "$PAT" ]; then   # (the maintainer's personal values: name, e-mail, SSID, ... one regular expression per line)
     while IFS= read -r p; do
         [ -n "$p" ] && [ "${p:0:1}" != "#" ] || continue
         grep -rlaiE -e "$p" "$SCAN" > /dev/null 2>&1 && bad "a personal pattern from $PAT matches (not shown)"

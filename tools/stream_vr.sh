@@ -1,5 +1,5 @@
 #!/bin/bash
-# Streaming lane, VR path (docs/af/STREAM.md): one xrmock session (90 Hz, the head 45 degrees down at the table, as
+# Streaming test, VR path (docs/af/STREAM.md): one xrmock session (90 Hz, the head 45 degrees down at the table, as
 # docs/af/STEREO.md's mock run) at Mabe Village, then the Mysterious Forest. Per spot: draws per frame, GPU ms
 # (LARECOMP_LOG_PACE), resident memory, and both eye images (LARECOMP_STEREO_DUMP_AT) with their void % (black pixels).
 #   tools/stream_vr.sh <out dir> [VAR=value ...]       e.g. LARECOMP_VR_CULL_EXTENT=52,42

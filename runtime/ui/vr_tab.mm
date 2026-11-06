@@ -75,6 +75,11 @@ extern "C" void vr_tab_draw(float scale) {
     // (the Controls tab's setting: xr_input.c reads it live)
     opt_toggle("Buttons Match Labels", &g_settings.face_by_label, false,
                "The Frame controllers' A, B, X and Y work as printed on them. Off matches the Switch's button positions.");
+    grey(VRO_POINTER_HAND);
+    if (opt_choice("Pointer Hand", &v.pointer_hand, g_vr_hand_names, VRS_N_HAND, VRS_HAND_RIGHT,
+                   desc(VRO_POINTER_HAND, "The controller that points at this menu. Pull its trigger to click, push the "
+                                          "right stick to scroll.")))
+        changed(VRO_POINTER_HAND);
 
     opt_section("Table");
     grey(VRO_FOLLOW);
