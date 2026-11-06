@@ -671,6 +671,20 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     passes_in_sub = 0;
     stat_flushes++;
     cum_submits++;
+    {   // (VR) how far the queue may run ahead of the GPU: LARECOMP_XR_INFLIGHT=<n> submissions besides the one just
+        // queued (0: no limit). SteamVR's xrEndFrame waits on work of its own queued behind ours, so a long backlog
+        // made the XR thread's frames late.
+        static int lim = -2;
+        if (lim == -2) {
+            const char *e = getenv("LARECOMP_XR_INFLIGHT");
+            lim = !stereo_wanted() ? 0 : e ? atoi(e) : 0;
+            if (lim > 0) LOG("[vk] submissions in flight: at most %d besides the newest (LARECOMP_XR_INFLIGHT)\n", lim);
+        }
+        if (lim > 0 && submit_seq > (uint64_t)lim && vk_completed_seq() < submit_seq - (uint64_t)lim) {
+            wait_why = "in-flight limit";
+            vk_wait_seq(submit_seq - (uint64_t)lim);
+        }
+    }
     gmir_writeback();  // (the readbacks already done)
     ring_retire();
     vk_collect_dead();

@@ -484,14 +484,22 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
 // VR mode's eye resolution (AwakeningFrame; LARECOMP_VR_DYNRES=1, off by default). The eye images keep their size; the
 // eyes are drawn into the top-left part of their targets at the factor and the eye present scales that part up to the
 // whole eye image (the same plumbing as Dynamic above: allocation scale = the eye's, render scale = the factor times it).
-// Width in pixels between LARECOMP_VR_DYNRES_MIN (1536) and LARECOMP_VR_DYNRES_MAX (the eye width) in 32-pixel steps.
-// The budget is the game's GPU time per game frame (device.c: LARECOMP_VR_DYNRES_MS, 14.5, at 60 fps / 120 Hz; 87% of
+// Width in pixels between LARECOMP_VR_DYNRES_MIN (1152; 1536 with LARECOMP_VR_HEADROOM=0) and LARECOMP_VR_DYNRES_MAX
+// (the eye width) in 32-pixel steps.
+// The budget is the game's GPU time per game frame (device.c: LARECOMP_VR_DYNRES_MS, 10, at 60 fps / 120 Hz; 87% of
 // 33.3 ms at 30 fps / 90 Hz: fill it). Decisions every half second on the median frame in it (spikes left out):
 //   down  2 of the last 3 halves over budget: straight to where the median is predicted to fit with 8% room
 //   up    one step, when it is predicted under 85% of the budget for 4 halves in a row and 3 s after the last change
 // The prediction counts half of G as fixed, half as area (Mabe, 1728 -> 1400: 21.9 -> 18.0 ms). The gap between the
 // two thresholds is the hysteresis: no back-and-forth step every second (shimmer).
 #define VRD_STEP 32
+// The compositor's headroom (doubling lane): the 10 ms budget (device.c) and a 1152 floor, so the GPU per game frame
+// stays where SteamVR's frame end keeps up; LARECOMP_VR_HEADROOM=0: the 14.5 ms budget and the 1536 floor as before.
+bool vr_headroom(void) {
+    static int on = -1;
+    if (on < 0) on = !getenv("LARECOMP_VR_HEADROOM") || atoi(getenv("LARECOMP_VR_HEADROOM")) != 0;
+    return on;
+}
 static double vrd_pred(double G, double from, double to) { double r = to / from; return G * (0.5 + 0.5 * r * r); }
 static int vrd_on = -1, vrd_set = -1;
 // (runtime/vr_settings.c, the VR tab's Dynamic Resolution row) on / off while the game runs; on starts at full size
@@ -510,7 +518,7 @@ double output_scale_vr_factor(double now, double game_ms, double budget_ms, unsi
         inited = 1;
         const char *e = getenv("LARECOMP_VR_DYNRES");
         vrd_on = set >= 0 ? set : e && atoi(e) != 0;
-        pmin = getenv("LARECOMP_VR_DYNRES_MIN") ? atof(getenv("LARECOMP_VR_DYNRES_MIN")) : 1536;
+        pmin = getenv("LARECOMP_VR_DYNRES_MIN") ? atof(getenv("LARECOMP_VR_DYNRES_MIN")) : vr_headroom() ? 1152 : 1536;
         pmax = getenv("LARECOMP_VR_DYNRES_MAX") ? atof(getenv("LARECOMP_VR_DYNRES_MAX")) : eye_w;
         if (pmax > eye_w) pmax = eye_w;
         if (pmin > pmax) pmin = pmax;

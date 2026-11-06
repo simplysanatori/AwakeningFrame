@@ -93,9 +93,9 @@ may make it redundant, but the main pass tests depth EQUAL against it).
 
 `LARECOMP_VR_DYNRES=1`: the eyes are drawn at a factor of the eye size inside the same targets, and the eye present
 scales that part up to the whole eye image (the flat Dynamic mode's plumbing: allocation scale = the eye's, render
-scale = factor times it; `output_scale.c output_scale_vr_factor`). Width `LARECOMP_VR_DYNRES_MIN` (1536; measured below with the earlier default, 1400) to
-`LARECOMP_VR_DYNRES_MAX` (the eye width) in 32-pixel steps. Budget: the game's GPU time per game frame, 14.5 ms at
-120 Hz (60 fps; `LARECOMP_VR_DYNRES_MS`) and 29 ms at 90 Hz (30 fps: fill it, so the eyes stay at full size).
+scale = factor times it; `output_scale.c output_scale_vr_factor`). Width `LARECOMP_VR_DYNRES_MIN` (1152; 1536 with `LARECOMP_VR_HEADROOM=0`; measured below with an earlier default, 1400) to
+`LARECOMP_VR_DYNRES_MAX` (the eye width) in 32-pixel steps. Budget: the game's GPU time per game frame, 10 ms at
+120 Hz (60 fps; `LARECOMP_VR_DYNRES_MS`; 14.5 with `LARECOMP_VR_HEADROOM=0`, and STEREO.md "Frame end" says why it sits well under the 16.7 ms frame) and 29 ms at 90 Hz (30 fps: fill it, so the eyes stay at full size).
 Decisions every half second on the median frame; down when 2 of the last 3 were over (straight to the predicted fit
 with 8% room), up one step when it is predicted under 85% for 2 s and 3 s after the last change. The HUD's box is drawn
 at the same factor. The VR tab's Dynamic Resolution row sets `LARECOMP_VR_DYNRES=1` and switches it live through

@@ -183,6 +183,26 @@ One run of a list draws both eyes (VK_KHR_multiview, `viewMask` 3) instead of ru
     foci.
   - Turnip's multipos (`TU_DEBUG=nomultipos` changes nothing), so the vertex work is still done per view.
 
+## Frame end
+
+The doubling seen while turning the head in the first headset session (120 Hz, 60 fps, 2026-11-06) is not a pose or
+content error. With xrmock's image probe (`MOCK_XR_SHIFT`, docs/af/TOOLING.md), after 5-degree head steps each eye
+image matches the pose of its own layer to 0.001 degrees rms, from the first set after the step, in v1 and in multiview.
+The cause is the compositor's frame end. SteamVR's `xrEndFrame` waits behind the app's GPU work on the one Turnip
+queue. When the game's GPU time per frame nears the 16.7 ms frame, the wait reaches up to 17 ms. The frame misses its
+vsync, and SteamVR shows the previous one again (reused) and the late one off its time (mispresented): the doubled
+image. In the session, the slow frame ends per second track SteamVR's reused + mispresented count (r = 0.89, against
+0.63 for GPU time alone).
+
+The fix is headroom. `LARECOMP_VR_HEADROOM` (default on; `=0` for the old values) sets the dynamic resolution budget
+to 10 ms (from 14.5) and its floor to 1152 px (from 1536). On SteamVR at 120 Hz in the Field, reused + mispresented
+falls from 85 a second to 5. That only applies with Dynamic Resolution on: with it off, the eyes stay full size and
+the Field doubles as before. 90 Hz does not help there: the Field holds 30 fps.
+
+`xr_loop.c` logs the frame end every 5 s: `xrEndFrame avg / max`, the frame ends over 2 ms and those that waited over
+1 ms for the queue lock. `LARECOMP_XR_INFLIGHT=<n>` (stereo, off by default) waits after each submission until at
+most n older ones are on the GPU. It also stops the doubling, but at 30 fps, so it stays an experiment.
+
 ## Switches and tests
 
 | Variable | Meaning |
@@ -199,6 +219,8 @@ One run of a list draws both eyes (VK_KHR_multiview, `viewMask` 3) instead of ru
 | `LARECOMP_XR_PREDICT=measured\|vsync` | the display time the eye poses are located for |
 | `LARECOMP_VR_DIET=0\|dof,merge,smaa` | the VR pass diet (default all; docs/af/PASSES.md) |
 | `LARECOMP_VR_DYNRES=1`, `_MIN` / `_MAX` / `_MS` | dynamic eye resolution (off by default; docs/af/PASSES.md) |
+| `LARECOMP_VR_HEADROOM=0` | the dynamic resolution budget and floor from before the frame end fix (14.5 ms, 1536 px; above) |
+| `LARECOMP_XR_INFLIGHT=<n>` | cap the submissions on the GPU behind the newest (off; above) |
 | `LARECOMP_GPU_OVERLAP=0\|1` | the CPU / GPU overlap (VR default on, flat off on Turnip; docs/af/PASSES.md) |
 | `LARECOMP_VR_FOVEATION=off\|low\|medium\|high` | eye-tracked foveation of the eye passes (above) |
 | `LARECOMP_MV=0\|1` | multiview stereo (default: on where the device has multiview): twins as layer 1, one run per list (above); 0: stereo v1; 1: the layered twins even without multiview |
