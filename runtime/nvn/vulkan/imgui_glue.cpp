@@ -39,7 +39,9 @@ extern "C" bool vk_imgui_backend_init(void) {
     // be submitting. Here the recorder is drained first, so the queue is idle.
     if (ok) {
         rec_drain();
+        vk_queue_lock();  // (its submission and queue wait: the VR mode's XR thread uses the queue too)
         ImGui_ImplVulkan_CreateFontsTexture();
+        vk_queue_unlock();
     }
     return ok;
 }
@@ -49,16 +51,20 @@ extern "C" bool vk_imgui_backend_init(void) {
 extern "C" void vk_imgui_fonts_rebuild(void) {
     if (!ImGui::GetIO().BackendRendererUserData) return;
     rec_drain();
+    vk_queue_lock();
     vkDeviceWaitIdle(g_vk.dev);
     ImGui_ImplVulkan_DestroyFontsTexture();
     ImGui_ImplVulkan_CreateFontsTexture();
+    vk_queue_unlock();
 }
 
 extern "C" void vk_imgui_backend_shutdown(void) {
     if (!ImGui::GetIO().BackendRendererUserData) return;
     rec_drain();  // (the queue is the recorder's: idle for the wait below)
+    vk_queue_lock();
     vkDeviceWaitIdle(g_vk.dev);
     ImGui_ImplVulkan_Shutdown();
+    vk_queue_unlock();
 }
 
 // A static RGBA8 image for ImGui (start screen background). Returns the ImTextureID.

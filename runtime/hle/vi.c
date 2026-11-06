@@ -14,6 +14,24 @@ volatile uint64_t g_vsync_ns;     // plat_now_ns() of the latest (stored after t
                                   // also frame interpolation's game timeline)
 uint64_t g_native_window;
 
+// One vsync: the count, its time, the game's vsync event.
+static void vi_signal_vsync(uint64_t now) {
+    __atomic_add_fetch(&g_vsync_count, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_vsync_ns, now, __ATOMIC_RELEASE);
+    pthread_mutex_lock(&g_klock);
+    kernel_signal(vsync_event);
+    pthread_mutex_unlock(&g_klock);
+}
+
+// The VR mode's vsync (runtime/xr/xr_loop.c: from the headset display's refreshes, 60 Hz). While it comes, the timer
+// below signals none of its own; it takes over again 50 ms after the last one (the session stopped, the headset off).
+static volatile uint64_t external_ns;
+void vi_external_vsync(uint64_t now_ns) {
+    if (!vsync_event) return;  // (the game hasn't asked for it yet: the start screen)
+    __atomic_store_n(&external_ns, now_ns, __ATOMIC_RELEASE);
+    vi_signal_vsync(now_ns);
+}
+
 static void *vsync_thread(void *arg) {
     (void)arg;
     const uint64_t period = 16666667;
@@ -34,17 +52,15 @@ static void *vsync_thread(void *arg) {
                                     ui_window_focused(), rt == 0 ? "holds" : rt == 1 ? "was gone: set again" : "unknown");
             next = now;  // don't burst-signal to catch up
         }
+        uint64_t ext = __atomic_load_n(&external_ns, __ATOMIC_ACQUIRE);
+        if (ext && (int64_t)(now - ext) < 50000000) continue;  // (the headset's refreshes drive it)
         // Pause on focus lost (Video tab): no vsync while the window isn't in front, so the game waits on it - still
         // (test runs' windows don't take the focus: never there)
         extern bool ui_window_focused(void);
         static int test_run = -1;
         if (test_run < 0) test_run = getenv("LARECOMP_HIDDEN") || getenv("LARECOMP_WINDOW_SHOT");
         if (g_settings.pause_unfocused && !test_run && !ui_window_focused()) continue;
-        __atomic_add_fetch(&g_vsync_count, 1, __ATOMIC_RELEASE);
-        __atomic_store_n(&g_vsync_ns, now, __ATOMIC_RELEASE);
-        pthread_mutex_lock(&g_klock);
-        kernel_signal(vsync_event);
-        pthread_mutex_unlock(&g_klock);
+        vi_signal_vsync(now);
     }
     return NULL;
 }

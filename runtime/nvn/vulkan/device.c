@@ -22,9 +22,21 @@
 #include "../interp.h"
 #include <pthread.h>
 #include <dirent.h>
+#ifdef LARECOMP_HAVE_XR
+#include "../../xr/xr.h"
+#endif
 
 VkG g_vk;
 static SDL_Window *window;
+
+// The VR mode (LARECOMP_XR=1, runtime/xr): the instance and device are made through the OpenXR runtime, there is no
+// window swapchain, and the HUD swapchain's images take the window images' place (vk_frame_begin / vk_frame_end).
+// Off (or a build without the OpenXR headers): every path below is the flat one, unchanged.
+#ifdef LARECOMP_HAVE_XR
+static bool xr_mode(void) { return xr_wanted(); }
+#else
+static bool xr_mode(void) { return false; }
+#endif
 
 // The system memory heap a whole-heap import (exec.c host_import) lands in and what it can hold: the largest heap with
 // a host-visible memory type that isn't device-local (all of them device-local: the largest host-visible one), the
@@ -130,6 +142,15 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBi
                                                const VkDebugUtilsMessengerCallbackDataEXT *d, void *user) {
     (void)type, (void)user;
     static atomic_uint n;
+    // VR mode: SteamVR's xrCreateVulkanDeviceKHR adds its own VkPhysicalDeviceTimelineSemaphoreFeatures beside our
+    // VkPhysicalDeviceVulkan12Features (02830), and the Gamescope WSI layer forces VK_EXT_swapchain_maintenance1 on a
+    // device without VK_KHR_swapchain (01387): neither is in what we pass (tools/xrvkprobe --validate shows both)
+    if (xr_mode() && d->pMessageIdName && (strstr(d->pMessageIdName, "VUID-VkDeviceCreateInfo-pNext-02830") ||
+                                           (strstr(d->pMessageIdName, "VUID-vkCreateDevice-ppEnabledExtensionNames-01387") &&
+                                            d->pMessage && strstr(d->pMessage, "VK_EXT_swapchain_maintenance1")))) {
+        LOG("[vk] (validation, not ours: the OpenXR runtime / a layer changed the device's create info: %s)\n", d->pMessageIdName);
+        return VK_FALSE;
+    }
     bool stop = sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT && getenv("LARECOMP_VK_VALIDATION_STOP");
     if (sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT &&
         (stop || atomic_fetch_add_explicit(&n, 1, memory_order_relaxed) < 500)) LOG("[vk] %s\n", d->pMessage);
@@ -144,9 +165,15 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBi
 // LARECOMP_VK_VALIDATION=1: Khronos validation layer (MSYS2 package vulkan-validation-layers)
 // LARECOMP_VK_VALIDATION_STOP=1: require that layer and its callback, and exit nonzero on the first error.
 static bool validating;  // the validation layer is on (validation_exit)
+static VkResult make_instance(const VkInstanceCreateInfo *ci) {
+#ifdef LARECOMP_HAVE_XR
+    if (xr_mode()) return xr_vk_create_instance(ci, &g_vk.inst);  // (VR mode: through the runtime, which adds its own)
+#endif
+    return vkCreateInstance(ci, NULL, &g_vk.inst);
+}
 static void create_instance(void) {
     Uint32 n_sdl = 0;
-    const char *const *sdl_ext = SDL_Vulkan_GetInstanceExtensions(&n_sdl);
+    const char *const *sdl_ext = xr_mode() ? NULL : SDL_Vulkan_GetInstanceExtensions(&n_sdl);  // (VR mode: no window surface)
     const char *ext[16];
     uint32_t n_ext = 0;
     for (Uint32 i = 0; i < n_sdl && n_ext < 14; i++) ext[n_ext++] = sdl_ext[i];
@@ -159,7 +186,7 @@ static void create_instance(void) {
     VkInstanceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
                                .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext,
                                .enabledLayerCount = validate ? 1 : 0, .ppEnabledLayerNames = layers};
-    VkResult r = vkCreateInstance(&ci, NULL, &g_vk.inst);
+    VkResult r = make_instance(&ci);
     if (r != VK_SUCCESS && validate) {
         if (strict) {
             LOG("[vk] cannot create an instance with required validation (%d)\n", r);
@@ -170,10 +197,10 @@ static void create_instance(void) {
         ci.enabledLayerCount = 0;
         ci.enabledExtensionCount--;
         validate = false;
-        r = vkCreateInstance(&ci, NULL, &g_vk.inst);
+        r = make_instance(&ci);
     }
     validating = validate;
-    if (r != VK_SUCCESS) FATAL("vkCreateInstance: %d (is a Vulkan 1.3 driver installed?)\n", r);
+    if (r != VK_SUCCESS) FATAL("vkCreateInstance: %d (%s)\n", r, xr_mode() ? "VR mode: through the OpenXR runtime, see above" : "is a Vulkan 1.3 driver installed?");
     if (validate) {
         PFN_vkCreateDebugUtilsMessengerEXT f =
             (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(g_vk.inst, "vkCreateDebugUtilsMessengerEXT");
@@ -206,6 +233,10 @@ static void pick_device(void) {
     VkPhysicalDevice *pd = calloc(n, sizeof *pd);
     vkEnumeratePhysicalDevices(g_vk.inst, &n, pd);
     int want = getenv("LARECOMP_GPU") ? atoi(getenv("LARECOMP_GPU")) : -1, best = -1, best_score = -1;
+    VkPhysicalDevice xr_pd = VK_NULL_HANDLE;  // (VR mode: the runtime's GPU, no other)
+#ifdef LARECOMP_HAVE_XR
+    if (xr_mode() && !(xr_pd = xr_vk_physical_device(g_vk.inst))) FATAL("[xr] the OpenXR runtime names no Vulkan device\n");
+#endif
     for (uint32_t i = 0; i < n; i++) {
         VkPhysicalDeviceProperties p;
         vkGetPhysicalDeviceProperties(pd[i], &p);
@@ -214,6 +245,7 @@ static void pick_device(void) {
         if (p.apiVersion < VK_API_VERSION_1_3) continue;
         int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 3 : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2 : 1;
         if ((int)i == want) score = 100;
+        if (xr_pd) score = pd[i] == xr_pd ? 1000 : -1;
         if (score > best_score) { best_score = score; best = (int)i; }
     }
     if (best < 0) FATAL("no Vulkan 1.3 device\n");
@@ -235,8 +267,8 @@ static void pick_device(void) {
     vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, qp);
     g_vk.qfam = UINT32_MAX;
     for (uint32_t i = 0; i < nq; i++) {
-        VkBool32 present = VK_FALSE;
-        vkGetPhysicalDeviceSurfaceSupportKHR(g_vk.phys, i, g_vk.surface, &present);
+        VkBool32 present = xr_mode();  // (VR mode: no window to present to)
+        if (!present) vkGetPhysicalDeviceSurfaceSupportKHR(g_vk.phys, i, g_vk.surface, &present);
         if ((qp[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && (qp[i].queueFlags & VK_QUEUE_COMPUTE_BIT) && present) {
             g_vk.qfam = i, g_vk.ts_bits = qp[i].timestampValidBits;
             break;
@@ -610,7 +642,7 @@ static void create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
     const char *ext[20];
     uint32_t n_ext = 0;
-    ext[n_ext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+    if (!xr_mode()) ext[n_ext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;  // (VR mode: the runtime's swapchains only)
     g_vk.custom_border = has_ext(ep, ne, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
     if (g_vk.custom_border) ext[n_ext++] = VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME;
     g_vk.divisor = has_ext(ep, ne, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
@@ -858,6 +890,10 @@ static void create_device(void) {
                                   .queueCount = 1, .pQueuePriorities = &prio};
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = 1,
                              .pQueueCreateInfos = &qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
+#ifdef LARECOMP_HAVE_XR
+    if (xr_mode()) VK_CHECK(xr_vk_create_device(g_vk.phys, &di, &g_vk.dev));  // (the same create info, pNext chain intact)
+    else
+#endif
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
     if (g_vk.vids) {
@@ -1006,7 +1042,9 @@ static void create_swapchain(void) {
 
 static void recreate_swapchain(void) {
     rec_drain();  // (every queued present and submission made: the queue is idle for the wait)
+    vk_queue_lock();
     vkDeviceWaitIdle(g_vk.dev);
+    vk_queue_unlock();
     create_swapchain();
 }
 
@@ -1060,6 +1098,19 @@ bool vk_frame_begin(const float clear[4]) {
     extern VkImageView g_vk_scene_view;  // (exec.c: the game image isn't drawn yet this frame)
     g_vk_scene_view = VK_NULL_HANDLE;
     if (rq_stopping()) return false;  // quitting: no window image after the window closed (#40)
+#ifdef LARECOMP_HAVE_XR
+    if (xr_mode()) {
+        // VR mode: the HUD swapchain's next image is the window image (runtime/xr/xr.h). It comes once the XR thread
+        // released the last set (a refresh or two); not within 100 ms (the session stalled): nothing drawn this time.
+        slot = (slot + 1) % FRAMES;
+        WAITING_AT(0, vk_wait_seq(slot_seq[slot]));
+        bool got;
+        WAITING_AT(1, got = xr_set_begin(100000000ull, &cur_frame.image));
+        if (!got) return false;
+        cur_frame.acquired = VK_NULL_HANDLE;
+        goto have_image;
+    }
+#endif
     int w, h;
     SDL_GetWindowSizeInPixels(window, &w, &h);
     if (!w || !h) return false;  // minimised
@@ -1102,6 +1153,9 @@ bool vk_frame_begin(const float clear[4]) {
         vkResetFences(g_vk.dev, 1, &acquire_fence);
     }
     cur_frame.acquired = asem;
+#ifdef LARECOMP_HAVE_XR
+have_image:
+#endif
     cur_frame.id++;
     cur_frame.secondary = false;
     slot_seq[slot] = vk_pending_seq();
@@ -1257,14 +1311,43 @@ void vk_frame_end(const char *shot_path) {
     rec_CmdEndRendering(cb);
     VkSpan shot = {0};
     if (shot_path) save_window_image(cb, &shot);
+    uint64_t seq;
+#ifdef LARECOMP_HAVE_XR
+    if (xr_mode()) {
+        // VR mode: the eyes nobody drew this set get the stub's clear colour; the HUD image stays in
+        // COLOR_ATTACHMENT_OPTIMAL (the runtime's layout for a released image); no present: the XR thread releases the
+        // set once this submission is done
+        for (int eye = 0; eye < 2; eye++) {
+            XrEyeTarget t;
+            if (xr_eye_used(eye) || !xr_eye_target(eye, &t)) continue;
+            float c[4];
+            xr_stub_eye_colour(eye, c);
+            image_barrier(cb, t.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = t.view,
+                                            .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                                            .clearValue.color.float32 = {c[0], c[1], c[2], c[3]}};
+            VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, t.extent}, .layerCount = 1,
+                                  .colorAttachmentCount = 1, .pColorAttachments = &ca};
+            rec_CmdBeginRendering(cb, &ri);
+            rec_CmdEndRendering(cb);
+        }
+        image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        seq = vk_pending_seq();
+        vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE);
+        xr_set_submit(seq);
+    } else
+#endif
+    {
     image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     uint32_t img = cur_frame.image;
     if (!done_sem[img]) done_sem[img] = binary_semaphore();
-    uint64_t seq = vk_pending_seq();
+    seq = vk_pending_seq();
     vk_submit_extra(cur_frame.acquired, done_sem[img], VK_NULL_HANDLE);
     // the present follows the submission in the recorder's order (its wait for the display is the recorder's, counted in
     // g_vk_frame_waits[2]; an out-of-date result makes the next vk_frame_begin recreate the swapchain)
     rec_QueuePresentKHR(done_sem[img], g_vk.swapchain, img);
+    }
     cur_frame.ok = false;
     if (shot_path) {
         vk_wait_seq(seq);
@@ -1354,7 +1437,7 @@ static uint32_t ip_held_w, ip_held_h;
 static VkFormat ip_held_fmt;
 static bool ip_hold(TexBackend *b, bool restore) {  // false: no copy (no memory)
     if (!restore && (!ip_held || ip_held_w != b->width || ip_held_h != b->height || ip_held_fmt != b->format)) {
-        if (ip_held) { rec_drain(); vkDeviceWaitIdle(g_vk.dev); vmaDestroyImage(g_vk.vma, ip_held, ip_held_mem); ip_held = VK_NULL_HANDLE; }
+        if (ip_held) { rec_drain(); vk_queue_lock(); vkDeviceWaitIdle(g_vk.dev); vk_queue_unlock(); vmaDestroyImage(g_vk.vma, ip_held, ip_held_mem); ip_held = VK_NULL_HANDLE; }
         VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = b->format,
                                 .extent = {b->width, b->height, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
                                 .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
@@ -1838,8 +1921,13 @@ void backend_quit(void) {
     if (trace) LOG("[vk] quit: stopping the recorder\n");
     rec_quit();  // (what it still had is dropped, not run: no submission or present after this; the queue idle for the wait)
     if (!g_vk.dev) return;
+#ifdef LARECOMP_HAVE_XR
+    if (xr_mode()) xr_shutdown();  // (the XR thread stops, the GPU drains, the session ends)
+#endif
     if (trace) LOG("[vk] quit: waiting for the GPU\n");
+    vk_queue_lock();
     vkDeviceWaitIdle(g_vk.dev);
+    vk_queue_unlock();
     if (trace) LOG("[vk] quit: saving the pipeline cache\n");
     vk_pipeline_cache_save();
 }
@@ -1864,9 +1952,11 @@ void ui_window_init(void) {
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) FATAL("SDL_Init: %s\n", SDL_GetError());
     input_load_user_mappings();
     int win_w = 1280, win_h = 720;
+    if (xr_mode()) win_w = 1920, win_h = 1080;  // (VR mode: the window's size is the HUD image's, fixed: no resize)
     if (getenv("LARECOMP_WINDOW")) sscanf(getenv("LARECOMP_WINDOW"), "%dx%d", &win_w, &win_h);
-    else rt_window_size(&win_w, &win_h);
+    else if (!xr_mode()) rt_window_size(&win_w, &win_h);
     SDL_WindowFlags wflags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+    if (xr_mode()) wflags &= ~(SDL_WindowFlags)SDL_WINDOW_RESIZABLE;
     if (getenv("LARECOMP_HIDDEN")) wflags |= SDL_WINDOW_HIDDEN;
     {   // scripted test runs (user input ignored: runtime/hle/input.c input_user_blocked) open without taking the
         // keyboard focus from whatever the player is doing
@@ -1880,11 +1970,29 @@ void ui_window_init(void) {
     rt_window_icon(window);
     rt_window_remember(window);
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
-    if (g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
+    if (g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN") && !xr_mode()) SDL_SetWindowFullscreen(window, true);
     create_instance();
-    if (!SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
+    if (!xr_mode() && !SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
     pick_device();
     create_device();
+#ifdef LARECOMP_HAVE_XR
+    if (xr_mode()) {
+        // the session, the swapchains and the XR thread; the HUD swapchain's images stand in for the window's
+        int w, h;
+        SDL_GetWindowSizeInPixels(window, &w, &h);
+        XrChainInfo hud;
+        if (!xr_start(g_vk.queue, g_vk.qfam, (uint32_t)w, (uint32_t)h, &hud)) FATAL("[xr] the VR mode could not start (see above)\n");
+        g_vk.sc_format = hud.format;
+        g_vk.sc_extent = hud.extent;
+        g_vk.sc_count = hud.count;
+        memcpy(g_vk.sc_images, hud.images, sizeof g_vk.sc_images);
+        memcpy(g_vk.sc_views, hud.views, sizeof g_vk.sc_views);
+        // the OpenXR loader and runtime were opened after quick_exit_handler was registered, so their destructors run
+        // before it at exit(): XR teardown from there called into an unloaded runtime. This handler, registered after
+        // them, runs before them.
+        atexit(backend_quit);
+    } else
+#endif
     create_swapchain();
     vk_exec_init();
     vk_shaders_init();
@@ -1903,7 +2011,9 @@ void backend_reset(void) {
     if (!g_vk.dev) return;
     rq_drain();  // (the render thread: everything queued ran; it idles while the game is down)
     rec_drain();  // (the recorder: everything the render thread queued is recorded and submitted)
+    vk_queue_lock();
     vkDeviceWaitIdle(g_vk.dev);
+    vk_queue_unlock();
     extern void vk_textures_reset(void);
     extern void vk_exec_reset(void);
     vk_textures_reset();

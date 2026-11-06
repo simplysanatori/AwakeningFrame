@@ -91,6 +91,14 @@ SHADERC  ?= $(shell pkg-config --libs shaderc 2>/dev/null || echo -lshaderc)
 LDFLAGS  := -fuse-ld=lld -rdynamic $(if $(DEPS),-L$(DEPS)/lib -Wl$(comma)-rpath$(comma)$(abspath $(DEPS))/lib) \
             -lSDL3 -lavformat -lavcodec -lavutil -lswscale -lvulkan $(SHADERC) -lpthread -ldl -lm
 BACKEND_SRC := $(wildcard runtime/nvn/vulkan/*.c) $(wildcard runtime/nvn/vulkan/*.cpp)
+# The VR mode (runtime/xr, LARECOMP_XR=1) when DEPS has the OpenXR headers (tools/fetch_openxr.sh); the OpenXR loader
+# is opened at run time (the runtime's own), so nothing more is linked. Without the headers: no VR mode.
+XR_HDR   := $(if $(DEPS),$(wildcard $(DEPS)/include/openxr/openxr.h))
+ifneq ($(XR_HDR),)
+BACKEND_SRC += $(wildcard runtime/xr/*.c)
+$(B)/rt/nvn/vulkan/device.o: RTFLAGS += -DLARECOMP_HAVE_XR
+RT_HDRS  += $(wildcard runtime/xr/*.h)
+endif
 BACKEND_OBJ := $(patsubst runtime/%.cpp,$(B)/rt/%.o,$(patsubst runtime/%.c,$(B)/rt/%.o,$(BACKEND_SRC)))
 IMGUI_OBJ += $(B)/imgui/imgui_impl_vulkan.o
 UIFLAGS  := -x c++  # the .mm UI sources are plain C++ apart from __APPLE__ blocks

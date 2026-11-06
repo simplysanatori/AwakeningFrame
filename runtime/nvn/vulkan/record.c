@@ -553,6 +553,13 @@ void rec_EndCommandBuffer(VkCommandBuffer cb) {
     ENQ_END();
 }
 
+// The queue's external synchronisation with the VR mode: the OpenXR runtime uses the queue inside xrBeginFrame,
+// xrEndFrame, xrAcquireSwapchainImage and xrReleaseSwapchainImage (runtime/xr), and those run on the XR and presenting
+// threads; every submission, present and wait for the queue here takes this lock. (Flat mode: never contended.)
+static pthread_mutex_t queue_mu = PTHREAD_MUTEX_INITIALIZER;
+void vk_queue_lock(void) { pthread_mutex_lock(&queue_mu); }
+void vk_queue_unlock(void) { pthread_mutex_unlock(&queue_mu); }
+
 typedef struct {
     VkCommandBufferSubmitInfo cbs[2];
     VkSemaphoreSubmitInfo wait, sig[2];
@@ -566,7 +573,9 @@ static void submit_run(const void *p) {
                         .waitSemaphoreInfoCount = a->nwait, .pWaitSemaphoreInfos = &a->wait};
     uint64_t t0 = NOW();
     rq_watch("vkQueueSubmit2", a->seq);  // (a hang dump names it)
+    vk_queue_lock();
     VkResult r = vkQueueSubmit2(g_vk.queue, 1, &si, VK_NULL_HANDLE);
+    vk_queue_unlock();
     rq_watch(NULL, 0);
     uint64_t dt = NOW() - t0;
     if (prof) ADD(r_submit_ns, dt);
@@ -603,7 +612,9 @@ static void present_run(const void *p) {
                            .swapchainCount = 1, .pSwapchains = &a->swapchain, .pImageIndices = &a->image};
     uint64_t t0 = NOW();
     rq_watch("vkQueuePresentKHR", a->image);
+    vk_queue_lock();
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
+    vk_queue_unlock();
     rq_watch(NULL, 0);
     uint64_t dt = NOW() - t0;
     __atomic_fetch_add(&g_vk_frame_waits[2], dt, __ATOMIC_RELAXED);

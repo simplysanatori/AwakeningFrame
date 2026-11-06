@@ -1,0 +1,220 @@
+// XR_KHR_vulkan_enable2 (the instance and device made by the runtime from LAS's own create infos) and the swapchains
+// (from GalaxyFrame's xr_gfx_vk.cpp attach / createChain).
+#include <stdlib.h>
+#include <string.h>
+
+#include "../rt.h"
+#include "xr_internal.h"
+
+VkResult xr_vk_create_instance(const VkInstanceCreateInfo *ci, VkInstance *out) {
+    if (!xr_instance_create()) return VK_ERROR_INITIALIZATION_FAILED;
+    XrGraphicsRequirementsVulkan2KHR req = {.type = XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN2_KHR};
+    if (!XR_OK(p_xrGetVulkanGraphicsRequirements2KHR(g_xr.inst, g_xr.sys, &req))) return VK_ERROR_INITIALIZATION_FAILED;
+    uint32_t api = ci->pApplicationInfo ? ci->pApplicationInfo->apiVersion : VK_API_VERSION_1_0;
+    // (SteamVR says 1.0 to 1.2 but makes a 1.3 instance and device with LAS's features: tools/xrvkprobe)
+    LOG("[xr] the runtime takes Vulkan %u.%u to %u.%u; asking for %u.%u\n", (unsigned)XR_VERSION_MAJOR(req.minApiVersionSupported),
+        (unsigned)XR_VERSION_MINOR(req.minApiVersionSupported), (unsigned)XR_VERSION_MAJOR(req.maxApiVersionSupported),
+        (unsigned)XR_VERSION_MINOR(req.maxApiVersionSupported), VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api));
+    XrVulkanInstanceCreateInfoKHR xi = {.type = XR_TYPE_VULKAN_INSTANCE_CREATE_INFO_KHR, .systemId = g_xr.sys,
+                                        .pfnGetInstanceProcAddr = vkGetInstanceProcAddr, .vulkanCreateInfo = ci};
+    VkResult vr = VK_ERROR_INITIALIZATION_FAILED;
+    if (!XR_OK(p_xrCreateVulkanInstanceKHR(g_xr.inst, &xi, out, &vr))) return VK_ERROR_INITIALIZATION_FAILED;
+    if (vr == VK_SUCCESS) g_xr.vinst = *out;
+    return vr;
+}
+
+VkPhysicalDevice xr_vk_physical_device(VkInstance inst) {
+    XrVulkanGraphicsDeviceGetInfoKHR gi = {.type = XR_TYPE_VULKAN_GRAPHICS_DEVICE_GET_INFO_KHR, .systemId = g_xr.sys, .vulkanInstance = inst};
+    VkPhysicalDevice phys = VK_NULL_HANDLE;
+    if (!XR_OK(p_xrGetVulkanGraphicsDevice2KHR(g_xr.inst, &gi, &phys))) return VK_NULL_HANDLE;
+    g_xr.vphys = phys;
+    return phys;
+}
+
+VkResult xr_vk_create_device(VkPhysicalDevice phys, const VkDeviceCreateInfo *ci, VkDevice *out) {
+    XrVulkanDeviceCreateInfoKHR xi = {.type = XR_TYPE_VULKAN_DEVICE_CREATE_INFO_KHR, .systemId = g_xr.sys,
+                                      .pfnGetInstanceProcAddr = vkGetInstanceProcAddr, .vulkanPhysicalDevice = phys,
+                                      .vulkanCreateInfo = ci};
+    VkResult vr = VK_ERROR_INITIALIZATION_FAILED;
+    if (!XR_OK(p_xrCreateVulkanDeviceKHR(g_xr.inst, &xi, out, &vr))) return VK_ERROR_INITIALIZATION_FAILED;
+    if (vr == VK_SUCCESS) g_xr.vdev = *out;
+    return vr;
+}
+
+// Everything on the one queue finished (before xrEndSession / xrDestroySession: GalaxyFrame's exit GPU faults). The
+// queue lock keeps the recorder out for the wait.
+void xr_drain_gpu(const char *before) {
+    if (!g_xr.queue) return;
+    uint64_t t0 = plat_now_ns();
+    vk_queue_lock();
+    VkResult r = vkQueueWaitIdle(g_xr.queue);
+    vk_queue_unlock();
+    LOG("[xr] GPU idle before %s (%d, %.1f ms)\n", before, r, (plat_now_ns() - t0) / 1e6);
+}
+
+// ---- swapchains: sRGB, MUTABLE_FORMAT, viewed as UNORM (see xr.h); one mip level (SteamVR allocates level 0 only)
+static int64_t chain_fmt;
+static VkFormat chain_view_fmt;
+
+static bool pick_format(void) {
+    uint32_t n = 0;
+    if (!XR_OK(p_xrEnumerateSwapchainFormats(g_xr.session, 0, &n, NULL)) || !n) return false;
+    int64_t *f = calloc(n, sizeof *f);
+    p_xrEnumerateSwapchainFormats(g_xr.session, n, &n, f);
+    char list[256] = "";
+    bool bgra = false, rgba = false;
+    for (uint32_t i = 0; i < n; i++) {
+        snprintf(list + strlen(list), sizeof list - strlen(list), " %lld", (long long)f[i]);
+        bgra |= f[i] == VK_FORMAT_B8G8R8A8_SRGB;
+        rgba |= f[i] == VK_FORMAT_R8G8B8A8_SRGB;
+    }
+    free(f);
+    // B8G8R8A8 first: the flat window's own (B8G8R8A8_UNORM), so every pipeline made for the window's format fits
+    if (bgra) chain_fmt = VK_FORMAT_B8G8R8A8_SRGB, chain_view_fmt = VK_FORMAT_B8G8R8A8_UNORM;
+    else if (rgba) chain_fmt = VK_FORMAT_R8G8B8A8_SRGB, chain_view_fmt = VK_FORMAT_R8G8B8A8_UNORM;
+    LOG("[xr] swapchain formats (VkFormat):%s; using %lld viewed as %d\n", list, (long long)chain_fmt, (int)chain_view_fmt);
+    return bgra || rgba;
+}
+
+static bool chain_create(XrChain *c, const char *what, uint32_t w, uint32_t h) {
+    VkFormat vf[2] = {(VkFormat)chain_fmt, chain_view_fmt};
+    XrVulkanSwapchainFormatListCreateInfoKHR fl = {.type = XR_TYPE_VULKAN_SWAPCHAIN_FORMAT_LIST_CREATE_INFO_KHR,
+                                                   .viewFormatCount = 2, .viewFormats = vf};
+    XrSwapchainCreateInfo ci = {.type = XR_TYPE_SWAPCHAIN_CREATE_INFO, .next = g_xr.has_format_list ? &fl : NULL,
+                                .usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT |
+                                              XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT |
+                                              XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT,
+                                .format = chain_fmt, .sampleCount = 1, .width = w, .height = h, .faceCount = 1,
+                                .arraySize = 1, .mipCount = 1};
+    vk_queue_lock();  // (a runtime may use the queue to set the images up: the mock does)
+    XrResult cr = p_xrCreateSwapchain(g_xr.session, &ci, &c->sc);
+    vk_queue_unlock();
+    if (!xr_ok_(cr, "xrCreateSwapchain")) return false;
+    c->fmt = chain_fmt, c->view_fmt = chain_view_fmt, c->w = w, c->h = h;
+    XrSwapchainImageVulkan2KHR im[8];
+    for (int i = 0; i < 8; i++) im[i] = (XrSwapchainImageVulkan2KHR){.type = XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR};
+    uint32_t n = 0;
+    if (!XR_OK(p_xrEnumerateSwapchainImages(c->sc, 0, &n, NULL))) return false;
+    if (n > 8) { LOG("[xr] %s swapchain has %u images (8 at most)\n", what, n); return false; }
+    if (!XR_OK(p_xrEnumerateSwapchainImages(c->sc, n, &n, (XrSwapchainImageBaseHeader *)im))) return false;
+    c->count = n;
+    for (uint32_t i = 0; i < n; i++) {
+        c->img[i] = im[i].image;
+        VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = c->img[i], .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                    .format = c->view_fmt, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        if (vkCreateImageView(g_xr.vdev, &vi, NULL, &c->view[i]) != VK_SUCCESS) { LOG("[xr] %s image view failed\n", what); return false; }
+    }
+    LOG("[xr] %s swapchain %ux%u, %u images\n", what, w, h, n);
+    return true;
+}
+
+bool xr_chains_create(uint32_t hud_w, uint32_t hud_h) {
+    if (!pick_format()) { LOG("[xr] the runtime offers no 8-bit sRGB swapchain format\n"); return false; }
+    uint32_t nv = 0;
+    for (int i = 0; i < 2; i++) g_xr.vcv[i] = (XrViewConfigurationView){.type = XR_TYPE_VIEW_CONFIGURATION_VIEW};
+    if (!XR_OK(p_xrEnumerateViewConfigurationViews(g_xr.inst, g_xr.sys, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 2, &nv, g_xr.vcv)) || nv != 2)
+        return false;
+    const char *e = getenv("LARECOMP_XR_EYE_SCALE");
+    float scale = e ? (float)atof(e) : 1.0f;
+    if (!(scale > 0.1f && scale <= 2.0f)) scale = 1.0f;
+    for (int i = 0; i < 2; i++) {
+        uint32_t w = (uint32_t)(g_xr.vcv[i].recommendedImageRectWidth * scale + 0.5f);
+        uint32_t h = (uint32_t)(g_xr.vcv[i].recommendedImageRectHeight * scale + 0.5f);
+        if (w > g_xr.vcv[i].maxImageRectWidth) w = g_xr.vcv[i].maxImageRectWidth;
+        if (h > g_xr.vcv[i].maxImageRectHeight) h = g_xr.vcv[i].maxImageRectHeight;
+        if (i == 0) LOG("[xr] eyes: recommended %ux%u (max %ux%u), x%.2f\n", g_xr.vcv[i].recommendedImageRectWidth,
+                        g_xr.vcv[i].recommendedImageRectHeight, g_xr.vcv[i].maxImageRectWidth, g_xr.vcv[i].maxImageRectHeight, scale);
+        for (int p = 0; p < 2; p++)
+            if (!chain_create(&g_xr.eyes[p][i], i ? "right eye" : "left eye", w, h)) return false;
+    }
+    for (int p = 0; p < 2; p++) if (!chain_create(&g_xr.hud[p], "HUD", hud_w, hud_h)) return false;
+    if (g_xr.hud[0].count + g_xr.hud[1].count > 8) { LOG("[xr] HUD swapchains with more than 4 images each\n"); return false; }
+    return true;
+}
+
+void xr_chains_destroy(void) {
+    XrChain *cs[] = {&g_xr.hud[0], &g_xr.hud[1], &g_xr.eyes[0][0], &g_xr.eyes[0][1], &g_xr.eyes[1][0], &g_xr.eyes[1][1]};
+    for (int k = 0; k < 6; k++) {
+        XrChain *c = cs[k];
+        for (uint32_t i = 0; i < c->count; i++) if (c->view[i]) vkDestroyImageView(g_xr.vdev, c->view[i], NULL);
+        if (c->sc) { vk_queue_lock(); p_xrDestroySwapchain(c->sc); vk_queue_unlock(); }
+        memset(c, 0, sizeof *c);
+    }
+}
+
+// Acquire (under the queue lock: the runtime may use the queue in it) and wait for the next image.
+bool xr_chain_acquire(XrChain *c, uint32_t *index) {
+    XrSwapchainImageAcquireInfo ai = {.type = XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    vk_queue_lock();
+    XrResult r = p_xrAcquireSwapchainImage(c->sc, &ai, index);
+    vk_queue_unlock();
+    if (!xr_ok_(r, "xrAcquireSwapchainImage")) return false;
+    XrSwapchainImageWaitInfo wi = {.type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO, .timeout = 100000000};
+    for (int tries = 0;; tries++) {
+        r = p_xrWaitSwapchainImage(c->sc, &wi);
+        if (r != XR_TIMEOUT_EXPIRED) break;
+        if (tries == 10) LOG("[xr] still waiting for a swapchain image after 1 s\n");
+    }
+    return xr_ok_(r, "xrWaitSwapchainImage");
+}
+
+void xr_chain_release(XrChain *c) {
+    XrSwapchainImageReleaseInfo ri = {.type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    vk_queue_lock();
+    XrResult r = p_xrReleaseSwapchainImage(c->sc, &ri);
+    vk_queue_unlock();
+    xr_ok_(r, "xrReleaseSwapchainImage");
+}
+
+// ---- eyes (xr.h)
+bool xr_eye_target(int eye, XrEyeTarget *out) {
+    if (!g_xr.in_set || eye < 0 || eye > 1) return false;
+    XrSet *s = &g_xr.building;
+    if (!s->has_eye[eye]) {
+        if (!xr_chain_acquire(&g_xr.eyes[s->pair][eye], &s->eye[eye])) return false;
+        s->has_eye[eye] = true;
+    }
+    const XrChain *c = &g_xr.eyes[s->pair][eye];
+    *out = (XrEyeTarget){c->img[s->eye[eye]], c->view[s->eye[eye]], c->view_fmt, {c->w, c->h}};
+    return true;
+}
+
+bool xr_eye_used(int eye) { return g_xr.in_set && eye >= 0 && eye < 2 && g_xr.building.has_eye[eye]; }
+
+bool xr_latch_views(XrEyeView out[2]) {
+    if (!g_xr.in_set) return false;
+    XrSet *s = &g_xr.building;
+    if (!s->views_ok) {
+        int64_t t = atomic_load(&g_xr.target_time);
+        if (!t) return false;
+        pthread_mutex_lock(&g_xr.mu);  // (the app space changes on the XR thread)
+        XrSpace space = g_xr.app;
+        XrViewLocateInfo li = {.type = XR_TYPE_VIEW_LOCATE_INFO, .viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                               .displayTime = t, .space = space};
+        XrViewState vs = {.type = XR_TYPE_VIEW_STATE};
+        s->views[0] = s->views[1] = (XrView){.type = XR_TYPE_VIEW};
+        uint32_t n = 0;
+        XrResult r = p_xrLocateViews(g_xr.session, &li, &vs, 2, &n, s->views);
+        pthread_mutex_unlock(&g_xr.mu);
+        const XrViewStateFlags need = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT;
+        if (XR_FAILED(r) || n != 2 || (vs.viewStateFlags & need) != need) return false;
+        s->space = space;
+        s->views_ok = true;
+    }
+    for (int i = 0; out && i < 2; i++) {
+        const XrView *v = &s->views[i];
+        out[i] = (XrEyeView){{v->pose.orientation.x, v->pose.orientation.y, v->pose.orientation.z, v->pose.orientation.w},
+                             {v->pose.position.x, v->pose.position.y, v->pose.position.z},
+                             {v->fov.angleLeft, v->fov.angleRight, v->fov.angleUp, v->fov.angleDown}};
+    }
+    return true;
+}
+
+void xr_stub_eye_colour(int eye, float rgba[4]) {
+    static int test = -1;
+    if (test < 0) test = getenv("LARECOMP_XR_EYE_TEST") && atoi(getenv("LARECOMP_XR_EYE_TEST"));
+    // (the start screen's own background, 0.04 0.05 0.06, in both eyes; the test: left blue, right red)
+    float c[4] = {0.04f, 0.05f, 0.06f, 1};
+    if (test) c[0] = eye ? 0.5f : 0.02f, c[1] = 0.02f, c[2] = eye ? 0.02f : 0.5f;
+    memcpy(rgba, c, sizeof c);
+}

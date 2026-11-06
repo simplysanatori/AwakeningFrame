@@ -78,7 +78,9 @@ static uint64_t stat_pace_over;
 // (game manager +0x4e2, normally 0) is 1 while slow, the game's own value again after. Re-asserted every frame while held.
 // Returns whether the game is held (not when it allows no 30 fps mode itself: its most, +0x4e3, is 0).
 #define FW_MIN_EXTRA_VSYNCS 0x4e2  // (+0x4e3: the most, 1 - its 30 fps mode; +0x4e0 / +0x4e1: the current choice)
+static int xr_lock_fps;  // pace_xr_lock
 static bool hold_30(bool on) {
+    if (__atomic_load_n(&xr_lock_fps, __ATOMIC_RELAXED) == 30) on = true;  // (the VR mode's 30/90: held for good)
     static bool held;
     static uint8_t saved;
 #ifdef PACE_TEST  // (tools/test_pace.c: a simulated game manager)
@@ -145,6 +147,11 @@ void pace_settings_changed(const char *what) {
                                                                                : "an anti-aliasing setting change");
     __atomic_store_n(&reset_what, what, __ATOMIC_RELEASE);
 }
+
+// The VR mode at 90 Hz (runtime/xr): the display gives two vsyncs per three refreshes, 60 a second but unevenly spaced,
+// so the game runs in its 30 fps mode for good - two world steps per frame, 33.3 ms apart, each frame shown for three
+// refreshes. 0 or 60: back to the pacer's own choice.
+void pace_xr_lock(int fps) { __atomic_store_n(&xr_lock_fps, fps, __ATOMIC_RELAXED); }
 
 bool pace_is_slow(void) { return pace_slow; }
 uint64_t pace_frames_over(void) {

@@ -18,6 +18,10 @@
 
 // ---- start / mode (exec.c vk_exec_init, before any command)
 void rec_init(bool prof);
+// The queue's external synchronisation (the VR mode's OpenXR calls use it too): around every vkQueue* call and
+// vkDeviceWaitIdle made outside the recorder's submit / present.
+void vk_queue_lock(void);
+void vk_queue_unlock(void);
 bool rec_on(void);  // commands go through the recorder thread
 
 // ---- command buffers, submissions, presents (the translating thread only)
