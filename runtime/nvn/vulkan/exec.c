@@ -2147,7 +2147,7 @@ static pthread_mutex_t prep_lock = PTHREAD_MUTEX_INITIALIZER;
 typedef struct { uint64_t key; void *obj; } PrepEnt;
 static PrepEnt *prep_progs, *prep_pipes, *prep_cs;  // program / pipeline / compute content key -> Prog / Pipe / CsProg
 static size_t prep_progs_cap, prep_pipes_cap, prep_cs_cap, prep_progs_n, prep_pipes_n, prep_cs_n;
-static _Atomic int prep_pending;
+static _Atomic int prep_pending, prep_finished;  // (preparation jobs queued and not done / done)
 
 static void *prep_get(PrepEnt *t, size_t cap, uint64_t key) {
     if (!cap) return NULL;
@@ -6048,6 +6048,7 @@ static void prep_job_run(void *a) {
     PrepJob *j = a;
     j->fn(j->arg);
     free(j);
+    prep_finished++;
     prep_pending--;
 }
 static void prep_job(void (*fn)(void *), void *arg) {
@@ -6060,6 +6061,7 @@ static void prep_job(void (*fn)(void *), void *arg) {
 static _Atomic int prep_pipe_dups;  // records whose pipeline another record already made
 bool renderer_prepare_begin(void) { return g_vk.dev != VK_NULL_HANDLE; }
 int renderer_prepare_pending(void) { return prep_pending; }
+int renderer_prepare_finished(void) { return prep_finished; }
 static void gpl_probe(void);
 static void gpl_probe_note(Pipe *pp);
 void renderer_prepare_end(void) {
@@ -6707,6 +6709,11 @@ static void draw_(CmdRec *r, bool indexed);
 // clone, cleared transparent (g_hud: never twinned, eye 0 only), and the present shows that. st.rt is restored after
 // each redirected draw.
 static NvnTexture g_eye_out, g_hud;
+static bool hud_log(void) {  // LARECOMP_HUD_LOG=1: what goes into the HUD clone (one frame in 300) and presents without it
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_HUD_LOG") != NULL;
+    return on;
+}
 static bool g_eye_out_ok, g_hud_ok, st_redirected, st_hud_alpha, st_blend_forced;
 static NvnTexture *g_hud_win;  // the window texture whose draws go to g_hud this frame
 static uint8_t st_blend_saved[8];
@@ -7130,6 +7137,17 @@ static void draw_(CmdRec *r, bool indexed) {
         if (vr_diet_wants(last_hash, st.rt.ncolor ? st.rt.color[0] : NULL) && diet_draw(pr, last_hash)) { SKIP(SK_DIET); return; }
         if (g_debug_frame && getenv("LARECOMP_LOG_FSHASH")) LOG("[fshash] fs=%llx hash %016llx\n", (unsigned long long)fs, (unsigned long long)last_hash);
         g_cur_fs_hash = last_hash;
+        if (g_eye == 0 && st_hud_alpha && st.rt.ncolor && st.rt.color[0] == &g_hud && hud_log() &&
+            renderer_exec_frame() % 300 == 0) {  // (hudbox diagnostics) every draw into the HUD clone of one frame in 300
+            const float *u = (const float *)(uintptr_t)st.ubuf[0][0].addr, *c = (const float *)(uintptr_t)st.ubuf[1][0].addr;
+            LOG("[hudlog] f%llu fs %016llx blend %d (%d %d %d %d %d %d) vp %.0f,%.0f %.0fx%.0f ntex %d verts %llu ubo0 %llu",
+                (unsigned long long)renderer_exec_frame(), (unsigned long long)last_hash, st.color_state[0] & 1, st.blend[0][1],
+                st.blend[0][2], st.blend[0][3], st.blend[0][4], st.blend[0][5], st.blend[0][6], st.viewport[0][0], st.viewport[0][1],
+                st.viewport[0][2], st.viewport[0][3], pr->fi->ntex, (unsigned long long)r->x[2], (unsigned long long)st.ubuf[0][0].size);
+            if (u && st.ubuf[0][0].size == 560) LOG(" rect %g %g %g %g mv %g %g %g / %g %g %g", u[132], u[133], u[134], u[135], u[16], u[17], u[19], u[20], u[21], u[23]);
+            if (c && st.ubuf[1][0].size >= 16) LOG(" fc0 %g %g %g %g (size %llu)", c[0], c[1], c[2], c[3], (unsigned long long)st.ubuf[1][0].size);
+            LOG("\n");
+        }
         if (g_eye == 0 && st_hud_alpha && st.rt.ncolor && st.rt.color[0] == &g_hud) {
             // (stereo) the HUD over a transparent clear: blended draws accumulate coverage in alpha (src_a + dst_a * (1 - src_a));
             // the game assumed an opaque destination
@@ -8624,6 +8642,12 @@ float g_vk_scene_uv[4];
 
 // Inside the window image's rendering (device.c vk_frame_begin): the game image into (vx, vy, vw, vh).
 void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, float vw, float vh, const float pv[8]) {
+    if (hud_log() && g_eye_out_ok) {  // (hudbox diagnostics) presents with / without the HUD clone
+        static unsigned n_alpha, n_opaque, n;
+        if (st_hud_alpha) n_alpha++; else n_opaque++;
+        if (!st_hud_alpha && n_opaque < 40) LOG("[hudlog] opaque present at frame %llu\n", (unsigned long long)renderer_exec_frame());
+        if (++n % 300 == 0) { extern const char *game_level_name(void); LOG("[hudlog] presents: %u with the HUD clone, %u opaque (level %s)\n", n_alpha, n_opaque, game_level_name()); n_alpha = n_opaque = 0; }
+    }
     if (st_hud_alpha && g_hud_ok && g_hud.backend) b = g_hud.backend;  // (stereo: the HUD clone, alpha and all)
     g_hud_win = NULL;
     if (!b || !b->image || (b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT)) return;

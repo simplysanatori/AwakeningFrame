@@ -522,6 +522,12 @@ static double ms_now(void) {
     return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
 }
 
+// Progress: the records gone through, times the share of the builds they queued that are done (a record queues one or
+// two builds, which finish later on the worker threads; records - builds pending went below 0 on a cold start).
+static int prep_share(int done, int fin0) {
+    int f = renderer_prepare_finished() - fin0, p = renderer_prepare_pending();
+    return f + p > 0 ? (int)((long long)done * f / (f + p)) : done;
+}
 static volatile bool prep_done_once;  // (a full, not cancelled run finished in this process: shader_prep_boot)
 static bool prep_run_locked(const char *romfs, void (*progress)(int done, int total), const volatile int *cancel);
 bool shader_prep_run(const char *romfs, void (*progress)(int done, int total), const volatile int *cancel) {
@@ -585,6 +591,7 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
         free(keep);
     }
     FILE **files = calloc((size_t)idx_nfiles + 1, sizeof *files);
+    int fin0 = renderer_prepare_finished();  // (builds done before this run)
     int done = 0, prepared = 0, missing = 0, failed = 0, prepared_seen = 0;
     for (int own = 0; own < 2; own++)  // the shipped list, then the player's own
     for (char *line = own ? seen : list, *next; line && *line && !(cancel && *cancel); line = next) {
@@ -602,10 +609,10 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
         else failed++;
         free(dv);
         free(df);
-        if (progress && (++done & 7) == 0) progress(done - renderer_prepare_pending(), total + 1);
+        if (progress && (++done & 7) == 0) progress(prep_share(done, fin0), total + 1);
     }
     while (!(cancel && *cancel) && renderer_prepare_pending()) {  // (the last builds)
-        if (progress) progress(done - renderer_prepare_pending(), total + 1);
+        if (progress) progress(prep_share(done, fin0), total + 1);
         struct timespec ts = {0, 5000000};
         nanosleep(&ts, NULL);
     }
@@ -627,27 +634,61 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
 // screen already did it in this process. It never holds the start for long: after LARECOMP_SHADER_PREP_BUDGET seconds
 // (default 20) it stops where it is (the rest compile as the game needs them, and what was built is in the pipeline
 // cache for the next start, which gets further). Warm, the whole list takes a few seconds.
-// Logs "[shader] preparing: N %" about every 10 %.
+// Logs "[shader] preparing: N %" about every 10 %. While it runs, a label "Preparing shaders... N %" is drawn on its own
+// thread (the window, or in VR the HUD / menu panel: backend_boot_frame), so the headset shows the progress, not nothing.
+// In VR the budget is 90 s (LARECOMP_SHADER_PREP_BUDGET still sets it): with too little time a cold start (a new install,
+// a driver update: about a minute on the Frame) left hundreds of builds queued, and the game's first minute (the title,
+// the file select, the first room) drew with pieces missing while they finished.
 static double boot_t0;
 static volatile int boot_cancel;
 static double boot_budget_ms;
+static _Atomic int boot_pct = -1;
+static volatile int boot_label_stop;
 static void boot_progress(int done, int total) {
     static int last = -1;
     int pct = total > 0 ? (int)((long long)done * 100 / total) : 0;
+    if (pct < last) pct = last;  // (the share of queued builds done can dip as a record queues more)
     if (last < 0 || pct / 10 != last / 10) LOG("[shader] preparing: %d %%\n", pct);
     last = pct;
+    boot_pct = pct;
     if (!boot_cancel && ms_now() - boot_t0 > boot_budget_ms) {
         boot_cancel = 1;
         LOG("[shader] preparing: out of time after %.0f s at %d %%; the rest compiles as the game needs it\n", boot_budget_ms / 1e3, pct);
     }
 }
+extern void menu_boot_notice(int pct);  // (ui/menu.mm: the label; -1 none)
+extern void backend_boot_frame(void);   // (the backend: one frame of the overlay alone, before the game's first)
+static void *boot_label_thread(void *arg) {
+    (void)arg;
+    while (!boot_label_stop) {
+        double t0 = ms_now();
+        menu_boot_notice(boot_pct < 0 ? 0 : boot_pct);
+        backend_boot_frame();
+        double left = 33.0 - (ms_now() - t0);  // (about 30 a second; the frame waited for its image already)
+        if (left > 0) {
+            struct timespec ts = {0, (long)(left * 1e6)};
+            nanosleep(&ts, NULL);
+        }
+    }
+    menu_boot_notice(-1);
+    backend_boot_frame();  // (the label gone: the panel stays clear until the game's first frame)
+    return NULL;
+}
 void shader_prep_boot(const char *romfs) {
     const char *e = getenv("LARECOMP_SHADER_PREP");
     if (e && *e ? !atoi(e) : getenv("LARECOMP_NO_LAUNCHER") != NULL) return;
     if (prep_done_once) return;
-    const char *b = getenv("LARECOMP_SHADER_PREP_BUDGET");
-    boot_budget_ms = (b && *b ? atof(b) : 20.0) * 1e3;
+    const char *b = getenv("LARECOMP_SHADER_PREP_BUDGET"), *xr = getenv("LARECOMP_XR");
+    boot_budget_ms = (b && *b ? atof(b) : xr && atoi(xr) > 0 ? 90.0 : 20.0) * 1e3;
     boot_t0 = ms_now();
     boot_cancel = 0;
+    boot_pct = -1, boot_label_stop = 0;
+    pthread_t lt;
+    const char *le = getenv("LARECOMP_SHADER_PREP_LABEL");  // (1 on, 0 off; default off until tested in the headset)
+    bool label = le && atoi(le) > 0 && pthread_create(&lt, NULL, boot_label_thread, NULL) == 0;
     shader_prep_run(romfs, boot_progress, &boot_cancel);
+    if (label) {
+        boot_label_stop = 1;
+        pthread_join(lt, NULL);
+    }
 }

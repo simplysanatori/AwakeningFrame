@@ -1445,6 +1445,19 @@ void backend_present(NvnTexture *t);
 void *backend_pool_push(void) { return NULL; }
 void backend_pool_pop(void *p) { (void)p; }
 static bool direct_repeat;  // (render thread off) backend_represent's present
+// (shader_prep.c, the boot preparation: before the game's first frame, on the preparation's label thread) one frame of the
+// overlay alone (its "Preparing shaders" label) into the window, or in VR into the HUD / menu panel's image, cleared
+// transparent there (the eyes get the stub's colour). Nothing once the game presents or the render thread runs.
+void backend_boot_frame(void) {
+    if (g_last_presented || rq_on()) return;
+    static const float clear_flat[4] = {0.04f, 0.05f, 0.06f, 1}, clear_xr[4] = {0, 0, 0, 0};
+    if (!vk_frame_begin(xr_mode() ? clear_xr : clear_flat)) {
+        SDL_Delay(50);  // (VR: the session not running yet)
+        return;
+    }
+    menu_render((void *)vk_cmd(), g_vk.sc_extent.width, g_vk.sc_extent.height);
+    vk_frame_end(NULL);
+}
 void backend_represent(void) {
     if (!g_last_presented) { SDL_Delay(16); return; }
     if (rq_on()) rq_present(g_last_presented, total_frames, false);

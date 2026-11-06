@@ -35,7 +35,7 @@ cache. And, with `--play` (how the Steam shortcut starts the game), nothing was 
 - `shader_prep_boot` (`shader_prep.c`): the preparation now runs at every start without the start screen (`--play`),
   before the game's first frame; off for scripted test runs (`LARECOMP_NO_LAUNCHER`); `LARECOMP_SHADER_PREP=1/0` forces it
   either way; skipped when the start screen already did it in the process. It has a time budget,
-  `LARECOMP_SHADER_PREP_BUDGET` seconds (default 20): out of time, it stops where it is, the rest compiles on demand and
+  `LARECOMP_SHADER_PREP_BUDGET` seconds (default 20; 90 in VR, below): out of time, it stops where it is, the rest compiles on demand and
   what was built is in the pipeline cache, so the next start gets further. It logs `[shader] preparing: N %` every 10 %.
   Warm it takes about 7 s (translation is one thread; the pipelines come from the cache).
 - Pipeline cache (`device.c`): the tag is the GPU, driver and cache format only (the driver keys entries by SPIR-V and state, so
@@ -71,6 +71,27 @@ Re-run it after a new build that changes what the renderer draws (a new pass or 
 caches survive translator changes, but variants nobody has built are first visits). After a GPU driver update the
 pipeline cache starts over (tag), and the next start prepares what it can in 20 s and finishes over the following starts,
 or run the tour again.
+
+## First start in VR (hudbox lane)
+
+The owner's first start after the install (the headset log of 2026-11-06 08:03) showed what a cold cache did with the
+20 s budget: the preparation went through all 1587 records in 20 s but most of their builds were still queued on the
+worker threads when it gave up ("out of time after 20 s at -6 %"), so the game started with ~1000 pipelines still
+building. For the next 35 s the title, the file select and the first room drew with pieces missing (up to 6570 draws
+skipped per 2 s, `[vk] t=...` lines); that was the "scuffed" panel. The second start prepared everything in 6 s and
+skipped nothing. Meanwhile the headset showed nothing at all for those 20 s (the XR loop had no layers to submit).
+
+- **Progress:** `[shader] preparing: N %` counted records gone through minus builds pending; a record queues one or two
+  builds, so a cold start went negative. Now it is the records gone through times the share of their queued builds that
+  are done (`renderer_prepare_finished`, both backends), never falling back.
+- **Label:** while the preparation runs, a thread of its own draws a frame of the overlay alone about 30 times a second
+  (`backend_boot_frame`, device.c; `menu_boot_notice`, menu.mm): "Preparing shaders... N %" (the start screen's own
+  string) centred on a dark plate. In VR that frame is the HUD / menu panel, cleared transparent around the label, with
+  the stub's dark eyes behind it; flat, the window. On screen only. A last frame without the label is drawn when it ends.
+  `LARECOMP_SHADER_PREP_LABEL=1` turns it on (off by default until it has been seen in the headset).
+- **VR budget:** 90 s in VR mode (`LARECOMP_XR=1`), 20 s flat; `LARECOMP_SHADER_PREP_BUDGET` still sets either. A cold
+  start on the Frame takes about a minute, so the whole list is built before the game starts and the game's first
+  minute is clean; warm starts are unchanged (6-7 s, with the label up).
 
 ## Limits
 
