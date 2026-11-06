@@ -17,6 +17,7 @@
 #endif
 
 volatile int g_cam_on, g_cam_cull, g_cam_log;
+volatile uint32_t g_cam_stale;
 
 // ---------------------------------------------------------------- matrix maths (row-major, column vectors)
 #pragma clang fp contract(off)
@@ -422,6 +423,8 @@ static void dump48(const CamLatch *l) {
         g_id_n[0], g_id_n[1], g_id_n[2], md);
 }
 
+bool cam_override_latched(uint64_t frame) { return g_latch.valid && g_latch.frame == frame; }
+
 void cam_override_latch(const float *u, uint64_t addr, uint64_t size, uint64_t frame) {
     if (size != 320 || (g_latch.valid && g_latch.frame == frame)) return;
     if (!persp(u)) return;
@@ -522,6 +525,7 @@ bool cam_override_ubo(int stage, uint64_t addr, uint64_t size, void *out320) {
         if (!eye_cams() || addr != g_latch.addr || size != 320) return false;
         const float *g = (const float *)(uintptr_t)addr;
         if (memcmp(g, g_latch.orig, 128)) {  // (the latched camera's address holds another camera now: not substituted)
+            g_cam_stale++;
             static uint64_t n_miss;
             if (n_miss++ < 40 || n_miss % 1000 == 0)
                 LOG("[stereo] eye %d, frame %llu: the camera at %#llx changed since the latch (game eye %.2f %.2f %.2f -> %.2f %.2f %.2f; %llu so far)\n",

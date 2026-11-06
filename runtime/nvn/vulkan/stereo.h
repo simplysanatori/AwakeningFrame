@@ -31,6 +31,10 @@ int stereo_set_views(void);
 // The view and projection (game units, the game's conventions: row-major, clip = P * V * x) eye `eye`'s current output
 // was rendered with. false: none (the game's own camera, or no output yet).
 bool stereo_eye_matrices(int eye, float V[16], float P[16]);
+// The rig's table at the latest latch (render thread): its anchor (world, game units: the table's centre on the floor),
+// whether the area is a room or a side view (the rig anchors to the camera zone there) and that zone's box (zone: one
+// was known). false: no latch with eye cameras yet. (The edge pass's round fade centres on the anchor.)
+bool stereo_table(float anchor[3], bool *room, bool *zone, float lo[3], float hi[3]);
 
 // ---- the eye post hook (the "edge" lane's fog / backdrop pass)
 // exec.c vk_stereo_eyes calls stereo_eye_post once per NEW eye output (a composite that was not shown before), before

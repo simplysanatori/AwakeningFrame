@@ -115,13 +115,12 @@ static bool lazy_heap_predicted(bool budget_ext, bool *probe) {
         return true;
 #endif
 #ifdef __linux__
-    // RADV with the dma-buf heap (exec.c guest_heap_dmabuf): no import at all, so whole_import_fits doesn't apply; any
+    // RADV / PanVK with the dma-buf heap (exec.c guest_heap_dmabuf): no import at all, so whole_import_fits doesn't apply; any
     // cached host-visible memory type will do, as there (a heap's reported size is only the driver's split: a ROG Ally
     // has 3305 MB for 3328, and the allocation works). Lazy chunks over it would never be imported: every shader access
     // a miss, and the render thread remaking the chunk set each frame (15 ms a frame on the Ally).
     const char *d = getenv("LARECOMP_VK_HEAP_DMABUF");
-    bool radv = strstr(g_vk.props.deviceName, "RADV") != NULL;
-    if ((d ? atoi(d) != 0 : radv) && (g_vk.dmabuf || g_vk.map_placed)) {
+    if ((d ? atoi(d) != 0 : g_vk.heap_dmabuf_default) && (g_vk.dmabuf || g_vk.map_placed)) {
         VkPhysicalDeviceMemoryProperties mp;
         vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
         const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
@@ -760,6 +759,10 @@ static void create_device(void) {
         if (pbin_ext) pbp.pNext = pr.pNext, pr.pNext = &pbp;
 #endif
         vkGetPhysicalDeviceProperties2(g_vk.phys, &pr);
+        // the heap as driver memory (exec.c guest_heap_dmabuf) by default: RADV, and PanVK (Mali-G610, Mesa 27.0-devel,
+        // issue #483: an 81-minute run without faults, the Field 15 -> 21 fps, ~85% fewer uploads). PanVK's device name
+        // is the GPU's ("Mali-G610 MC4"), hence the driver ID.
+        g_vk.heap_dmabuf_default = strstr(g_vk.props.deviceName, "RADV") != NULL || drv.driverID == VK_DRIVER_ID_MESA_PANVK;
 #ifdef VK_EXT_graphics_pipeline_library
         if (gpl_ext)
             snprintf(gpl, sizeof gpl, "%s (fast linking %s, independent interpolation decoration %s)",
@@ -1453,6 +1456,19 @@ void backend_present(NvnTexture *t);
 void *backend_pool_push(void) { return NULL; }
 void backend_pool_pop(void *p) { (void)p; }
 static bool direct_repeat;  // (render thread off) backend_represent's present
+// (shader_prep.c, the boot preparation: before the game's first frame, on the preparation's label thread) one frame of the
+// overlay alone (its "Preparing shaders" label) into the window, or in VR into the HUD / menu panel's image, cleared
+// transparent there (the eyes get the stub's colour). Nothing once the game presents or the render thread runs.
+void backend_boot_frame(void) {
+    if (g_last_presented || rq_on()) return;
+    static const float clear_flat[4] = {0.04f, 0.05f, 0.06f, 1}, clear_xr[4] = {0, 0, 0, 0};
+    if (!vk_frame_begin(xr_mode() ? clear_xr : clear_flat)) {
+        SDL_Delay(50);  // (VR: the session not running yet)
+        return;
+    }
+    menu_render((void *)vk_cmd(), g_vk.sc_extent.width, g_vk.sc_extent.height);
+    vk_frame_end(NULL);
+}
 void backend_represent(void) {
     if (!g_last_presented) { SDL_Delay(16); return; }
     if (rq_on()) rq_present(g_last_presented, total_frames, false);
@@ -1791,7 +1807,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                     // (output_scale.c); budget: 14.5 ms at 60 fps (120 Hz), 87% of 33.3 at 30 (90 Hz)
                     static double b60 = -1;
                     if (b60 < 0) b60 = getenv("LARECOMP_VR_DYNRES_MS") ? atof(getenv("LARECOMP_VR_DYNRES_MS")) : 14.5;
-                    double f = output_scale_vr_factor(SDL_GetTicksNS() / 1e9, game_ms, xr_display_hz() < 100 ? 29.0 : b60, ew);
+                    double f = output_scale_vr_factor(SDL_GetTicksNS() / 1e9, game_ms, xr_display_hz() < 100 && !pace_xr_free() ? 29.0 : b60, ew);
                     os.sx = sx = os.ax * f, os.sy = sy = os.ay * f;
                 }
                 crop[2] = (float)(u / os.ax), crop[3] = (float)(u / os.ay);  // (of the allocation: the present takes the drawn part)
@@ -2069,6 +2085,12 @@ void ui_window_init(void) {
                                             getenv("LARECOMP_HOST_INPUT") || getenv("LARECOMP_BIND_TEST"));
         if (scripted) SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
     }
+    // (VR mode) no system on-screen keyboard: the menu turns text input on while it is open (menu_apply_window_requests),
+    // and under Steam with SteamDeck=1 (the Frame) SDL then opens Steam's keyboard (steam://open/keyboard), which takes
+    // the focus from the VR session: the headset dropped to SteamOS / the dashboard as the menu opened. The menu has its
+    // own on-screen keyboard. LARECOMP_XR_SCREEN_KEYBOARD=1: SDL's default.
+    if (xr_mode() && !(getenv("LARECOMP_XR_SCREEN_KEYBOARD") && atoi(getenv("LARECOMP_XR_SCREEN_KEYBOARD"))))
+        SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, "0");
     window = SDL_CreateWindow("LAS Recomp", win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     rt_window_icon(window);

@@ -136,21 +136,27 @@ void xr_stub_eye_colour(int eye, float rgba[4]);
 // degrees counter-clockwise (its "up" now points to the player's left) the stick has to be pushed left to walk up.
 void xr_input_set_yaw(float yaw_radians);
 // What the rig reads from the controllers (the game gets everything else; none of these reach the game):
-//   right stick left / right    xr_input_take_snap(): -1 left, +1 right, 0 none. One per flick past 0.7, re-armed once
-//                               the stick is back under 0.35. Consumed by the call (only the latest flick is kept).
-//   right stick up / down       XrRigInput.tilt: +1 up .. -1 down, dead zone and all (continuous: the rig integrates)
+//   right stick left / right    XrRigInput.turn: +1 right .. -1 left, while sideways is the stick's dominant axis (smooth
+//                               turning: the rig integrates), and xr_input_take_snap(): -1 left, +1 right, 0 none, one per
+//                               flick past 0.7 (re-armed once the stick is back under 0.35; snap turning). Consumed by the
+//                               call (only the latest flick is kept).
+//   right stick up / down       XrRigInput.tilt: +1 up .. -1 down, while up / down is the dominant axis (continuous: the
+//                               rig integrates). The dominant axis is the one the stick was first pushed along, until the
+//                               other is 1.4 times bigger; the other reads 0.
 //   left grip held (modifier)   XrRigInput.modifier; with it the left D-pad is the rig's, not the game's:
 //                               up / down -> height +1 / -1, right / left -> size +1 / -1 (held: continuous)
-//                               and a click of the right stick -> xr_input_take_recentre() (put the table in front of
-//                               the player again), consumed by the call.
+//   both stick clicks held 0.1 s, or the left grip and a click of the right stick: xr_input_take_reset_view() (the view back
+//                               to the game's own angle and the table in front of the player again), consumed by the call.
+//                               Until both clicks are let go the game sees neither; a single click (or both for under 0.1 s)
+//                               goes to the game as the stick-click buttons.
 typedef struct {
-    float tilt;
+    float tilt, turn;
     float height, size;
     bool modifier;
 } XrRigInput;
 void xr_input_rig(XrRigInput *out);
 int xr_input_take_snap(void);
-bool xr_input_take_recentre(void);
+bool xr_input_take_reset_view(void);
 
 // (the rig, runtime/xr/xr_rig.c) the app's space put at the head and turned to where it faces, as after SteamVR's own
 // recentre (xr_session.c: the next refresh makes the new space; the table, placed relative to it, is in front again).

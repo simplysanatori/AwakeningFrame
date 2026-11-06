@@ -8,8 +8,10 @@ mapping, the hooks), `runtime/ui/vr_tab.mm` (the page), `runtime/xr/vrui_hook.c`
 ## How a saved value reaches the VR code
 
 1. At startup (`settings_load`, before anything reads the environment) `vr_settings_apply_env` sets each variable from
-   the saved value, but only for a value that is not the default and only when the variable is not already set. The
-   default is whatever the code behind the variable does without it, so an untouched ini changes nothing.
+   the saved value, when the variable is not already set. A value is left out when it is what the code behind the variable
+   does without it (refresh 120, layout switch, turning smooth, follow smooth, edge off), so an untouched ini changes nothing
+   there; Foveation and Dynamic Resolution are always passed on, because the tab's defaults (High, On) are not the lanes' own
+   (medium, off).
 2. A change made in the menu calls the option's hook in `vr_settings_changed`. The hooks are weak symbols: where a lane
    has not provided one yet the row's description says "Applies After Restart" (a relaunch, for the refresh rate), and the
    saved value takes effect through step 1 at the next start.
@@ -18,26 +20,35 @@ mapping, the hooks), `runtime/ui/vr_tab.mm` (the page), `runtime/xr/vrui_hook.c`
    `AF_REFRESH_FROM=env|ini`).
 
 The refresh rate is the one option the game cannot apply itself: SteamVR's per-app rate is set by the launch wrapper
-(`steam-frame/awakeningframe.sh`) before the game starts. The wrapper now reads `vr_refresh` from `larecomp.ini` when
-`AF_REFRESH_HZ` is not set, so the choice takes effect on the next launch. At 90 Hz the game runs at 30 FPS
-(`pace_xr_lock`), at 120 Hz at 60 FPS.
+(`steam-frame/awakeningframe.sh`) before the game starts. The wrapper reads `vr_refresh` from the ini the game uses
+(`LARECOMP_SETTINGS`, else `larecomp.ini` in the data root, `~/.local/share/lasrecomp` by default, else the program folder's)
+when `AF_REFRESH_HZ` is not set, so the choice takes effect on the next launch; with no `vr_refresh` line the rate is 120 Hz.
+At 120 Hz the game runs at 60 FPS, at 90 Hz at 30 FPS (`pace_xr_lock`).
+
+The third choice, 90 Hz (60 FPS, Test), is for feeling 60 FPS on a display that is not a multiple of it. It saves
+`vr_refresh = 90` and `vr_fps = 60`, and at startup sets `LARECOMP_XR_FPS=60` unless the environment already has it
+(`AF_FPS=60` in `session.env` does the same without the menu: the wrapper exports `LARECOMP_XR_FPS`). The 30 FPS lock is
+then left off and the pacer chooses 60 or 30 as at 120 Hz, with a 16.67 ms game frame (`pace_xr_frame_ms`, the VR GPU
+limits of `PACE_VR_GPU`). The XR thread already gives the game its vsync on two of every three refreshes, so each game
+frame is shown for one refresh or two, alternating: motion is less even than at 120 Hz. One pose per game frame, the
+carried render poses and the table moving only on new game frames are unchanged.
 
 ## Options
 
-| Row | Choices (default first) | `larecomp.ini` | Variable | Applied |
+| Row | Choices (the menu's order; default as stated, else the first) | `larecomp.ini` | Variable | Applied |
 |---|---|---|---|---|
-| Refresh Rate | 120 Hz (60 FPS), 90 Hz (30 FPS) | `vr_refresh = 120 \| 90` | wrapper: `AF_REFRESH_HZ`; `LARECOMP_XR_HZ` | relaunch |
+| Refresh Rate | 120 Hz (60 FPS), 90 Hz (30 FPS), 90 Hz (60 FPS, Test) | `vr_refresh = 120 \| 90`, `vr_fps = 30 \| 60` | wrapper: `AF_REFRESH_HZ`, `AF_FPS`; `LARECOMP_XR_HZ`, `LARECOMP_XR_FPS` | relaunch |
 | Controller Layout | Switch, Comfort | `vr_layout = switch \| comfort` | `LARECOMP_XR_LAYOUT` | hook `xr_input_set_layout` (stub) |
 | Buttons Match Labels | Off, On | `face_buttons_by_label = 0 \| 1` (the Controls tab's setting) | none (`g_settings.face_by_label`, read live by `xr_input.c`) | live |
+| Turning | Smooth, Snap | `vr_turn = smooth \| snap` | `LARECOMP_VR_TURN` | live (`xr_rig_set_turn_mode`, the rig's) |
 | Follow Mode | Smooth, Room, Fixed | `vr_follow = smooth \| room \| fixed` | `LARECOMP_VR_FOLLOW` | hook `stereo_set_follow` (stub) |
 | Height | 0, -50 to +40 cm in steps of 5 | none (the rig's, `vr_rig.ini`) | none | live (`xr_rig_set_height_cm`, `runtime/xr/xr_rig_settings.c`) |
 | Size | 100%, 40 to 300% in steps of 10 | none (the rig's, `vr_rig.ini`) | none | live (`xr_rig_set_size_pct`) |
 | Tilt | 0, -20 to +50 degrees in steps of 5 | none (the rig's, `vr_rig.ini`) | none | live (`xr_rig_set_tilt_deg`) |
 | Recentre Table | button | none | none | live (`xr_rig_recentre`; greyed out in a flat build) |
-| Table Edge | Off, Haze, Sky Only, Passthrough (outdoors only; default Off) | `vr_edge_mode = black \| fog \| gradient \| passthrough` | `LARECOMP_VR_EDGE` | restart (no live hook) |
-| Foveation | Off, Low, Medium, High (eye-tracked only) | `vr_foveation = off \| low \| medium \| high` | `LARECOMP_VR_FOVEATION` (default medium) | live (`fov_set_level`); Off at start: restart to turn it on |
-| Dynamic Resolution | Off, On | `vr_dynamic_resolution = 1 \| 0` | `LARECOMP_VR_DYNRES=0` | hook `diet_set_dynres` (stub) |
-| Culling | Fit, Wide, Stock | `vr_culling = fit \| wide \| stock` | `LARECOMP_VR_CULL` | hook `vr_cull_set_mode` (stub) |
+| Table Edge | Off, Fade, Passthrough (default Off) | `vr_edge_style = black \| fade \| passthrough` | `LARECOMP_VR_EDGE` (`black`, `fade`, `passthrough`; the variable still takes `fog` and `gradient`) | restart (no live hook) |
+| Foveation | Off, Low, Medium, High (eye-tracked only; default High) | `vr_foveation = off \| low \| medium \| high` | `LARECOMP_VR_FOVEATION` (always set from the tab: the lane's own default is medium) | live (`fov_set_level`); Off at start: restart to turn it on |
+| Dynamic Resolution | Off, On (default On; floor 1536 px) | `vr_dynamic_resolution = 1 \| 0` | `LARECOMP_VR_DYNRES` (always set from the tab: the lane's own default is off) | live (`diet_set_dynres`) |
 | Panel Distance | 2.0 m, 0.8 to 4.0 m | `vr_panel_distance = <metres>` | `LARECOMP_XR_QUAD=<dist>,<width>` | live (`vrui_set_hud_quad`) |
 | Panel Width | 2.2 m, 0.6 to 4.0 m | `vr_panel_width = <metres>` | the same | live |
 
@@ -50,19 +61,30 @@ rows. The hooks exist in VR builds only; in a flat build the rows keep their def
 `larecomp.ini` files from before may still hold `vr_table_height` / `_size` / `_tilt`: they are read and ignored (the
 next save drops them).
 
-## State of the lanes when this was written (all hooks are stubs, except the rig's)
+## Defaults and the saved file
 
-None of the rig, fov and diet lanes had committed anything (no `xr_rig.h`, no `LARECOMP_VR_FOVEATION` or
-`LARECOMP_VR_DYNRES` reader), edge had `edge.c` and `EDGE.md` (`LARECOMP_VR_EDGE=fog|gradient|black|passthrough`, default
-fog; also `black` = `off`, `0`, `none`), and `vr_cull.c` / `stereo.c` / `xr_input.c` read their variables once at start.
-So only Buttons Match Labels and the panel are live; the rest are saved, applied through the environment at the next
-start, and flagged in the menu. To connect a lane: provide the hook's name (declared at the top of `vr_settings.c`, each
-with a comment saying what it takes), or change the one call in `vr_settings_changed` to the lane's own function. The row
-then loses its "Applies After Restart" note by itself (`vr_opt_live` tests the weak symbol).
+New defaults, after the first headset session (2026-11-06): Refresh Rate 120 Hz (60 FPS), Foveation High, Dynamic Resolution
+On (floor 1536 px), Table Edge Off, Turning Smooth. An `larecomp.ini` that already holds a value keeps it (the tab writes every
+row each time it saves, so a file saved before has `vr_refresh = 90`, `vr_foveation = medium`, `vr_dynamic_resolution = 0`
+until they are changed in the tab). The edge is the exception: it has a new key, `vr_edge_style`, and the older `vr_edge_mode`
+(and `vr_edge`) are read and dropped, so Haze and Sky Only choices do not carry over; `vr_culling` is dropped too. The Culling
+row is gone from the menu; `LARECOMP_VR_CULL` still works from the environment (default `fit`).
 
-Guesses to confirm when the lanes land: Foveation's default (the tab shows "Default" and leaves the variable unset, so the
-lane's own choice stands), Dynamic Resolution's default (taken as On), and whether `LARECOMP_VR_FOVEATION` / `_DYNRES` take
-the words above.
+All the hooks are weak symbols (`vr_opt_live`). Live now: Controller Layout, Turning, Height, Size, Tilt, Recentre Table,
+Foveation, Dynamic Resolution, Panel; the rest say "Applies After Restart" (Table Edge, Follow Mode) or "Applies After Relaunch"
+(Refresh Rate). To connect a lane: provide the hook's name (declared at the top of `vr_settings.c`), or change the one call in
+`vr_settings_changed`.
+
+## Labels changed after the first headset session (original -> proposed)
+
+| Row | Original | Proposed |
+|---|---|---|
+| Refresh Rate | default 90 Hz (30 FPS); "...90 Hz plays at 30 FPS and asks less of the GPU." | default 120 Hz (60 FPS); "...120 Hz plays at 60 FPS. 90 Hz plays at 30 FPS and asks less of the GPU." |
+| Turning | (new; right stick sideways was a fixed 45° snap) | Smooth, Snap (default Smooth): "Smooth turns the table as you push the right stick sideways. Snap turns it in 45° steps behind a blink. Click both sticks to reset the view." |
+| Table Edge | Off, Haze, Sky Only, Passthrough: "What fills the empty space past the world outdoors. Haze fades it into the sky, Sky Only fills the space without touching the world, Passthrough shows the room." | Off, Fade, Passthrough (default Off): "What fills the space past the world. Fade softens the world into darkness around Link, Passthrough shows your room." |
+| Foveation | default Medium | default High (values and text as before) |
+| Dynamic Resolution | default Off | default On (text as before) |
+| Culling | Fit, Wide, Stock | removed from the menu |
 
 ## Labels for review (original -> proposed)
 
@@ -71,18 +93,18 @@ was: the variable, or the existing menu text. Style as Moonlight / Apollo: Title
 
 | Original | Proposed row | Proposed values | Description |
 |---|---|---|---|
-| `AF_REFRESH_HZ=90` / `120` | Refresh Rate | 120 Hz (60 FPS), 90 Hz (30 FPS) | The headset's refresh rate, and with it the game's frame rate: 90 Hz plays at 30 FPS and asks less of the GPU. Applies After Relaunch. |
+| `AF_REFRESH_HZ=90` / `120`, `AF_FPS=60` | Refresh Rate (default 120 Hz) | 120 Hz (60 FPS), 90 Hz (30 FPS), 90 Hz (60 FPS, Test) | The headset's refresh rate, and with it the game's frame rate: 120 Hz plays at 60 FPS. 90 Hz plays at 30 FPS and asks less of the GPU. Applies After Relaunch. For 90 Hz (60 FPS, Test): Plays at 60 FPS on a 90 Hz display. Motion is less even because frames alternate between one and two refreshes. For testing. |
 | `LARECOMP_XR_LAYOUT=switch` / `comfort` | Controller Layout | Switch, Comfort | Switch puts every button where a Switch Pro Controller has it. Comfort puts the sword on the right trigger and the shield on the left. |
 | Buttons match labels (Controls tab) | Buttons Match Labels | Off, On | The Frame controllers' A, B, X and Y work as printed on them. Off matches the Switch's button positions. |
+| right stick left / right, `LARECOMP_VR_TURN=smooth` / `snap` | Turning | Smooth, Snap | Smooth turns the table as you push the right stick sideways. Snap turns it in 45° steps behind a blink. Click both sticks to reset the view. |
 | `LARECOMP_VR_FOLLOW=smooth` / `room` / `fixed` | Follow Mode | Smooth, Room, Fixed | How the table follows the game's camera. Smooth glides after it, Room holds still until the camera changes room, Fixed never moves. |
 | `LARECOMP_VR_TABLE` (y) | Height | -50 cm to +40 cm | How high the table stands. |
 | `LARECOMP_VR_SCALE` | Size | 40% to 300% | How big the table is. |
 | `LARECOMP_VR_PITCH` | Tilt | -20 to +50 degrees | How far the table leans toward you. |
-| right stick click with left grip held | Recentre Table | (button) | Puts the table in front of you again. |
-| `LARECOMP_VR_EDGE=black` / `fog` / `gradient` / `passthrough` | Table Edge | Off, Haze, Sky Only, Passthrough | What fills the empty space past the world outdoors. Haze fades it into the sky, Sky Only fills the space without touching the world, Passthrough shows the room. |
-| `LARECOMP_VR_FOVEATION=off` / `low` / `medium` / `high` | Foveation | Off, Low, Medium, High | Follows your eyes and draws what you aren't looking at in less detail. Higher levels save more GPU time. Without eye tracking it draws everything in full detail. |
-| `LARECOMP_VR_DYNRES` | Dynamic Resolution | Off, On | Lowers the resolution when the GPU can't keep up and raises it again when it can. |
-| `LARECOMP_VR_CULL=fit` / `wide` / `stock` | Culling | Fit, Wide, Stock | How much of the world outside the table is skipped. Fit follows the table's edges, Wide keeps more, Stock keeps everything the game would draw. |
+| right stick click with left grip held (now the view reset's alias) | Recentre Table | (button) | Puts the table in front of you again. |
+| `LARECOMP_VR_EDGE=black` / `fade` / `passthrough` | Table Edge | Off, Fade, Passthrough | What fills the space past the world. Fade softens the world into darkness around Link, Passthrough shows your room. |
+| `LARECOMP_VR_FOVEATION=off` / `low` / `medium` / `high` | Foveation (default High) | Off, Low, Medium, High | Follows your eyes and draws what you aren't looking at in less detail. Higher levels save more GPU time. Without eye tracking it draws everything in full detail. |
+| `LARECOMP_VR_DYNRES` | Dynamic Resolution (default On) | Off, On | Lowers the resolution when the GPU can't keep up and raises it again when it can. |
 | `LARECOMP_XR_QUAD` (distance) | Panel Distance | 0.8 m to 4.0 m | How far away the HUD and menus float. |
 | `LARECOMP_XR_QUAD` (width) | Panel Width | 0.6 m to 4.0 m | How wide the HUD and menus are. |
 | (new) | tab: VR; sections Display, Controls, Table, Edge, Performance, Menu Panel | | |

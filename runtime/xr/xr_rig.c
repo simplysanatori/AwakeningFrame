@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "../platform.h"
 #include "../rt.h"
@@ -32,6 +33,12 @@
 #define TILT_DEAD 0.30f    // stick dead zone for tilt (a snap flick is rarely level)
 #define HEIGHT_RATE 0.30f  // metres / s
 #define SIZE_RATE 0.70f    // e-folds / s (doubling in about a second)
+#define TURN_RATE 80.0f    // degrees / s at full stick (smooth turning)
+#define TURN_DEAD 0.20f    // stick dead zone for turning, past the input's radial one (rescaled: no jump at its edge)
+#define TURN_TAU 0.12f     // s: the turn speed follows the stick's with this lag, so it starts and stops without a jerk
+
+// runtime/ui/view_toast.mm: a short label on the HUD (weak: a build without the UI shows none)
+extern void view_toast_show(const char *text) __attribute__((weak));
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 enum { F_IDLE, F_OUT, F_BLACK, F_HOLD, F_IN };
@@ -64,10 +71,13 @@ static struct {
     float t_hold, t_in;
     int pend_turn;        // -1 / +1 snap turn waiting for black
     bool pend_recentre;
+    bool pend_reset;      // reset view: yaw back to 0 (with the recentre) once black
+    bool snap;            // snap turning (LARECOMP_VR_TURN=snap, the VR tab's Turning), else smooth
+    float turn_vel;       // smooth turning's speed now, degrees / s (positive: the view goes round to the right)
     bool pend_yaw;        // xr_rig_set_user changed the yaw
     float pend_yaw_deg;
     // stats
-    uint64_t cuts, turns, recentres;
+    uint64_t cuts, turns, recentres, resets;
 } R;
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
@@ -122,6 +132,7 @@ static void init(void) {
         snprintf(R.path, sizeof R.path, "%.*svr_rig.ini", sl ? (int)(sl - st + 1) : 0, st);
     } else snprintf(R.path, sizeof R.path, "vr_rig.ini");
     R.save = !((e = getenv("LARECOMP_VR_RIG_SAVE")) && !strcmp(e, "0"));
+    R.snap = (e = getenv("LARECOMP_VR_TURN")) && !strcasecmp(e, "snap");
     load();
     // (tests) start values
     if ((e = getenv("LARECOMP_VR_HEIGHT"))) R.u.height = (float)atof(e);
@@ -140,6 +151,7 @@ static void advance(uint64_t now) {  // (locked)
     else if (R.phase == F_BLACK && t >= T_BLACK_MAX) {
         // no game frame since it went black (a menu): what needs none is done now, the rest at the next frame
         if (R.pend_recentre) xr_recentre(), R.pend_recentre = false;
+        if (R.pend_reset) R.u.yaw = 0, R.turn_vel = 0, R.pend_reset = false;
         R.phase = F_HOLD, R.t0 = now, R.t_hold = T_HOLD;
     } else if (R.phase == F_HOLD && t >= R.t_hold) R.phase = F_IN, R.t0 = now;
     else if (R.phase == F_IN && t >= R.t_in) R.phase = F_IDLE;
@@ -187,6 +199,19 @@ void xr_rig_set_user(const XrRigUser *in) {
     pthread_mutex_unlock(&g_mu);
 }
 void xr_rig_reset_user(void) { xr_rig_set_user(&(XrRigUser){.height = 0, .size = 1, .tilt = 0, .yaw = 0}); }
+void xr_rig_set_turn_mode(int snap) {  // the VR tab's Turning: 1 snap, 0 smooth
+    pthread_mutex_lock(&g_mu);
+    if (!R.init) init();
+    R.snap = snap != 0, R.turn_vel = 0, R.pend_turn = 0;
+    pthread_mutex_unlock(&g_mu);
+}
+void xr_rig_reset_view(void) {
+    pthread_mutex_lock(&g_mu);
+    if (!R.init) init();
+    R.pend_reset = R.pend_recentre = true;
+    blink_out();
+    pthread_mutex_unlock(&g_mu);
+}
 void xr_rig_recentre(void) {
     pthread_mutex_lock(&g_mu);
     if (!R.init) init();
@@ -241,8 +266,16 @@ void xr_rig_update(const XrRigIn *in, XrRigPose *out) {
     XrRigInput ri;
     xr_input_rig(&ri);
     int snap = xr_input_take_snap();
-    if (xr_input_take_recentre()) R.pend_recentre = true, blink_out();
-    if (snap && R.area != XR_RIG_SIDE) R.pend_turn = snap, blink_out();
+    if (xr_input_take_reset_view()) R.pend_reset = R.pend_recentre = true, blink_out();
+    if (snap && R.snap && R.area != XR_RIG_SIDE) R.pend_turn = snap, blink_out();
+    {   // smooth turning: the stick sets a turn speed (an eased curve of the deflection), the speed follows it with a lag
+        float t = fabsf(ri.turn) > TURN_DEAD ? (fabsf(ri.turn) - TURN_DEAD) / (1 - TURN_DEAD) : 0;
+        float target = R.snap || R.area == XR_RIG_SIDE ? 0 : copysignf(t * (0.4f + 0.6f * t) * TURN_RATE, ri.turn);
+        R.turn_vel += (target - R.turn_vel) * (1 - expf(-dt / TURN_TAU));
+        if (target == 0 && fabsf(R.turn_vel) < 0.2f) R.turn_vel = 0;
+        // (right: the view goes round to the right, the table turns clockwise: the yaw goes down, as the snap turn's)
+        if (R.turn_vel != 0) R.u.yaw = remainderf(R.u.yaw - R.turn_vel * dt, 360.0f);
+    }
     float tilt_in = fabsf(ri.tilt) > TILT_DEAD ? (ri.tilt - copysignf(TILT_DEAD, ri.tilt)) / (1 - TILT_DEAD) : 0;
     if (ri.height != 0) R.u.height = clampf(R.u.height + ri.height * HEIGHT_RATE * dt, XR_RIG_HEIGHT_MIN, XR_RIG_HEIGHT_MAX), mark_dirty(now);
     float A_[3], tilt_min;
@@ -259,15 +292,20 @@ void xr_rig_update(const XrRigIn *in, XrRigPose *out) {
             LOG("[rig] snap turn %s: yaw %.0f deg\n", R.pend_turn > 0 ? "right" : "left", R.u.yaw);
         }
         if (R.pend_yaw) R.u.yaw = R.pend_yaw_deg;
+        if (R.pend_reset) {
+            R.u.yaw = 0, R.turn_vel = 0, R.resets++;
+            LOG("[rig] reset view: yaw 0 deg (the game's own angle), tilt %.0f deg, height %+.2f m, size x%.2f kept\n", R.u.tilt, R.u.height, R.u.size);
+            if (view_toast_show) view_toast_show("View Reset");
+        }
         float hold = T_HOLD;
         if (R.pend_recentre) {
             xr_recentre(), R.recentres++, hold = T_HOLD_RECENTRE;
             LOG("[rig] recentre: the table goes in front of the player again\n");
         }
-        R.pend_turn = 0, R.pend_yaw = R.pend_recentre = false;
+        R.pend_turn = 0, R.pend_yaw = R.pend_recentre = R.pend_reset = false;
         R.phase = F_HOLD, R.t0 = now, R.t_hold = hold;
     }
-    if ((R.pend_turn || R.pend_yaw || R.pend_recentre) && (R.phase == F_IDLE || R.phase == F_IN)) blink_out();  // (asked mid-blink)
+    if ((R.pend_turn || R.pend_yaw || R.pend_recentre || R.pend_reset) && (R.phase == F_IDLE || R.phase == F_IN)) blink_out();  // (asked mid-blink)
 
     // the area and the anchor
     int kind;

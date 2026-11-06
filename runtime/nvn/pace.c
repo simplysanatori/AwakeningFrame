@@ -160,10 +160,13 @@ void pace_settings_changed(const char *what) {
 
 // The VR mode at 90 Hz (runtime/xr): the display gives two vsyncs per three refreshes, 60 a second but unevenly spaced,
 // so the game runs in its 30 fps mode for good - two world steps per frame, 33.3 ms apart, each frame shown for three
-// refreshes. 0 or 60: back to the pacer's own choice.
+// refreshes. 0 or 60: back to the pacer's own choice. (LARECOMP_XR_FPS=60, a test: at 90 Hz too the pacer chooses, with
+// a 16.67 ms game frame: xr_loop.c turns each 60 Hz game vsync into the display's refresh at or after it, so a frame is
+// shown for one refresh or two, alternating - uneven motion at 60 fps instead of an even 30.)
 void pace_xr_lock(int fps) { __atomic_store_n(&xr_lock_fps, fps, __ATOMIC_RELAXED); }
 // The VR mode at 100 Hz and up: a game frame at 60 is ms long (two refreshes); 0: not that mode (see PACE_VR_GPU)
 void pace_xr_frame_ms(double ms) { __atomic_store_n(&xr_frame_us, (int)(ms * 1000), __ATOMIC_RELAXED); }
+bool pace_xr_free(void) { return __atomic_load_n(&xr_frame_us, __ATOMIC_RELAXED) > 0; }
 
 bool pace_is_slow(void) { return pace_slow; }
 uint64_t pace_frames_over(void) {

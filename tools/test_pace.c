@@ -41,6 +41,7 @@ typedef struct {
     double secs;
     void (*frame)(double t, int n, Frame *f);  // this frame's work (t: seconds in, n: frame number)
     int (*check)(int holds, int backs, double held_s, double last_change_t, bool held_end, double secs);
+    double vr_ms;  // the VR mode's 60 fps game frame (pace_xr_frame_ms: 16.67 for the 60 fps test at 90 Hz); 0: not VR
 } Case;
 
 static uint64_t rng = 9;
@@ -154,6 +155,10 @@ static const Case cases[] = {
      res_released},
     {"Dynamic's own steps: held backing off, scale steps at GPU 16-18 ms, then GPU 11.5 ms (backoff kept)", 45,
      dynres_steps, backoff_kept},
+    // LARECOMP_XR_FPS=60 at 90 Hz: the pacer chooses with the VR GPU limit of a 16.67 ms frame (15.0 ms; 0.90 of it)
+    {"VR 60 fps test at 90 Hz: held at GPU 20 ms, then GPU 12 ms (VR limits, 16.67 ms game frame)", 30, user_release, released,
+     1e3 / 60},
+    {"VR 60 fps test at 90 Hz: GPU 11 ms, CPU 5 ms (fits 60)", 60, steady, never_held, 1e3 / 60},
 };
 
 static int run(const Case *c) {
@@ -161,6 +166,8 @@ static int run(const Case *c) {
     game_mgr[0x4e3] = 1;  // (the game allows its 30 fps mode)
     pace_test_game_mgr = (uint64_t)(uintptr_t)game_mgr;
     rng = 9, zone = 0;
+    pace_xr_lock(0);
+    pace_xr_frame_ms(c->vr_ms);
     vsyncs();
     int holds = 0, backs = 0, n = 0;
     double start = t_ns / 1e9, held_since = -1, held_s = 0, last_change = 0;

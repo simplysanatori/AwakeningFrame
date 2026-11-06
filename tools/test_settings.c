@@ -1,6 +1,7 @@
 // Exercise the actual parser/resolver/save path with isolated configuration files.
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "settings.h"
 
@@ -57,6 +58,30 @@ int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "rando-options")) {  // the New seed options (an opaque seed ID), kept as saved
         settings_load();
         assert(!strcmp(g_settings.rando_options, argv[2]));
+        settings_save();
+        return 0;
+    }
+    if (argc == 4 && !strcmp(argv[1], "vr-refresh")) {  // Refresh Rate: vr_refresh + vr_fps, and the variables it sets
+        settings_load();
+        assert(g_settings.vr.refresh == atoi(argv[2]));
+        const char *fps = getenv("LARECOMP_XR_FPS"), *hz = getenv("LARECOMP_XR_HZ");
+        assert(!strcmp(argv[3], "-") ? !fps : fps && !strcmp(fps, argv[3]));
+        assert(g_settings.vr.refresh == VRS_REFRESH_120 ? !hz : hz && !strcmp(hz, "90"));
+        settings_save();
+        return 0;
+    }
+    if (argc == 8 && !strcmp(argv[1], "vr-opts")) {  // edge, turning, foveation, dynamic resolution: the rows and the variables
+        // argv: edge index, turn index, LARECOMP_VR_EDGE ("-": unset), LARECOMP_VR_TURN, LARECOMP_VR_FOVEATION, LARECOMP_VR_DYNRES
+        settings_load();
+        assert(g_settings.vr.edge == atoi(argv[2]));
+        assert(g_settings.vr.turn == atoi(argv[3]));
+        const char *want[4] = {argv[4], argv[5], argv[6], argv[7]};
+        const char *vars[4] = {"LARECOMP_VR_EDGE", "LARECOMP_VR_TURN", "LARECOMP_VR_FOVEATION", "LARECOMP_VR_DYNRES"};
+        for (int i = 0; i < 4; i++) {
+            const char *got = getenv(vars[i]);
+            assert(!strcmp(want[i], "-") ? !got : got && !strcmp(got, want[i]));
+        }
+        assert(!getenv("LARECOMP_VR_CULL"));  // (the Culling row is gone: nothing sets it)
         settings_save();
         return 0;
     }

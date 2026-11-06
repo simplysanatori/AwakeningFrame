@@ -61,7 +61,8 @@ Spots (the free-camera sweep's list): Mabe Village (Field_11C), Mysterious Fores
   - **BROKEN**: a crash or a session that ran out of time, the warp not taken, no screenshot, a black eye (in every
     screenshot of the spot: mean luma under 1 or 98.5% of pixels black), eyes differing greatly in brightness, swapped eyes,
     the two eyes showing different views in every screenshot, HUD quad empty (under 0.03% of pixels drawn; three hearts
-    are 0.17%), any xrmock `ERROR` line or validation message during the spot.
+    are 0.17%), any xrmock `ERROR` line or validation message during the spot, or an eye that drew with the game's own
+    camera (the executor's camera check, `[stereo] eye N drew M draws with the game's own camera ...`, docs/af/STEREO.md).
   - **SLOW**: at any Hz, game fps under 92% of nominal, sets shown a second under 90% of nominal, more than 2% of refreshes
     missed, three or more game frames over 1.5x the period, or both eyes' GPU time over 90% of the period.
   - **OK** otherwise. Pose mismatches, shader compiles during the window, and "no disparity" are notes, not verdicts.

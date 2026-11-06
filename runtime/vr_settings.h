@@ -10,44 +10,45 @@
 
 enum { VRS_LAYOUT_SWITCH, VRS_LAYOUT_COMFORT, VRS_N_LAYOUT };               // LARECOMP_XR_LAYOUT
 enum { VRS_FOLLOW_SMOOTH, VRS_FOLLOW_ROOM, VRS_FOLLOW_FIXED, VRS_N_FOLLOW };  // LARECOMP_VR_FOLLOW
-enum { VRS_EDGE_OFF, VRS_EDGE_HAZE, VRS_EDGE_SKY, VRS_EDGE_PASSTHROUGH, VRS_N_EDGE };  // LARECOMP_VR_EDGE (outdoors only)
+enum { VRS_EDGE_OFF, VRS_EDGE_FADE, VRS_EDGE_PASSTHROUGH, VRS_N_EDGE };       // LARECOMP_VR_EDGE = black, fade, passthrough
 // LARECOMP_VR_FOVEATION: eye-tracked only (no fixed mode); without gaze the foveation lane renders full density
 enum { VRS_FOV_OFF, VRS_FOV_LOW, VRS_FOV_MEDIUM, VRS_FOV_HIGH, VRS_N_FOV };
-enum { VRS_CULL_FIT, VRS_CULL_WIDE, VRS_CULL_STOCK, VRS_N_CULL };            // LARECOMP_VR_CULL
-enum { VRS_REFRESH_120, VRS_REFRESH_90, VRS_N_REFRESH };                    // AF_REFRESH_HZ / LARECOMP_XR_HZ (60 / 30 FPS)
+enum { VRS_TURN_SMOOTH, VRS_TURN_SNAP, VRS_N_TURN };                         // LARECOMP_VR_TURN (the rig's right stick)
+// AF_REFRESH_HZ / LARECOMP_XR_HZ / LARECOMP_XR_FPS: 120 Hz at 60 FPS (the default), 90 Hz at 30 FPS, 90 Hz at 60 FPS (a test)
+enum { VRS_REFRESH_120, VRS_REFRESH_90, VRS_REFRESH_90_60, VRS_N_REFRESH };
 
 typedef struct {
-    int refresh;       // VRS_REFRESH_*: the headset's refresh and the game's rate (120 Hz: 60 FPS, 90 Hz: 30 FPS); a relaunch
+    int refresh;       // VRS_REFRESH_*: the headset's refresh and the game's rate (120 Hz: 60 FPS, 90 Hz: 30 FPS or, as a test, 60); a relaunch
     int layout;        // VRS_LAYOUT_*
     int follow;        // VRS_FOLLOW_*
     int height_cm;     // the table's height, cm from the default (the rig's: not saved here, read back by vr_settings_sync_rig)
     int size_pct;      // the table's size, percent of the default (0.067 m per game unit); the rig's, not saved here
     int tilt_deg;      // the table's tilt, degrees from the default view; the rig's, not saved here
+    int turn;          // VRS_TURN_*
     int edge;          // VRS_EDGE_*
     int foveation;     // VRS_FOV_*
     bool dynres;       // dynamic resolution of the eye images (diet lane)
-    int cull;          // VRS_CULL_*
     float hud_dist;    // the HUD / menu panel: metres from the head
     float hud_width;   // and its width in metres (LARECOMP_XR_QUAD=dist,width)
 } VrSettings;
 
-#define VR_DEFAULTS {.refresh = VRS_REFRESH_120, .layout = VRS_LAYOUT_SWITCH, .follow = VRS_FOLLOW_SMOOTH, .height_cm = 0, \
-                     .size_pct = 100, .tilt_deg = 0, .edge = VRS_EDGE_OFF, .foveation = VRS_FOV_MEDIUM, .dynres = false, \
-                     .cull = VRS_CULL_FIT, .hud_dist = 2.0f, .hud_width = 2.2f}
+#define VR_DEFAULTS {.refresh = VRS_REFRESH_120, .layout = VRS_LAYOUT_SWITCH, .turn = VRS_TURN_SMOOTH, .follow = VRS_FOLLOW_SMOOTH, \
+                     .height_cm = 0, .size_pct = 100, .tilt_deg = 0, .edge = VRS_EDGE_OFF, .foveation = VRS_FOV_HIGH, .dynres = true, \
+                     .hud_dist = 2.0f, .hud_width = 2.2f}
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef enum {
-    VRO_REFRESH, VRO_LAYOUT, VRO_FOLLOW, VRO_HEIGHT, VRO_SIZE, VRO_TILT, VRO_RECENTRE, VRO_EDGE, VRO_FOVEATION, VRO_DYNRES,
-    VRO_CULL, VRO_HUD_DIST, VRO_HUD_WIDTH, VRO_COUNT
+    VRO_REFRESH, VRO_LAYOUT, VRO_TURN, VRO_FOLLOW, VRO_HEIGHT, VRO_SIZE, VRO_TILT, VRO_RECENTRE, VRO_EDGE, VRO_FOVEATION, VRO_DYNRES,
+    VRO_HUD_DIST, VRO_HUD_WIDTH, VRO_COUNT
 } VrOpt;
 
 // the choices' names for the menu, and their larecomp.ini words
 extern const char *const g_vr_refresh_names[VRS_N_REFRESH], *const g_vr_layout_names[VRS_N_LAYOUT],
     *const g_vr_follow_names[VRS_N_FOLLOW], *const g_vr_edge_names[VRS_N_EDGE], *const g_vr_fov_names[VRS_N_FOV],
-    *const g_vr_cull_names[VRS_N_CULL];
+    *const g_vr_turn_names[VRS_N_TURN];
 
 // settings.c: one ini line (true: it was a VR key) / the VR keys
 bool vr_settings_parse(const char *key, const char *val);

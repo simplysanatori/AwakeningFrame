@@ -1259,6 +1259,7 @@ void backend_present(NvnTexture *t);
 static bool direct_repeat;  // (render thread off) backend_represent's present
 // Present the last frame again (the game thread waits in a host dialog, e.g. the software keyboard): the overlay
 // keeps drawing and taking input.
+void backend_boot_frame(void) {}  // (shader_prep.c's label before the game's first frame: Vulkan only)
 void backend_represent(void) {
     if (!g_last_presented) { SDL_Delay(16); return; }
     if (rq_on()) rq_present(g_last_presented, total_frames, false);

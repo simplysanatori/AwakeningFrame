@@ -54,8 +54,11 @@ extern "C" void vr_tab_draw(float scale) {
     opt_section("Display");
     grey(VRO_REFRESH);
     if (opt_choice("Refresh Rate", &v.refresh, g_vr_refresh_names, VRS_N_REFRESH, VRS_REFRESH_120,
-                   desc(VRO_REFRESH, "The headset's refresh rate, and with it the game's frame rate: 90 Hz plays at 30 FPS "
-                                     "and asks less of the GPU.")))
+                   desc(VRO_REFRESH, v.refresh == VRS_REFRESH_90_60
+                                         ? "Plays at 60 FPS on a 90 Hz display. Motion is less even because frames alternate "
+                                           "between one and two refreshes. For testing."
+                                         : "The headset's refresh rate, and with it the game's frame rate: 120 Hz plays at "
+                                           "60 FPS. 90 Hz plays at 30 FPS and asks less of the GPU.")))
         changed(VRO_REFRESH);
 
     opt_section("Controls");
@@ -64,6 +67,11 @@ extern "C" void vr_tab_draw(float scale) {
                    desc(VRO_LAYOUT, "Switch puts every button where a Switch Pro Controller has it. Comfort puts the sword "
                                     "on the right trigger and the shield on the left.")))
         changed(VRO_LAYOUT);
+    grey(VRO_TURN);
+    if (opt_choice("Turning", &v.turn, g_vr_turn_names, VRS_N_TURN, VRS_TURN_SMOOTH,
+                   desc(VRO_TURN, "Smooth turns the table as you push the right stick sideways. Snap turns it in 45\xC2\xB0 steps "
+                                  "behind a blink. Click both sticks to reset the view.")))
+        changed(VRO_TURN);
     // (the Controls tab's setting: xr_input.c reads it live)
     opt_toggle("Buttons Match Labels", &g_settings.face_by_label, false,
                "The Frame controllers' A, B, X and Y work as printed on them. Off matches the Switch's button positions.");
@@ -89,25 +97,20 @@ extern "C" void vr_tab_draw(float scale) {
     opt_section("Edge");
     grey(VRO_EDGE);
     if (opt_choice("Table Edge", &v.edge, g_vr_edge_names, VRS_N_EDGE, VRS_EDGE_OFF,
-                   desc(VRO_EDGE, "What fills the empty space past the world outdoors. Haze fades it into the sky, Sky Only "
-                                  "fills the space without touching the world, Passthrough shows the room.")))
+                   desc(VRO_EDGE, "What fills the space past the world. Fade softens the world into darkness around Link, "
+                                  "Passthrough shows your room.")))
         changed(VRO_EDGE);
 
     opt_section("Performance");
     grey(VRO_FOVEATION);
-    if (opt_choice("Foveation", &v.foveation, g_vr_fov_names, VRS_N_FOV, VRS_FOV_MEDIUM,
+    if (opt_choice("Foveation", &v.foveation, g_vr_fov_names, VRS_N_FOV, VRS_FOV_HIGH,
                    desc(VRO_FOVEATION, "Follows your eyes and draws what you aren't looking at in less detail. Higher levels save "
                                        "more GPU time. Without eye tracking it draws everything in full detail.")))
         changed(VRO_FOVEATION);
     grey(VRO_DYNRES);
-    if (opt_toggle("Dynamic Resolution", &v.dynres, false,
+    if (opt_toggle("Dynamic Resolution", &v.dynres, true,
                    desc(VRO_DYNRES, "Lowers the resolution when the GPU can't keep up and raises it again when it can.")))
         changed(VRO_DYNRES);
-    grey(VRO_CULL);
-    if (opt_choice("Culling", &v.cull, g_vr_cull_names, VRS_N_CULL, VRS_CULL_FIT,
-                   desc(VRO_CULL, "How much of the world outside the table is skipped. Fit follows the table's edges, Wide "
-                                  "keeps more, Stock keeps everything the game would draw.")))
-        changed(VRO_CULL);
 
     opt_section("Menu Panel");
     {
