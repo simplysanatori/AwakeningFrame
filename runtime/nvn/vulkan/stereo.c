@@ -247,8 +247,16 @@ bool stereo_eye_matrices(int eye, float V[16], float P[16]) {
 
 int stereo_set_views(void) {
 #ifdef LARECOMP_HAVE_XR
-    static uint64_t n, bad, split, gone;
+    static uint64_t n, bad, split, gone, repeats, prev_id, t_log;
     uint64_t id[2] = {g_out[0].id, g_out[1].id};
+    if (id[0] && id[0] == prev_id) repeats++;  // (an older output again: the poses go with it)
+    prev_id = id[0];
+    uint64_t now = plat_now_ns();
+    if (now - t_log > 10000000000ull) {
+        if (t_log) LOG("[stereo] poses: %llu sets in 10 s, %llu showed an older eye output again (with its own poses)\n",
+                       (unsigned long long)n, (unsigned long long)repeats);
+        t_log = now, n = repeats = 0;
+    }
     XrEyeView ev[2] = {g_out[0].ev, g_out[1].ev};
     int r = id[0] && id[1] ? xr_set_views(id, ev) : -1;
     n++;
