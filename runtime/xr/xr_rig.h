@@ -6,7 +6,7 @@
 //   anchor  the world point on the table's centre: per area type (overworld: the game camera's focus at Link's height,
 //           filtered; interiors and dungeon rooms: the room's centre, snapped behind a blink on a room change; side
 //           views: the focus on the side plane, filtered) or, with LARECOMP_VR_FOLLOW set, the Follow Mode's follow
-//   A       the table point in app space: the player's Distance in front of the head (default 1.2 m, LARECOMP_VR_DIST) at
+//   A       the table point in app space: the player's Distance in front of the head (default 0.8 m, LARECOMP_VR_DIST) at
 //           LARECOMP_VR_PITCH below the horizon (default 15: Link is about where a relaxed gaze rests; side views:
 //           SIDE_PITCH, a wall at about eye height), plus the player's height offset
 //   s       LARECOMP_VR_SCALE (0.067 m per unit) times the player's size
@@ -58,11 +58,11 @@ float xr_rig_fade(void);
 #define XR_RIG_TILT_MAX (50.0f)
 #define XR_RIG_DIST_MIN (0.60f)     // metres from the head to the table's centre
 #define XR_RIG_DIST_MAX (3.00f)
-// the defaults (a new player, and the full view reset): the table's centre 15 degrees below the horizon, 1.2 m away, leaned
+// the defaults (a new player, and the full view reset): the table's centre 15 degrees below the horizon, 0.8 m away, leaned
 // 30 degrees so that the head looks onto it at 15 + 30 = 45 degrees, the game camera's own angle (docs/af/RIG.md)
 #define XR_RIG_PITCH_DEFAULT (15.0f)
 #define XR_RIG_TILT_DEFAULT (30.0f)
-#define XR_RIG_DIST_DEFAULT (1.20f)
+#define XR_RIG_DIST_DEFAULT (0.80f)
 typedef struct {
     float height;  // metres
     float size;    // scale factor

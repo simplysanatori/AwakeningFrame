@@ -50,7 +50,7 @@ carried render poses and the table moving only on new game frames are unchanged.
 | Turning | Smooth, Snap | `vr_turn = smooth \| snap` | `LARECOMP_VR_TURN` | live (`xr_rig_set_turn_mode`, the rig's) |
 | Follow Mode | Smooth, Room, Fixed | `vr_follow = smooth \| room \| fixed` | `LARECOMP_VR_FOLLOW` | live (`stereo_set_follow`, stereo.c: Smooth goes back to the rig's area anchoring, as at a start without the variable; Room and Fixed start from the table's current anchor, so it doesn't jump) |
 | Height | 0, -50 to +40 cm in steps of 5 | none (the rig's, `vr_rig.ini`) | none | live (`xr_rig_set_height_cm`, `runtime/xr/xr_rig_settings.c`) |
-| Distance | 120 cm, 60 to 300 cm in steps of 10 | none (the rig's, `vr_rig.ini`) | `LARECOMP_VR_DIST` (the default, not greyed) | live (`xr_rig_set_dist_cm`) |
+| Distance | 80 cm, 60 to 300 cm in steps of 10 | none (the rig's, `vr_rig.ini`) | `LARECOMP_VR_DIST` (the default, not greyed) | live (`xr_rig_set_dist_cm`) |
 | Size | 100%, 40 to 300% in steps of 10 | none (the rig's, `vr_rig.ini`) | none | live (`xr_rig_set_size_pct`) |
 | Tilt | 30, 0 to +50 degrees in steps of 5 | none (the rig's, `vr_rig.ini`) | none | live (`xr_rig_set_tilt_deg`) |
 | Recentre Table | button | none | none | live (`xr_rig_recentre`; greyed out in a flat build) |

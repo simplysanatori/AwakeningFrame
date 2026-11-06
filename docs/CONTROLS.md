@@ -60,7 +60,7 @@ the panel for a moment. A single stick click still goes to the game.
 
 **Reset everything.** Keep both thumbsticks down for 2 seconds. The view
 resets again behind a blink, and the table's height, distance, size and tilt
-go back to the defaults: 1.2 m away, 15 degrees below eye level, tilted 30
+go back to the defaults: 0.8 m away, 15 degrees below eye level, tilted 30
 degrees toward you, so that Link is about where you look when you face
 forward. "Full View Reset" shows on the panel. Left grip + a right stick click
 has the same two steps.

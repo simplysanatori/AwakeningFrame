@@ -12,7 +12,7 @@ it is never shown at two places within one game frame: GalaxyFrame's double-imag
 
 - **app**: the XR app space (metres, y up, -z ahead). Its origin is the head at the session's start or the last
   recentre (`xr_session.c`).
-- **A**: the table point the anchor sits on. It is the player's Distance (default 1.2 m, `LARECOMP_VR_DIST`) in front of
+- **A**: the table point the anchor sits on. It is the player's Distance (default 0.8 m, `LARECOMP_VR_DIST`) in front of
   the head at `LARECOMP_VR_PITCH` degrees below the horizon (default 15, see Default placement), plus the player's height
   offset. `LARECOMP_VR_TABLE=x,y,z` fixes it.
 - **s**: `LARECOMP_VR_SCALE` (0.067 m per unit: one tile about 10 cm) times the player's size.
@@ -23,7 +23,7 @@ it is never shown at two places within one game frame: GalaxyFrame's double-imag
 ## Default placement
 
 With a neutral head (looking at the horizon) the player should see Link: the table's centre, where the anchor is, sits
-15 degrees below the horizon, which is where a relaxed gaze rests, 1.2 m away. Before (up to 87b49f9) the centre was
+15 degrees below the horizon, which is where a relaxed gaze rests, 0.8 m away. Before (up to 87b49f9) the centre was
 about 45 degrees down at 1.0 m (the game camera's pitch, `R.pitch` from the first frame), so Link was a 45-degree head
 nod away whatever the tilt: the tilt turns the table about A, it never moves A.
 
@@ -71,7 +71,7 @@ anchoring with that follow; camera jumps still blink. Unset or `auto`: the per-a
 | right stick left / right (a flick) | with Turning on Snap: a snap turn of 45 degrees behind a blink, the same direction. Not in side views |
 | right stick up / down | tilt, 45 degrees a second (outside a 0.3 dead zone), from 0 to +50 degrees. Up lifts the far edge. A tilt away is also limited so the head looks at least 20 degrees down onto the table (a grazing look put the eyes under Mabe's ledges). Not in side views |
 | both stick clicks together (0.1 s) | reset the view: behind a blink the yaw goes back to 0, the game's own angle (the table seen from where the game's camera looks), and the table goes in front of the player again, as a recentre. Tilt, height, distance and size are kept. "View Reset" shows on the HUD for about a second and a half. A single click goes to the game |
-| both stick clicks held 2 s from the press | the full view reset: a second blink in which the view reset is made again and tilt (30), height (0), distance (1.2 m) and size (x1) go back to the defaults and are saved. "Full View Reset" shows on the HUD. `xr_input.c` sends it once per hold; it replaces the short reset, which is not made twice (both in one frame: only the full one runs) |
+| both stick clicks held 2 s from the press | the full view reset: a second blink in which the view reset is made again and tilt (30), height (0), distance (0.8 m) and size (x1) go back to the defaults and are saved. "Full View Reset" shows on the HUD. `xr_input.c` sends it once per hold; it replaces the short reset, which is not made twice (both in one frame: only the full one runs) |
 | left grip + right stick click | the same two resets (an alias): the short one at 0.1 s, the full one at 2 s from the press |
 | left grip + D-pad up / down | table height, 0.3 m a second, from -0.5 to +0.4 m |
 | left grip + D-pad right / left | table size, doubling or halving in about a second, from x0.4 to x3 |
@@ -117,13 +117,13 @@ its first camera): each blinks; the game's own fade to black is on the HUD quad 
 typedef struct { float height, size, tilt, dist, yaw; } XrRigUser;  // m, factor, degrees, m, degrees
 void xr_rig_get_user(XrRigUser *u);
 void xr_rig_set_user(const XrRigUser *u);  // clamped; the yaw behind a blink
-void xr_rig_reset_user(void);              // 0, 1, 30, 1.2, 0
+void xr_rig_reset_user(void);              // 0, 1, 30, 0.8, 0
 void xr_rig_recentre(void);
 void xr_rig_reset_view(void);              // the same, and the yaw back to 0; tilt, height, distance, size kept
 void xr_rig_reset_view_full(void);         // and tilt, height, distance and size back to the defaults (saved)
 void xr_rig_set_turn_mode(int snap);       // 1: snap turns, 0: smooth turning (the default; LARECOMP_VR_TURN=smooth|snap)
 // ranges: XR_RIG_HEIGHT_MIN/MAX (-0.5, 0.4), XR_RIG_DIST_MIN/MAX (0.6, 3), XR_RIG_SIZE_MIN/MAX (0.4, 3), XR_RIG_TILT_MIN/MAX (0, 50)
-// defaults: XR_RIG_PITCH_DEFAULT 15, XR_RIG_TILT_DEFAULT 30, XR_RIG_DIST_DEFAULT 1.2
+// defaults: XR_RIG_PITCH_DEFAULT 15, XR_RIG_TILT_DEFAULT 30, XR_RIG_DIST_DEFAULT 0.8
 ```
 
 Only Linux builds with the VR mode (the OpenXR headers: `runtime/xr/*.c` is built then) have these: callers guard with

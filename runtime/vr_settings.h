@@ -40,7 +40,7 @@ typedef struct {
 } VrSettings;
 
 #define VR_DEFAULTS {.refresh = VRS_REFRESH_120, .layout = VRS_LAYOUT_SWITCH, .turn = VRS_TURN_SMOOTH, .follow = VRS_FOLLOW_SMOOTH, \
-                     .height_cm = 0, .dist_cm = 120, .size_pct = 100, .tilt_deg = 30, .edge = VRS_EDGE_OFF, .scene = VRS_SCENE_OFF, .foveation = VRS_FOV_HIGH, .dynres = true, \
+                     .height_cm = 0, .dist_cm = 80, .size_pct = 100, .tilt_deg = 30, .edge = VRS_EDGE_OFF, .scene = VRS_SCENE_OFF, .foveation = VRS_FOV_HIGH, .dynres = true, \
                      .hud_dist = 2.0f, .hud_width = 2.2f}
 
 #ifdef __cplusplus

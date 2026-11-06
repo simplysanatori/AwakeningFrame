@@ -177,7 +177,7 @@ Press **View** and **Menu** together to open the game's menu. The VR tab is next
 | Panel Distance | 0.8 to 4.0 m | How far away the HUD and menus float |
 | Panel Width | 0.6 to 4.0 m | How wide the HUD and menus are |
 
-The first choice is the default. Height, Distance, Size and Tilt start at 0, 120 cm, 100% and 30 degrees. Panel Distance starts at 2.0 m and Panel Width at 2.2 m. Foveation is High and Dynamic Resolution is On.
+The first choice is the default. Height, Distance, Size and Tilt start at 0, 80 cm, 100% and 30 degrees. Panel Distance starts at 2.0 m and Panel Width at 2.2 m. Foveation is High and Dynamic Resolution is On.
 
 Every row but Refresh Rate applies at once, while the game runs. The settings are saved in `larecomp.ini`, and the table's height, distance, size and tilt in `vr_rig.ini`, both in `~/.local/share/lasrecomp`.
 
