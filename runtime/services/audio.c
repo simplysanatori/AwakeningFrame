@@ -1079,7 +1079,10 @@ static void audout_close(Service *s) {
     LOG("[audout] closed\n");
 }
 
-RT_ON_RESET(audio_reset) {
+// Also called by the reboot before the renderer's reset (main.c teardown): the heap as driver memory (Linux) leaves a
+// hole at HEAP_BASE for a moment there (exec.c vk_exec_reset), and a renderer thread reading a voice buffer then
+// faulted (a 25-minute VR run, the third reboot: SIGSEGV in render_frame). The hook below then finds nothing left.
+void audio_stop_threads(void) {
     int n = 0;
     for (int i = 0; i < 8; i++) {
         Renderer *r = g_rens[i];
@@ -1096,8 +1099,9 @@ RT_ON_RESET(audio_reset) {
         }
         if (g_outs[i]) { audout_free(g_outs[i]); g_outs[i] = NULL; n++; }
     }
-    LOG("[audio] reboot: %d outputs closed\n", n);
+    if (n) LOG("[audio] reboot: %d outputs closed\n", n);
 }
+RT_ON_RESET(audio_reset) { audio_stop_threads(); }
 
 // Buffers are copied into an SDL stream and released once the stream has drained below its target, so the
 // stream plays the role of the hardware queue. Without a device, buffers are released in real time.
