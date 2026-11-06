@@ -149,6 +149,8 @@ static bool eye_fn(const CamLatch *l, const float pivot_in[3], float V[2][16], f
     XrRigIn ri = {.explicit_follow = cfg.explicit_follow, .frame = l->frame};  // (the rig: area anchoring, the player's controls, the blink)
     memcpy(ri.raw, pivot_raw, 12), memcpy(ri.followed, pivot, 12), memcpy(ri.fwd, l->ref.fwd, 12);
     ri.zone = cam_override_zone(ri.zlo, ri.zhi);
+    extern int game_level_overworld(void);  // (widescreen.c)
+    ri.overworld = game_level_overworld();
     XrRigPose rp;
     xr_rig_update(&ri, &rp);
     memcpy(pivot, rp.anchor, 12);

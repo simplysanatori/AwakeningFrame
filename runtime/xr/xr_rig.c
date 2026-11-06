@@ -18,6 +18,7 @@
 #define CUT_FAR 24.0f     // the anchor this far from where it should be: snap (as the comfort lane's follow)
 #define SIDE_THIN 6.0f    // a zone thinner than this in z is a side view (as cam_pivot / widescreen.c)
 #define SIDE_PITCH 12.0f  // degrees below the horizon: a side view is a wall at about eye height
+#define MIN_ELEV 20.0f    // degrees: the head never looks along the table flatter than this (a tilt away is limited by it)
 #define STABLE 3          // latches an area / room must hold before the rig takes it (a zone read flickering at a load)
 // the blink: a snap turn / recentre fades out first; an automatic cut (a room change, a warp) goes black at once
 #define T_OUT 0.08f
@@ -196,6 +197,7 @@ void xr_rig_recentre(void) {
 
 // ---- once per game frame
 static int classify(const XrRigIn *in) {
+    if (in->overworld == 1) return XR_RIG_OPEN;  // (its camera zones are areas, not rooms)
     if (in->zone) return in->zhi[2] - in->zlo[2] < SIDE_THIN ? XR_RIG_SIDE : XR_RIG_ROOM;
     return fabsf(in->fwd[1]) < 0.2f ? XR_RIG_SIDE : XR_RIG_OPEN;
 }
@@ -207,6 +209,16 @@ static bool box_differs(const float alo[3], const float ahi[3], const float blo[
 static float room_axis(float raw, float lo, float hi, float half) {
     if (hi - lo <= 2 * half + 1.0f) return (lo + hi) * 0.5f;
     return clampf(raw, lo + half, hi - half);
+}
+// the table point for this area, and the lowest tilt that keeps the head MIN_ELEV above the table's plane there
+static void table_point(bool side, float A[3], float *tilt_min) {
+    float pitch = (side ? SIDE_PITCH : R.pitch) * DEG;
+    if (R.have_table) memcpy(A, R.table, 12);
+    else A[0] = 0, A[1] = -R.dist * sinf(pitch), A[2] = -R.dist * cosf(pitch);
+    A[1] += R.u.height;
+    float n = sqrtf(A[0] * A[0] + A[1] * A[1] + A[2] * A[2]);
+    float below = n > 1e-3f ? asinf(clampf(-A[1] / n, -1, 1)) / DEG : 45.0f;  // the table point's angle under the horizon
+    *tilt_min = fmaxf(XR_RIG_TILT_MIN, MIN_ELEV - below);
 }
 static const char *area_name(int a) { return a == XR_RIG_ROOM ? "room" : a == XR_RIG_SIDE ? "side view" : "overworld"; }
 
@@ -230,8 +242,11 @@ void xr_rig_update(const XrRigIn *in, XrRigPose *out) {
     if (xr_input_take_recentre()) R.pend_recentre = true, blink_out();
     if (snap && R.area != XR_RIG_SIDE) R.pend_turn = snap, blink_out();
     float tilt_in = fabsf(ri.tilt) > TILT_DEAD ? (ri.tilt - copysignf(TILT_DEAD, ri.tilt)) / (1 - TILT_DEAD) : 0;
-    if (tilt_in != 0 && R.area != XR_RIG_SIDE) R.u.tilt = clampf(R.u.tilt + tilt_in * TILT_RATE * dt, XR_RIG_TILT_MIN, XR_RIG_TILT_MAX), mark_dirty(now);
     if (ri.height != 0) R.u.height = clampf(R.u.height + ri.height * HEIGHT_RATE * dt, XR_RIG_HEIGHT_MIN, XR_RIG_HEIGHT_MAX), mark_dirty(now);
+    float A_[3], tilt_min;
+    table_point(false, A_, &tilt_min);
+    if (tilt_in != 0 && R.area != XR_RIG_SIDE)
+        R.u.tilt = clampf(R.u.tilt + tilt_in * TILT_RATE * dt, fminf(tilt_min, fmaxf(R.u.tilt, XR_RIG_TILT_MIN)), XR_RIG_TILT_MAX), mark_dirty(now);
     if (ri.size != 0) R.u.size = clampf(R.u.size * expf(ri.size * SIZE_RATE * dt), XR_RIG_SIZE_MIN, XR_RIG_SIZE_MAX), mark_dirty(now);
     if (R.dirty && now - R.t_dirty > 1000000000ull) save_now();
 
@@ -292,8 +307,9 @@ void xr_rig_update(const XrRigIn *in, XrRigPose *out) {
             if (R.valid) {
                 blink_cut(now), R.cuts++;
                 if (R.cuts < 200 || R.cuts % 100 == 0)
-                    LOG("[rig] %s -> %s%s: the table snaps behind a blink to (%.1f %.1f %.1f) (%llu so far)\n", area_name(R.area), area_name(kind),
-                        camcut ? " (camera cut)" : take && changed && kind == R.area ? " (another room)" : "", target[0], target[1], target[2],
+                    LOG("[rig] %s -> %s%s: the table snaps behind a blink to (%.1f %.1f %.1f); zone %s %.0f x %.0f x %.0f (%llu so far)\n", area_name(R.area),
+                        area_name(kind), camcut ? " (camera cut)" : take && changed && kind == R.area ? " (another room)" : "", target[0], target[1],
+                        target[2], in->zone ? "" : "none", in->zhi[0] - in->zlo[0], in->zhi[1] - in->zlo[1], in->zhi[2] - in->zlo[2],
                         (unsigned long long)R.cuts);
             } else LOG("[rig] %s: table anchor at (%.1f %.1f %.1f)\n", area_name(kind), target[0], target[1], target[2]);
             if (kind == XR_RIG_SIDE)  // (the yaw that turns the game camera's horizontal forward away from the player)
@@ -311,11 +327,8 @@ void xr_rig_update(const XrRigIn *in, XrRigPose *out) {
 
     // the pose
     bool side = R.area == XR_RIG_SIDE;
-    float yaw = (side ? R.side_yaw : R.u.yaw) * DEG, tilt = (side ? 0 : R.u.tilt) * DEG;
-    float pitch = (side ? SIDE_PITCH : R.pitch) * DEG;
-    if (R.have_table) memcpy(out->A, R.table, sizeof out->A);
-    else out->A[0] = 0, out->A[1] = -R.dist * sinf(pitch), out->A[2] = -R.dist * cosf(pitch);
-    out->A[1] += R.u.height;
+    table_point(side, out->A, &tilt_min);
+    float yaw = (side ? R.side_yaw : R.u.yaw) * DEG, tilt = (side ? 0 : fmaxf(R.u.tilt, tilt_min)) * DEG;
     out->s = R.s0 * R.u.size;
     // R = Rx(tilt) * Ry(yaw); Ry(yaw): x' = x cos + z sin, z' = -x sin + z cos; Rx(tilt): y' = y cos - z sin, z' = y sin + z cos
     float cy = cosf(yaw), sy = sinf(yaw), ct = cosf(tilt), st = sinf(tilt);

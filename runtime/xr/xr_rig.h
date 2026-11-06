@@ -27,7 +27,8 @@ typedef struct {
     float raw[3];          // the game camera's screen centre at Link's height (cam_override's pivot), world units
     float followed[3];     // the same followed per LARECOMP_VR_FOLLOW (stereo.c anchor_update)
     bool explicit_follow;  // LARECOMP_VR_FOLLOW was set: followed is the anchor (no area logic)
-    bool zone;             // a camera zone (an interior, a dungeon room, a side view); none on the overworld
+    int overworld;         // the level is the overworld ("Field"): 1; another level: 0; unknown: -1
+    bool zone;             // a camera zone (the overworld has them too: its camera areas)
     float zlo[3], zhi[3];  // its box
     float fwd[3];          // the game camera's forward (world)
     uint64_t frame;        // the latched game frame (logs)
