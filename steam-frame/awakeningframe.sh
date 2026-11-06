@@ -49,11 +49,27 @@ cd "$HERE" || exit 1   # (no extracted/ here, so the data root is never taken fo
 # ---- what is there
 EXE=$HERE/lasrecomp
 [ -x "$EXE" ] || { log "$EXE is missing: run install.sh"; exit 66; }
-if [ -f "$HERE/lasgame.so" ] && [ -f "$DATA/extracted/exefs/main" ]; then
-    log "game library and game files present"
+# No game files yet (a release installed before they were on the Frame): look for them in the usual places and
+# extract them (setup-game.sh, the same step install.sh runs; a few minutes, the log says what it found).
+if [ ! -f "$DATA/extracted/exefs/main" ] && [ -x "$HERE/setup-game.sh" ]; then
+    log "no game files in $DATA/extracted: looking for them (setup-game.sh)"
+    LARECOMP_DATA_ROOT=$DATA "$HERE/setup-game.sh" --app "$HERE" --data "$DATA" --no-build
+fi
+# The game code: next to the program (a build from source) or built from the game files into the data folder (a
+# release). The program itself says whether one fits these game files; if not, the start screen builds it.
+code_ready() {
+    if grep -aqF -- --game-code-status "$EXE"; then "$EXE" --game-code-status 2> /dev/null
+    else [ -f "$HERE/lasgame.so" ]; fi   # (a program from before the status check)
+}
+if [ -f "$DATA/extracted/exefs/main" ] && code_ready; then
+    log "game code and game files present"
 else
-    [ -f "$HERE/lasgame.so" ] || log "no lasgame.so next to the program: the start screen will build the game code"
-    [ -f "$DATA/extracted/exefs/main" ] || log "no game files in $DATA/extracted (steam-frame/prepare-game.sh)"
+    if [ -f "$DATA/extracted/exefs/main" ]; then
+        log "the game code is not built for these game files yet: the start screen builds it (a progress bar), then Play"
+    else
+        log "no game files in $DATA/extracted: the start screen asks for them"
+        export AF_SETUP_HINT="AwakeningFrame also finds your game by itself: put your NSP or XCI of the base game (1.0.0) and prod.keys in Downloads or in ~/Games/AwakeningFrame/game-files, then launch it again."
+    fi
     LAUNCHER=1
 fi
 [ "$LAUNCHER" = 1 ] || ARGS=(--play "${ARGS[@]}")

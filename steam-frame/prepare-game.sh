@@ -1,5 +1,6 @@
 #!/bin/bash
 # steam-frame/prepare-game.sh <game.nsp|game.xci> <prod.keys> [title.keys] [--dest DIR] [--force]
+# steam-frame/prepare-game.sh <folder> [--dest DIR] [--force]
 #
 # Turns your own dump of Zelda: Link's Awakening (Switch, 2019) into the extracted/ folder LAS Recomp reads:
 #
@@ -7,11 +8,17 @@
 #     extracted/romfs/   region_common/, ...
 #
 # No Java and no extra tools: it uses hactool (https://github.com/SciresM/hactool), found in $HACTOOL, next to this
-# script's project (../../tools-bin/hactool, where steam-frame/BUILD-frame.md builds it), or in PATH.
+# script (a release ships it there), next to this script's project (../../tools-bin/hactool, where
+# steam-frame/build-hactool.sh builds it), or in PATH.
+#
+# With a folder instead of a package: the folder (or one below it, a few levels down) already holds the extracted
+# exefs/ and romfs/. They are checked the same way and hard-linked into the destination when it is on the same drive
+# (no second copy of 6 GB), else copied. The folder itself is left as it is.
 #
 # Needs your own keys: prod.keys from your console (Lockpick_RCM). Retail NSPs also carry their ticket, so title.keys is
-# usually not needed; give it when the NSP has no .tik file (stripped dumps). The keys are copied to a private temporary
-# folder for hactool and removed again; nothing of them or of the game is written anywhere else.
+# usually not needed; give it when the NSP has no .tik file (stripped dumps). hactool reads prod.keys where it is (-k);
+# it is never copied. The title key from the package's ticket (and your title.keys, if given) go to a private
+# temporary folder for hactool and are removed again; nothing of them or of the game is written anywhere else.
 #
 # Where it writes: --dest DIR (the extracted/ folder itself), else $LARECOMP_DATA_ROOT/extracted, else
 # ${XDG_DATA_HOME:-~/.local/share}/lasrecomp/extracted (what the Linux build uses). For a source checkout that has its
@@ -26,6 +33,7 @@ me=$(basename "$0")
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/.." && pwd)
 versions_h=$repo/runtime/game_addresses/versions.h
+[ -f "$versions_h" ] || versions_h=$here/versions.h   # (a release: next to this script)
 
 die() { echo "$me: $*" >&2; exit 1; }
 usage() {
@@ -47,9 +55,17 @@ while [ $# -gt 0 ]; do
         *) pos+=("$1"); shift ;;
     esac
 done
-[ ${#pos[@]} -ge 2 ] && [ ${#pos[@]} -le 3 ] || usage
-src=${pos[0]} keys=${pos[1]} tkeys=${pos[2]:-}
+[ ${#pos[@]} -ge 1 ] && [ ${#pos[@]} -le 3 ] || usage
+src=${pos[0]} keys=${pos[1]:-} tkeys=${pos[2]:-}
+from_dir=0
+if [ -d "$src" ]; then
+    from_dir=1
+    [ ${#pos[@]} = 1 ] || die "a folder of extracted game files needs no keys"
+else
+    [ ${#pos[@]} -ge 2 ] || usage
+fi
 
+if [ "$from_dir" = 1 ]; then :; else
 case ${src,,} in
     *.nsp|*.xci) ;;
     *.nsz|*.xcz) die "$src is compressed (NSZ/XCZ): decompress it to .nsp/.xci first" ;;
@@ -61,17 +77,20 @@ esac
 grep -q '^master_key_00[[:space:]]*=' "$keys" || grep -q '^header_key[[:space:]]*=' "$keys" ||
     die "$keys doesn't look like a prod.keys file (no header_key / master_key_00 line)"
 if [ -n "$tkeys" ]; then [ -f "$tkeys" ] || die "$tkeys: no such file"; fi
+fi
 [ -f "$versions_h" ] || die "$versions_h not found: run this from the LAS Recomp checkout"
 
 hactool=${HACTOOL:-}
-if [ -z "$hactool" ]; then
-    for c in "$repo/../tools-bin/hactool" "$HOME/Games/AwakeningFrame/tools-bin/hactool"; do
+if [ -z "$hactool" ] && [ "$from_dir" = 0 ]; then
+    for c in "$here/hactool" "$repo/../tools-bin/hactool" "$HOME/Games/AwakeningFrame/tools-bin/hactool"; do
         [ -x "$c" ] && { hactool=$c; break; }
     done
 fi
-[ -n "$hactool" ] || hactool=$(command -v hactool || true)
-[ -n "$hactool" ] && [ -x "$hactool" ] || die "hactool not found (set HACTOOL=, or build it: see steam-frame/BUILD-frame.md)"
-command -v python3 >/dev/null || die "python3 is needed (ticket parsing)"
+if [ "$from_dir" = 0 ]; then
+    [ -n "$hactool" ] || hactool=$(command -v hactool || true)
+    [ -n "$hactool" ] && [ -x "$hactool" ] || die "hactool not found (set HACTOOL=, or build it: steam-frame/build-hactool.sh)"
+    command -v python3 >/dev/null || die "python3 is needed (ticket parsing)"
+fi
 
 if [ -z "$dest" ]; then
     root=${LARECOMP_DATA_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/lasrecomp}
@@ -83,17 +102,36 @@ if [ -e "$dest/exefs/main" ] && [ "$force" != 1 ]; then
 fi
 mkdir -p "$(dirname "$dest")"
 
-# ---- private workspace (keys live here only for the run)
+# ---- private workspace (title keys live here only for the run; prod.keys is read where it is)
 umask 077
 work=$(mktemp -d "$(dirname "$dest")/.prepare-game.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/home/.switch" "$work/pfs" "$work/out"
-cp "$keys" "$work/home/.switch/prod.keys"
+
+if [ "$from_dir" = 1 ]; then
+    # ---- a folder of extracted files: find exefs/ (main, main.npdm) and romfs/ (region_common) in it
+    ex=$(find "$src" -maxdepth 4 -type f -name main.npdm -path '*/exefs/main.npdm' -print -quit 2>/dev/null)
+    [ -n "$ex" ] || die "$src: no exefs/main.npdm in it (a few levels down at most)"
+    ex=$(dirname "$ex")
+    rf=$(dirname "$ex")/romfs
+    [ -d "$rf/region_common" ] || rf=$(find "$src" -maxdepth 4 -type d -name region_common -path '*/romfs/region_common' -print -quit 2>/dev/null)
+    rf=${rf%/region_common}
+    [ -n "$rf" ] && [ -d "$rf/region_common" ] || die "$src: no romfs/region_common next to $ex"
+    echo "game files: $ex and $rf"
+    # hard links when the destination is on the same drive (instant, no second copy), else a copy
+    if cp -al "$ex" "$work/out/exefs" 2>/dev/null && cp -al "$rf" "$work/out/romfs" 2>/dev/null; then
+        echo "linked (same drive: no copy)"
+    else
+        rm -rf "$work/out/exefs" "$work/out/romfs"
+        echo "copying $(du -sh "$rf" | cut -f1) ..."
+        cp -a "$ex" "$work/out/exefs" && cp -a "$rf" "$work/out/romfs" || die "copying the game files failed (space?)"
+    fi
+else
 : > "$work/home/.switch/title.keys"
 [ -n "$tkeys" ] && cat "$tkeys" >> "$work/home/.switch/title.keys"
 export HOME=$work/home
 unset XDG_CONFIG_HOME
-hact() { "$hactool" --disablekeywarns --suppresskeys "$@"; }
+hact() { "$hactool" --disablekeywarns --suppresskeys -k "$keys" "$@"; }
 
 echo "package: $src ($(du -h "$src" | cut -f1))"
 
@@ -173,6 +211,8 @@ hact -t nca --exefsdir="$work/out/exefs" --romfsdir="$work/out/romfs" "$prog" >"
 [ -f "$work/out/exefs/main" ] || die "no exefs/main came out of the NCA (key problem?)"
 [ -f "$work/out/exefs/main.npdm" ] || die "no exefs/main.npdm came out of the NCA"
 [ -d "$work/out/romfs/region_common" ] || die "no romfs/region_common came out of the NCA (an update-style NCA, or a key problem)"
+rm -rf "$work/pfs"   # (the package's NCAs: not needed any more, and as big as the game)
+fi
 
 # ---- the build ID: bytes 0x40..0x53 of exefs/main (the NSO's module ID)
 [ "$(stat -c %s "$work/out/exefs/main")" -ge 96 ] || die "exefs/main is too small to be an NSO"
