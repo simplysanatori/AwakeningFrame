@@ -41,6 +41,9 @@ bool cam_override_ubo(int stage, uint64_t addr, uint64_t size, void *out320);
 // Any other bound buffer (48..4096 bytes): a copy with the camera's matrices (and eye position) found in it replaced by the
 // substitute camera's; false (nothing written) when nothing matched or the probe is off / identity / passthrough.
 bool cam_override_patch(const void *guest, uint64_t size, void *out);
+// Changes whenever the substitutes may change (a new latch, a new configuration): a substitute made for a buffer stays
+// right while this, the eye and the buffer's bytes stay the same.
+uint32_t cam_override_epoch(void);
 
 // Per-draw probe info (LARECOMP_FREECAM_LOG): filled by exec.c on every draw while logging.
 typedef struct {

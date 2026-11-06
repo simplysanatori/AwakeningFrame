@@ -105,12 +105,15 @@ static struct { uint64_t frame; CamCfg cfg; } g_sched[256];
 static int g_nsched, g_sched_next;
 static int g_log_every = 60;
 
+static volatile uint32_t g_cam_epoch = 1;  // bumped by each new latch and configuration (cam_override_epoch)
+uint32_t cam_override_epoch(void) { return g_cam_epoch; }
 static const CamCfg *cfg_now(void) { return &g_cfgs[atomic_load(&g_cfg_idx)]; }
 static void cfg_set(const CamCfg *c) {
     int n = 1 - atomic_load(&g_cfg_idx);
     g_cfgs[n] = *c;
     g_cam_cull = c->cull_aspect > 0 || c->cull_fovy != 1.0f;
     atomic_store(&g_cfg_idx, n);
+    g_cam_epoch++;
 }
 
 static bool parse_cull(const char *s, float *asp, float *fs) {
@@ -423,6 +426,7 @@ void cam_override_latch(const float *u, uint64_t addr, uint64_t size, uint64_t f
     if (size != 320 || (g_latch.valid && g_latch.frame == frame)) return;
     if (!persp(u)) return;
     cam_latch_from(&g_latch, u, addr, frame);
+    g_cam_epoch++;
     if (!g_cam_log) return;
     g_scan = frame % (uint64_t)g_log_every == 0;
     if (g_scan) {

@@ -879,6 +879,28 @@ static VkSpan copy_dedupe(int slot, const void *data, uint64_t size, uint64_t al
 static struct { uint64_t addr, size, seq; VkSpan span; uint64_t scanned; } gcopy[GCOPY_TAB];  // (scanned: heap size then, 0 not)
 static uint64_t gcopy_gen;  // bumped to drop every shared copy (guest memory written mid-list)
 static void guest_copy_flush(void) { gcopy_gen++; }
+// cam_override_patch's substitute for a bound range, as a transient copy shared by the draws of one submission that bind
+// the same range in the same eye (guest memory is stable within a submission, as for guest_copy; the camera epoch
+// covers a new latch). LARECOMP_CAM_PATCH_NOSHARE=1: a fresh patch and copy per binding, as before.
+static bool cam_patched(uint64_t addr, uint64_t size, VkSpan *out) {
+    static struct { uint64_t addr, size, seq; uint32_t epoch; int8_t eye; bool hit; VkSpan span; } memo[2048];
+    static int noshare = -1;
+    if (noshare < 0) noshare = getenv("LARECOMP_CAM_PATCH_NOSHARE") != NULL;
+    uint64_t seq = vk_pending_seq() + (gcopy_gen << 40), h = (addr * 0x9E3779B97F4A7C15ull) ^ (size * 0xC2B2AE3D27D4EB4Full);
+    uint32_t epoch = cam_override_epoch(), slot = (uint32_t)(h ^ (h >> 32)) & 2047;
+    if (!noshare && memo[slot].seq == seq && memo[slot].addr == addr && memo[slot].size == size && memo[slot].epoch == epoch &&
+        memo[slot].eye == g_eye) {
+        if (memo[slot].hit) *out = memo[slot].span;
+        return memo[slot].hit;
+    }
+    uint8_t pb[4096];
+    bool hit = cam_override_patch((const void *)(uintptr_t)addr, size, pb);
+    if (hit) *out = vk_transient_copy(pb, size, 256);
+    memo[slot].addr = addr, memo[slot].size = size, memo[slot].seq = seq, memo[slot].epoch = epoch, memo[slot].eye = (int8_t)g_eye;
+    memo[slot].hit = hit, memo[slot].span = hit ? *out : (VkSpan){0};
+    return hit;
+}
+
 // scan: (lazy heap chunks, a uniform buffer of a shader with global memory) the range is also scanned for heap
 // pointers (gc_scan_pointers), once per shared copy: its contents can't change while the copy is shared (again if the
 // heap grew since: pointers past its end were passed over).
@@ -3705,8 +3727,8 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
         if (cam_override_ubo(stage, r.addr, r.size, cb)) return ubo_span(vk_transient_copy(cb, size, 256), size);
     }
     if (cam_override_active() && size <= 4096) {  // (the camera's matrices copied into the pass's other blocks: cam_override_patch)
-        uint8_t pb[4096];
-        if (cam_override_patch((const void *)(uintptr_t)r.addr, size, pb)) return ubo_span(vk_transient_copy(pb, size, 256), size);
+        VkSpan ps;
+        if (cam_patched(r.addr, size, &ps)) return ubo_span(ps, size);
     }
     // snapshot: later CPU writes must not leak in. Shared by the draws of one submission binding the same range:
     // within a command list nothing writes guest memory (no inline UpdateUniformBuffer: that writes through below
@@ -7171,6 +7193,8 @@ static void draw_(CmdRec *r, bool indexed) {
         uint8_t cam_cb[4096];  // (free-camera probe: the substituted camera buffer, as cbuf_info binds it; promoted words come from here too)
         int cam_tried = -1;
         bool cam_hit = false;
+        const uint8_t *cam_src = NULL;
+        VkSpan cam_ps;
         for (int i = 0; i < si->npush; i++) {
             Range r = st.ubuf[sg][si->push_cb[i] - 3];
             uint32_t o = si->push_off[i];
@@ -7181,9 +7205,12 @@ static void draw_(CmdRec *r, bool indexed) {
                 if (psz > sizeof cam_cb) psz = sizeof cam_cb;
                 if (cam_tried != idx) {
                     cam_tried = idx;
-                    cam_hit = (r.size == 320 && cam_override_ubo(sg, r.addr, r.size, cam_cb)) || cam_override_patch((const void *)(uintptr_t)r.addr, psz, cam_cb);
+                    cam_src = NULL;
+                    if (r.size == 320 && cam_override_ubo(sg, r.addr, r.size, cam_cb)) cam_src = cam_cb;
+                    else if (cam_patched(r.addr, psz, &cam_ps)) cam_src = cam_ps.ptr;
+                    cam_hit = cam_src != NULL;
                 }
-                if (cam_hit && o + 4 <= psz) memcpy(&pw[i], cam_cb + o, 4);
+                if (cam_hit && o + 4 <= psz) memcpy(&pw[i], cam_src + o, 4);
             }
         }
         rec_CmdPushConstants(cb, pr->layout, sg ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT, si->push_base,
