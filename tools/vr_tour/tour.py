@@ -84,6 +84,8 @@ RE_KV = re.compile(r'([a-z][a-z ]*?) (-?\d+(?:\.\d+)?)')
 RE_VK = re.compile(r'^\[vk\] t=([\d.]+) frame (\d+) ([\d.]+) fps max (\d+)ms level (\S*) \((.*)\)$')
 RE_GPU = re.compile(r'^\[stereo\] GPU per game frame: eye 0 ([\d.]+) ms, eye 1 ([\d.]+) ms, both ([\d.]+) ms \(max ([\d.]+)\) over (\d+) frames')
 RE_XR = re.compile(r'^\[xr\] (\d+) s: (\d+) refreshes at (\d+) Hz \((\d+) missed\), (\d+) vsyncs, (\d+) sets shown \(([\d.]+) ms after submission\)(.*)$')
+# (exec.c, the stereo camera check, every 10 s when it found any) one eye drew draws with the game's own camera
+RE_FLAT = re.compile(r"^\[stereo\] eye (\d) drew (\d+) draws with the game's own camera in (\d+) of (\d+) frames")
 RE_JUMP = re.compile(r'^\[warp\] jumping to (\S+) / (\S+)')
 CRASH = re.compile(r'^(FATAL:|\*\*\* |\[crash\]|.*Segmentation fault|.*Aborted \(core)')
 
@@ -147,6 +149,11 @@ def analyse_session(row, spots):
     if S['crash'] is None and (rc >= 128 or rc == 124):
         S['crash'] = (t_end, 'the session ended with exit status %d%s' % (rc, ' (timed out)' if rc == 124 else ''))
     S['mock_errors'] = [(t, l) for t, l in log if l.startswith('xrmock: ERROR')]
+    S['flat_eye'] = []
+    for t, l in log:
+        mf = RE_FLAT.match(l)
+        if mf:
+            S['flat_eye'].append((t, int(mf.group(1)), int(mf.group(2)), int(mf.group(3))))
     for t, l in log:
         m = re.match(r'^xrmock: summary: (\d+) errors, (\d+) warnings; (\d+) frames ended', l)
         if m:
@@ -278,6 +285,10 @@ def window_metrics(S, i, nominal):
         m['xr_lines'] = len(inside)
     m['pose_log_lines'] = mism_lines
     m['mock_errors'] = sum(1 for t, l in S['mock_errors'] if a <= t < b)
+    # (a camera check line covers the 10 s before it: counted where that overlaps the window)
+    fl = [x for x in S.get('flat_eye', []) if x[0] > a and x[0] - 10.0 < b]
+    m['flat_eye_draws'] = sum(x[2] for x in fl)
+    m['flat_eye_frames'] = sum(x[3] for x in fl)
     m['vuids'] = sum(1 for t, l in S['vuids'] if t_warp <= t < b)
     return m
 
@@ -481,6 +492,8 @@ def verdict_for(spot, S_all, nominal_of):
             notes.append('%s Hz: %d pose mismatches of %d refreshes' % (hz, m['pose_bad'], m['pose_of'] or 0))
         if m.get('mock_errors'):
             broken.append('%s Hz: %d xrmock ERROR lines' % (hz, m['mock_errors']))
+        if m.get('flat_eye_draws'):
+            broken.append("%s Hz: an eye drew %d draws with the game's own camera (%d frames; one eye flat)" % (hz, m['flat_eye_draws'], m['flat_eye_frames']))
         if m.get('vuids'):
             broken.append('%s Hz: %d validation messages' % (hz, m['vuids']))
         if m.get('level') and m['level'] not in ('-', spot['level']):
@@ -636,7 +649,7 @@ def write_md(out, meta, spots, sess, hzs, nominal_of):
         row += [f1(100 * img['hud_share']) if img and 'hud_share' in img else '-', '%+.0f' % img['disparity_px'] if img else '-']
         L.append('| ' + ' | '.join(row) + ' |')
     L.append('')
-    L.append('Verdicts: BROKEN = crash, warp not taken, a black eye, swapped eyes, missing HUD, xrmock ERROR or validation message; SLOW = game fps under %.0f%%, '
+    L.append('Verdicts: BROKEN = crash, warp not taken, a black eye, swapped eyes, an eye drawn with the game camera, missing HUD, xrmock ERROR or validation message; SLOW = game fps under %.0f%%, '
              'sets shown under %.0f%% of nominal (30 fps below 100 Hz, else 60), more than %.0f%% refreshes missed, %d+ hitches or GPU over %.0f%% of the period.' % (
                  100 * SLOW_FPS, 100 * SLOW_SETS, SLOW_MISSED, SLOW_HITCHES, 100 * SLOW_GPU))
     L.append('')

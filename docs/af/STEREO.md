@@ -9,10 +9,23 @@ layer. Design: `~/.claude/plans/awakeningframe-vr-design.md` sections 2-6. Code:
 
 - **Each list runs once per eye** (`exec.c stereo_execute`). Before eye 1, the bound state is restored. The game's
   memory writes from eye 0 (uniform updates, buffer-to-buffer copies) are undone, and eye 1 then redoes them.
-- **Fences after both eyes:** a list's fence syncs are signalled once both eyes ran (the submission after eye 1).
-  Signalled in eye 0, a flush later in the list let the game see the fence done and write the next frame's scene
-  blocks while eye 0 still read them: eye 0's blocks then did not match the latched camera, so eye 0 drew with the
-  game's own camera whenever the camera moved (one eye flat: "cross-eyed when moving").
+- **The frame's camera is latched before eye 0 runs a list** (`stereo_prelatch`): the list's records are walked for the
+  vertex slot-5 binding up to its first draw with a 320-byte camera there. The latch used to happen inside eye 0, at that
+  draw: eye 0's draws before it (the level's geometry, which reads the view-projection from the pass's own 1 KB scene
+  blocks) were patched against the previous frame's latch, which their blocks no longer matched once the camera moved.
+  Eye 0 then drew them with the game's own camera while eye 1 (after the latch) had its eye camera: one eye flat and
+  squashed whenever Link or the camera moved. `LARECOMP_STEREO_PRELATCH=0` turns it off (the old behaviour).
+- **Camera check** (`st_cc_*`, exec.c): per draw into a twinned target, the uniform slots that got the eye's camera.
+  Eye 1 compares each of its draws with eye 0's run of the same draw record (both eyes run the same list memory): a
+  slot only one eye substituted, or a main camera that changed since the latch, means that eye drew with the game's own
+  camera. Every 10 s: `[stereo] camera check (10 s): F frames, D draws compared ...; game's own camera: eye 0 N draws,
+  eye 1 M; K draws before the frame's camera was latched` and, when there were any, `[stereo] eye N drew M draws with the
+  game's own camera in K of F frames (10 s)` (the tour's BROKEN). `LARECOMP_STEREO_CAMCHECK=0` off, `=2` also the
+  first mismatches in detail and where each frame's latch happened.
+- **Fences after both eyes:** in the executor without the render thread (`LARECOMP_RENDER_THREAD=0`) a list's fence
+  syncs are signalled once both eyes ran. With the render thread (the default) the game's SyncWait already waits for
+  the whole list's translation, both eyes (`rq_wait_item`; `nvn_sync_set_seq` is a no-op there), so the deferred GPU
+  wait of the overlap cannot let the game overwrite memory translation still reads.
 - **Eye 1 runs a draw, clear or copy only when a target is twinned.** Twinned targets are the 16:9 render targets
   (the scalable ones) and the guest-sized AO targets. Shadow maps, cube maps and small offscreen targets are drawn
   once, in eye 0, and shared. Compute, counters and read-backs run in eye 0 only.
@@ -115,6 +128,8 @@ still apply (`LARECOMP_VR_FOLLOW` set: the comfort follow instead of the rig's p
 | `LARECOMP_STEREO_TEST=gamecam / gameP / gamerot / gamepos` | bisect aids: the game's V+P / P / rotation / position in the eye cameras |
 | `LARECOMP_STEREO_NOAXIS=1` | floats 48-79 left as the game has them |
 | `LARECOMP_STEREO_DUMP_AT=<frame>,...`, `LARECOMP_STEREO_DUMP_DIR` | eye outputs, the HUD clone and the window image as PNG |
+| `LARECOMP_STEREO_PRELATCH=0` | latch the frame's camera at its first draw inside eye 0 (as before the fix; one eye flat while moving) |
+| `LARECOMP_STEREO_CAMCHECK=0\|1\|2` | the per-draw camera check between the eyes (default 1; 2: details) |
 | `LARECOMP_VR_FOLLOW=smooth\|room\|fixed`, `LARECOMP_VR_FOLLOW_TAU=<s>` | how the table follows the game camera (above) |
 | `LARECOMP_XR_PREDICT=measured\|vsync` | the display time the eye poses are located for |
 | `LARECOMP_VR_DIET=0\|dof,merge,smaa` | the VR pass diet (default all; docs/af/PASSES.md) |

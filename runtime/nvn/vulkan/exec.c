@@ -42,12 +42,34 @@ static uint64_t st_skipped[2], st_ran1;  // (stats) eye 1: skipped / run draws+c
 static bool st_mixed_logged;
 static bool eye1_skip_rt(void);           // (below the state) eye 1 and no twinned attachment
 static void gw_save(uint64_t addr, uint64_t size);  // eye 0: the old bytes of a guest write
-// (stereo) the list's fence syncs, signalled once both eyes ran (stereo_execute). Signalled in eye 0 (as before), a
-// flush later in eye 0 or 1 let the game see its fence done and write the next frame's uniforms while this frame's
-// draws still read them: eye 0 got the next frame's scene blocks, which the camera patch did not match (the game's own
-// camera in eye 0 = one eye flat while the camera moves).
+// (stereo) the list's fence syncs, signalled once both eyes ran (stereo_execute), for the executor without the render
+// thread. With it (the default) a list's syncs carry its queue item and SyncWait waits for the item's translation, both
+// eyes (nvn_sync_set_seq ignores the executor). (The one-eye-flat bug this was meant for was the latch: stereo_prelatch.)
 static uint64_t st_fence[64];
 static int st_fence_n;
+// (stereo) camera check: per draw into a twinned target, the uniform slots that got the eye's camera (cam_override_ubo,
+// cam_patched: bit stage * 18 + slot; bit 63: the main camera's address held another camera). Both eyes run the same
+// list, so eye 1 compares each draw with eye 0's draw of the same ordinal: a slot only one eye substituted means that eye
+// drew with the game's own camera there (one eye flat). Logged every 10 s; LARECOMP_STEREO_CAMCHECK=0: off, =2: also the
+// bound uniform bytes' hash per draw, and the first mismatches in detail.
+#define ST_CC_MAX 16384
+static int st_cc_on = -1;
+static uint64_t st_cc_mask;  // this draw's substituted slots
+static uint64_t st_cc_rec[ST_CC_MAX], st_cc_hash[ST_CC_MAX];
+static const void *st_cc_rp[ST_CC_MAX];  // eye 0's draw records (eye 1 finds its draw among them: the same list memory)
+static uint32_t st_cc_n[2], st_cc_cur;   // draws noted per eye; eye 1's place in eye 0's
+static void stereo_cc_draw(const void *rec, uint32_t stale0);
+static void stereo_cc_list(void);
+static uint64_t st_cam_frame[2], st_cam_draws[2];  // (stereo) per eye: the frame and its draws so far with the eye camera
+static inline void cc_mark(int stage, int idx) { st_cc_mask |= 1ull << ((stage == 1 ? 18 : 0) + idx); }
+static void cc_latch(const float *u, uint64_t addr, uint64_t size, uint64_t frame) {  // (cam_override_latch, + the debug log)
+    uint32_t ep = cam_override_epoch();
+    cam_override_latch(u, addr, size, frame);
+    static unsigned n;
+    if (st_cc_on == 2 && cam_override_epoch() != ep && n++ < 60)
+        LOG("[stereo] camcheck f%llu: latched in eye %d after %u draws into twinned targets of this list\n", (unsigned long long)frame,
+            g_eye, g_eye >= 0 ? st_cc_n[g_eye] : 0);
+}
 
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 // (the guest heap for shaders in chunks: with the heap import below)
@@ -3773,11 +3795,11 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
     if (size < 16) size = 16;
     if (cam_override_active() && size <= 320) {  // (free-camera probe, runtime/nvn/cam_override.c: the main camera's host copy)
         uint8_t cb[320];
-        if (cam_override_ubo(stage, r.addr, r.size, cb)) return ubo_span(vk_transient_copy(cb, size, 256), size);
+        if (cam_override_ubo(stage, r.addr, r.size, cb)) { cc_mark(stage, idx); return ubo_span(vk_transient_copy(cb, size, 256), size); }
     }
     if (cam_override_active() && size <= 4096) {  // (the camera's matrices copied into the pass's other blocks: cam_override_patch)
         VkSpan ps;
-        if (cam_patched(r.addr, size, &ps)) return ubo_span(ps, size);
+        if (cam_patched(r.addr, size, &ps)) { cc_mark(stage, idx); return ubo_span(ps, size); }
     }
     // snapshot: later CPU writes must not leak in. Shared by the draws of one submission binding the same range:
     // within a command list nothing writes guest memory (no inline UpdateUniformBuffer: that writes through below
@@ -6752,6 +6774,14 @@ static void stereo_composite(void) {
     st.rt.has_cview[0] = 0;
     memset(&st.rt.cview[0], 0, sizeof st.rt.cview[0]);
     st.rt_dirty = true;
+    {   // (diagnostics) a composite of a frame with no draw with the eye camera: an image made earlier (a menu's capture)
+        uint64_t f = renderer_exec_frame();
+        bool scene = st_cam_frame[g_eye] == f && st_cam_draws[g_eye];
+        static unsigned n;
+        if (!scene && n++ < 20)
+            LOG("[stereo] eye %d composite in frame %llu without a draw with the eye camera (source %ux%u)\n", g_eye, (unsigned long long)f,
+                wx_scene_w, wx_scene_h);
+    }
     g_eye_out_frame[g_eye] = renderer_exec_frame() + 1;
     g_eye_out_n[g_eye]++;
     stereo_note_composite(g_eye);  // (the poses this output was rendered with go with it into the layer)
@@ -6771,7 +6801,10 @@ static void stereo_hud_redirect(void) {  // (eye 0, after the composite) a draw 
 static void draw(CmdRec *r, bool indexed) {
     PROF_T0();
     wx_composite = wx_mirror = false;
+    uint32_t stale0 = g_cam_stale;
+    st_cc_mask = 0;
     draw_(r, indexed);
+    if (g_eye >= 0 && st_cc_on && cam_override_active()) stereo_cc_draw(r, stale0);
     if (st_redirected) {  // (VR pass diet, merge: the pass stays open for the next draw into the same clone)
         st_redirected = false;
         if (!vr_diet(DIET_MERGE)) vk_end_pass();
@@ -7033,7 +7066,7 @@ static bool ring_early(CmdRec *r, bool indexed) {
             extern void widescreen_scene_ubo(const float *u, uint64_t size);
             uint64_t f = renderer_exec_frame();
             widescreen_scene_ubo((const float *)(uintptr_t)s5.addr, s5.size);
-            if (cam_override_active()) cam_override_latch((const float *)(uintptr_t)s5.addr, s5.addr, s5.size, f);
+            if (cam_override_active()) cc_latch((const float *)(uintptr_t)s5.addr, s5.addr, s5.size, f);
             weather_scene_camera((const float *)(uintptr_t)s5.addr, s5.size, f);
             if (st.rt.depth->width >= 640 && renderer_format_is_depth(st.rt.depth->format))
                 wx_depth = st.rt.depth, wx_depth_frame = f, wx_zn = st.depth_range[0][0], wx_zf = st.depth_range[0][1],
@@ -7157,7 +7190,7 @@ static void draw_(CmdRec *r, bool indexed) {
         extern void widescreen_scene_ubo(const float *u, uint64_t size);  // (the camera's view-projection)
         if (st.ubuf[0][5].addr) widescreen_scene_ubo((const float *)(uintptr_t)st.ubuf[0][5].addr, st.ubuf[0][5].size);
         if (cam_override_active()) {  // (free-camera probe: the frame's main camera, and with LARECOMP_FREECAM_LOG the draw's buffers)
-            if (st.ubuf[0][5].addr) cam_override_latch((const float *)(uintptr_t)st.ubuf[0][5].addr, st.ubuf[0][5].addr, st.ubuf[0][5].size, renderer_exec_frame());
+            if (st.ubuf[0][5].addr) cc_latch((const float *)(uintptr_t)st.ubuf[0][5].addr, st.ubuf[0][5].addr, st.ubuf[0][5].size, renderer_exec_frame());
             if (cam_override_logging()) {
                 static uint64_t vs_addr, vs_hash;
                 uint64_t va = st.program->stages[0].code_addr;
@@ -7433,6 +7466,7 @@ static void draw_(CmdRec *r, bool indexed) {
     PROF_T0();
     uint32_t dyn[2 * MAX_BIND], ndyn = 0;  // (set reuse: the sets' dynamic offsets, vertex then fragment)
     VkDescriptorSet vset = stage_set(pr, pr->set_layout[0], 0, 0, pr->vi, NULL, NULL, 0, 0, 0, NULL, dyn, &ndyn);
+    st_cc_mask |= 1ull << 62;  // (camera check: the draw got as far as binding its uniforms)
     PROF_ADD(prof_sets);
     VkDescriptorImageInfo fii[64];
     uint64_t prof_tx_ = prof ? SDL_GetTicksNS() : 0;
@@ -7544,6 +7578,7 @@ static void draw_(CmdRec *r, bool indexed) {
                     if (r.size == 320 && cam_override_ubo(sg, r.addr, r.size, cam_cb)) cam_src = cam_cb;
                     else if (cam_patched(r.addr, psz, &cam_ps)) cam_src = cam_ps.ptr;
                     cam_hit = cam_src != NULL;
+                    if (cam_hit) cc_mark(sg, idx);
                 }
                 if (cam_hit && o + 4 <= psz) memcpy(&pw[i], cam_src + o, 4);
             }
@@ -9098,12 +9133,139 @@ static void stereo_note_cpu(uint64_t ns0, uint64_t ns1) {
     }
 }
 
+// ---- (stereo) camera check (st_cc_*): see st_cc_mask
+static uint64_t cc_ubo_hash(void) {  // (LARECOMP_STEREO_CAMCHECK=2) the bytes of the draw's bound uniform ranges (<= 4 KB)
+    uint64_t h = 1469598103934665603ull;
+    for (int sg = 0; sg < 2; sg++)
+        for (int i = 0; i < 18; i++) {
+            Range r = st.ubuf[sg][i];
+            if (r.addr && r.size && r.size <= 4096) h = hmix(h ^ ((uint64_t)(sg * 18 + i) << 56), (const void *)(uintptr_t)r.addr, r.size);
+        }
+    return h;
+}
+static struct { uint64_t draws, bad[2], frames, bad_frames[2], lists, unmatched, unlatched, t0, frame, cur_bad[2]; } cc;
+static void stereo_cc_draw(const void *rec, uint32_t stale0) {
+    if (!(st_cc_mask >> 62 & 1)) return;  // (not drawn: skipped before its uniforms)
+    bool tw = false;
+    for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i] && vk_tex_twinned(st.rt.color[i])) tw = true;
+    if (st.rt.depth && vk_tex_twinned(st.rt.depth)) tw = true;
+    if (!tw) return;  // (shared targets: eye 0 only)
+    uint64_t m = st_cc_mask | (g_cam_stale != stale0 ? 1ull << 63 : 0);
+    if (st_cc_mask & ((1ull << 36) - 1)) {
+        uint64_t f = renderer_exec_frame();
+        if (st_cam_frame[g_eye] != f) st_cam_frame[g_eye] = f, st_cam_draws[g_eye] = 0;
+        st_cam_draws[g_eye]++;
+    }
+    uint32_t k = st_cc_n[g_eye]++;
+    if (g_eye == 0) {
+        if (!cam_override_latched(renderer_exec_frame())) cc.unlatched++;  // (both eyes: the previous frame's camera)
+        if (k >= ST_CC_MAX) return;
+        st_cc_rec[k] = m, st_cc_rp[k] = rec;
+        if (st_cc_on == 2) st_cc_hash[k] = cc_ubo_hash();
+        return;
+    }
+    // eye 1: the same draw record next in eye 0's (a draw eye 0 ran into a target that was twinned only from eye 1 on is
+    // not there: not compared)
+    uint32_t n0 = st_cc_n[0] < ST_CC_MAX ? st_cc_n[0] : ST_CC_MAX, j = st_cc_cur;
+    while (j < n0 && j < st_cc_cur + 64 && st_cc_rp[j] != rec) j++;
+    if (j >= n0 || st_cc_rp[j] != rec) { cc.unmatched++; return; }
+    st_cc_cur = j + 1;
+    k = j;
+    uint64_t m0 = st_cc_rec[k];
+    cc.draws++;
+    uint64_t sub = (1ull << 36) - 1;
+    bool bad0 = (m0 >> 63 & 1) || (m & ~m0 & sub), bad1 = (m >> 63 & 1) || (m0 & ~m & sub);
+    if (bad0) cc.cur_bad[0]++, cc.bad[0]++;
+    if (bad1) cc.cur_bad[1]++, cc.bad[1]++;
+    static unsigned nlog;
+    if ((bad0 || bad1) && st_cc_on == 2 && nlog < 40) {
+        nlog++;
+        uint64_t h1 = cc_ubo_hash();
+        LOG("[stereo] camcheck f%llu draw %u: eye 0 slots %#llx%s, eye 1 slots %#llx%s; uniform bytes %s between the eyes\n",
+            (unsigned long long)renderer_exec_frame(), k, (unsigned long long)(m0 & sub), m0 >> 63 ? " (stale camera)" : "",
+            (unsigned long long)(m & sub), m >> 63 ? " (stale camera)" : "", h1 == st_cc_hash[k] ? "the same" : "CHANGED");
+        uint64_t d = (m ^ m0) & sub;
+        for (int b = 0; b < 36; b++)
+            if (d >> b & 1) {
+                Range r = st.ubuf[b / 18][b % 18];
+                LOG("[stereo] camcheck   stage %d slot %d: %#llx size %llu, substituted in eye %d only\n", b / 18, b % 18,
+                    (unsigned long long)r.addr, (unsigned long long)r.size, (m0 >> b & 1) ? 0 : 1);
+            }
+    }
+}
+static void stereo_cc_list(void) {  // (after eye 1 of a list)
+    st_cc_n[0] = st_cc_n[1] = st_cc_cur = 0;
+    cc.lists++;
+    uint64_t f = renderer_exec_frame(), now = plat_now_ns();
+    if (f != cc.frame) {
+        cc.frame = f, cc.frames++;
+        for (int e = 0; e < 2; e++) if (cc.cur_bad[e]) cc.bad_frames[e]++, cc.cur_bad[e] = 0;
+    }
+    if (!cc.t0) cc.t0 = now;
+    if (now - cc.t0 >= 10000000000ull) {
+        for (int e = 0; e < 2; e++)
+            if (cc.bad[e]) LOG("[stereo] eye %d drew %llu draws with the game's own camera in %llu of %llu frames (10 s)\n", e,
+                               (unsigned long long)cc.bad[e], (unsigned long long)cc.bad_frames[e], (unsigned long long)cc.frames);
+        LOG("[stereo] camera check (10 s): %llu frames, %llu draws compared (%llu of eye 1's not in eye 0's); game's own camera: "
+            "eye 0 %llu draws, eye 1 %llu; %llu draws before the frame's camera was latched\n", (unsigned long long)cc.frames,
+            (unsigned long long)cc.draws, (unsigned long long)cc.unmatched, (unsigned long long)cc.bad[0], (unsigned long long)cc.bad[1],
+            (unsigned long long)cc.unlatched);
+        uint64_t keep = cc.frame;
+        memset(&cc, 0, sizeof cc);
+        cc.t0 = now, cc.frame = keep;
+    }
+}
+
+// (stereo) The frame's main camera, latched before eye 0 runs the list: the latch used to happen at the frame's first
+// draw with the camera bound, inside eye 0. Eye 0's draws before it (the level's geometry reads the view-projection
+// from the pass's own 1 KB scene blocks, not from the camera) were patched against the previous frame's latch, which
+// their blocks no longer matched once the camera moved: eye 0 drew them with the game's own camera (one eye flat while
+// moving), eye 1 (after the latch) with its eye camera. The list's records are walked for the vertex slot-5 binding up
+// to its first draw with a camera there (as the draws' latch, which stays for flat mode). LARECOMP_STEREO_PRELATCH=0: off.
+static bool prelatch_walk(uint64_t p, Range *s5, uint64_t frame, int depth) {
+    for (int guard = 0; guard < 10000000; guard++) {
+        const CmdRec *r = (const CmdRec *)(uintptr_t)p;
+        switch (r->op) {
+        case CMD_END: return false;
+        case CMD_JUMP: p = r->x[0]; continue;
+        case CMD_CALL: {
+            const uint64_t *h = (const uint64_t *)r->extra;
+            for (uint64_t i = 0; i < r->x[0] && depth < 8; i++) if (prelatch_walk(h[i], s5, frame, depth + 1)) return true;
+            break;
+        }
+        case CMD_BIND_UNIFORM_BUFFERS:
+            if (r->x[0] == 0 && r->x[1] <= 5 && r->x[1] + r->x[2] > 5) memcpy(s5, (const uint8_t *)r->extra + (5 - r->x[1]) * 16, 16);
+            break;
+        case CMD_DRAW_ARRAYS: case CMD_DRAW_ELEMENTS: case CMD_DRAW_ARRAYS_INDIRECT: case CMD_DRAW_ELEMENTS_INDIRECT:
+            if (s5->addr && s5->size == 320) {
+                cc_latch((const float *)(uintptr_t)s5->addr, s5->addr, s5->size, frame);
+                if (cam_override_latched(frame)) return true;
+            }
+            break;
+        default: break;
+        }
+        p += r->size;
+    }
+    return false;
+}
+static void stereo_prelatch(uint64_t handle) {
+    static int on = -1;
+    if (on < 0) on = !getenv("LARECOMP_STEREO_PRELATCH") || atoi(getenv("LARECOMP_STEREO_PRELATCH")) != 0;
+    uint64_t f = renderer_exec_frame();
+    if (!on || !cam_override_active() || cam_override_latched(f)) return;
+    Range s5 = st.ubuf[0][5];
+    prelatch_walk(handle, &s5, f, 0);
+}
+
 static void stereo_execute(uint64_t handle) {
     static bool cams;
     if (!cams) { cams = true; stereo_cameras_init(); }
     __typeof__(st) start = st;
     vk_end_pass();
     gw_n = 0, gw_used = 0;
+    if (st_cc_on < 0) st_cc_on = getenv("LARECOMP_STEREO_CAMCHECK") ? atoi(getenv("LARECOMP_STEREO_CAMCHECK")) : 1;
+    st_cc_n[0] = st_cc_n[1] = st_cc_cur = 0;
+    stereo_prelatch(handle);  // (the frame's camera before eye 0's first draw: both eyes patch against the same latch)
     idx_memo_gen++;
     g_eye = 0;
     cam_override_set_eye(0);
@@ -9124,6 +9286,7 @@ static void stereo_execute(uint64_t handle) {
     vk_end_pass();
     st_ts_end(q, 1);
     vk_stereo_swap(false);
+    if (st_cc_on && cam_override_active()) stereo_cc_list();
     stereo_note_cpu(t1 - t0, plat_now_ns() - t1);
     g_eye = -1;
     cam_override_set_eye(0);
