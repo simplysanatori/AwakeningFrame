@@ -2077,6 +2077,12 @@ void ui_window_init(void) {
                                             getenv("LARECOMP_HOST_INPUT") || getenv("LARECOMP_BIND_TEST"));
         if (scripted) SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
     }
+    // (VR mode) no system on-screen keyboard: the menu turns text input on while it is open (menu_apply_window_requests),
+    // and under Steam with SteamDeck=1 (the Frame) SDL then opens Steam's keyboard (steam://open/keyboard), which takes
+    // the focus from the VR session: the headset dropped to SteamOS / the dashboard as the menu opened. The menu has its
+    // own on-screen keyboard. LARECOMP_XR_SCREEN_KEYBOARD=1: SDL's default.
+    if (xr_mode() && !(getenv("LARECOMP_XR_SCREEN_KEYBOARD") && atoi(getenv("LARECOMP_XR_SCREEN_KEYBOARD"))))
+        SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, "0");
     window = SDL_CreateWindow("LAS Recomp", win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     rt_window_icon(window);
