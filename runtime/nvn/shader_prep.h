@@ -77,7 +77,8 @@ void shader_rec_note(const ShaderRec *r);
 // ---- the player's own list (runtime/nvn/shader_seen.c): cache/shader_seen.txt in the data folder, in the shipped
 // list's format. Every variant the game builds that the shipped list doesn't have is added (queued by
 // shader_rec_note, written by a background thread in batches and at exit; at most 20000 records), and the next
-// preparation does them after the shipped list ("[shader] prepared N + M seen before"), so a shader met once is
+// preparation does them after the shipped list ("[shader] prepared N + M seen before"; multiview records, SR_MV /
+// SR_MVP, before both with LARECOMP_MV on and not at all with it off), so a shader met once is
 // ready from the second run on. LARECOMP_SHADER_SEEN=0 turns it off (nothing recorded, nothing prepared from it).
 bool shader_seen_on(void);
 void shader_seen_note(const ShaderRec *r);
