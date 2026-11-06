@@ -156,9 +156,28 @@ One run of a list draws both eyes (VK_KHR_multiview, `viewMask` 3) instead of ru
 - **Foveation:** Turnip has no layered shading-rate attachments (`layeredShadingRateAttachments` false). A multiview
   pass gets one map (`fov_pass` eye 2): each texel takes the finer rate of the two eyes' foci. The density-map mode
   (`LARECOMP_VR_FOVEATION_MODE=fdm`) gives multiview passes no map.
+- **Camera check:** the `[mv] 5 s` line counts the per-eye camera bindings ([eye 0 | eye 1] copies) and the camera
+  blocks bound alike to both views of a multiview pass ("with eye 0's in both views", logged). Those would give eye 1
+  eye 0's camera, so the count should be 0. The double-execution check (`[stereo] camera check`) runs only for lists
+  that still have an eye-1 run.
+- **Measured** (xrmock 1728², 90 Hz unless noted, foveation medium, gaze mock 0,0, dynres off; v1 → MV):
+  - **GPU, both eyes:** Mabe 19.5-20.0 → 18.1-18.4 ms, forest 18.7 → 17.3, beach 20.5 → 18.2, Tail Cave 04B
+    9.0 → 8.1, house 7.8-8.0 → 7.6-7.7.
+  - **Render CPU:** Mabe 12.9-13.2 → 8.0-8.6 ms, forest 11.3 → 7.3. Every list is one run.
+  - **At 120 Hz:** Mabe 53 → 60.0 fps, forest 30 → 59.9 fps. MV's GPU is 15.2 ms there.
+  - **Eye dumps:** within v1's run-to-run noise at Mabe, the forest, the house, Tail Cave 04B and Field_09B (worst
+    2.1% of pixels over 24/255; two v1 runs differ by up to 2.8%).
+  - **Pose:** 0 pose mismatches, 0 sets with eyes of two frames.
 - **Debugging:** `LARECOMP_DEBUG_FRAME` pass dumps are named by eye (`_e0` / `_e1`, `m`: a multiview pass, one PNG
   per layer). `LARECOMP_MV_PASSES=0` keeps the layered storage and runs each list per eye (stage 1: the storage
   checked against v1 alone).
+- **Limits:**
+  - Twins other than single-sample 2D images with one layer stay shared under MV (logged "[mv] candidate ... has no
+    eye-1 layer", or "twin add ... refused"); v1 could twin any image.
+  - A camera block in cbuf 11-17 can't be per eye (logged; none seen).
+  - Turnip applies the shading-rate map to both views alike, so a multiview pass is foveated by the union of the two
+    foci.
+  - Turnip's multipos (`TU_DEBUG=nomultipos` changes nothing), so the vertex work is still done per view.
 
 ## Switches and tests
 
