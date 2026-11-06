@@ -26,3 +26,12 @@ double mockvk_release_wait_ms(void);
 int mockvk_dump_png(void* images, int index, uint32_t layer, int x, int y, int w, int h, const char* path, char* stats, size_t statcap);
 // Highest Vulkan API version offered (XR_MAKE_VERSION), default 1.3.
 void mockvk_set_max_api(uint32_t major, uint32_t minor);
+// MOCK_XR_SHIFT: an asynchronous copy of a released image's rect (layer `layer`) into a host buffer, with a tag;
+// -1 when no probe slot is free or the format is not 8-bit colour.
+int mockvk_probe_submit(void* images, int index, uint32_t layer, int x, int y, int w, int h, int tag);
+// A finished probe, its luma box-averaged by `sub` into out (w/sub x h/sub); 1 when one was collected.
+int mockvk_probe_collect(int* tag, int* w, int* h, float* out, int sub);
+// MOCK_XR_COMPOSITOR: a compositor's GPU job on its own device, `lead_ms` before each vsync (t0 + n * period);
+// returns the global priority it got (0: none), -1 on failure. Stop writes a summary line into out.
+int mockvk_compositor_start(int64_t t0, int64_t period, double lead_ms, double from_s, int eye_w, int eye_h, const char* logpath);
+void mockvk_compositor_stop(char* out, size_t cap);
