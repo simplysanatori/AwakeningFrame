@@ -22,6 +22,8 @@
 #   --wait          wait while ~/.cache/headset-in-use exists (default: refuse, exit 75)
 #   --wait-max S    give up waiting for the bench lock / another lasrecomp after S seconds (3600, exit 75)
 #   --plan          print the spots and sessions and exit        --keep-raw   keep the full-size mock PNGs
+#   --mv-check      instead of the tour: tools/mv_check.sh on this tree (v1 vs LARECOMP_MV=1 images; --only, --eye, --wait,
+#                   --wait-max and --plan pass through; MV_CHECK_ARGS="--mode passes --noise" adds more); exit status of the check
 #   --no-walk       no scripted walk (a walk that reaches a door starts a level change, which delays the next warp)
 # Waits for ~/.cache/af-bench-lock and for any other lasrecomp, takes the lock while it runs (released on exit), uses nice.
 # Environment: AF_HEADSET_FLAG / AF_BENCH_LOCK (other paths for the two flags, for tests), VR_TOUR_PYTHON=<python with PIL>, VR_TOUR_SAVE=<test save folder holding save_0/>, XRMOCK_JSON=<runtime.json>.
@@ -33,7 +35,7 @@ SAVE=${VR_TOUR_SAVE:-$HOME/.local/share/lasrecomp-smoketest/save}
 HEADSET=${AF_HEADSET_FLAG:-$HOME/.cache/headset-in-use}
 LOCK=${AF_BENCH_LOCK:-$HOME/.cache/af-bench-lock}
 
-NOWALK=0 QUICK=0 ONLY= VVL=0 COMPARE= HZS= DWELL= SHOT_DWELL= EYE=1680x1760 WAIT_HEADSET=0 WAIT_MAX=3600 PLAN=0 KEEP_RAW=0 DIFF_OLD= DIFF_NEW=
+MVCHECK=0 NOWALK=0 QUICK=0 ONLY= VVL=0 COMPARE= HZS= DWELL= SHOT_DWELL= EYE=1680x1760 WAIT_HEADSET=0 WAIT_MAX=3600 PLAN=0 KEEP_RAW=0 DIFF_OLD= DIFF_NEW=
 while [ $# -gt 0 ]; do
     case $1 in
         --quick) QUICK=1 ;;
@@ -51,6 +53,7 @@ while [ $# -gt 0 ]; do
         --no-walk) NOWALK=1 ;;
         --plan) PLAN=1 ;;
         --keep-raw) KEEP_RAW=1 ;;
+        --mv-check) MVCHECK=1 ;;
         -h|--help) sed -n '2,/^set -uo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
         *) echo "vr_tour: unknown argument $1 (--help)" >&2; exit 2 ;;
     esac
@@ -58,6 +61,15 @@ while [ $# -gt 0 ]; do
 done
 
 fail() { echo "vr_tour: $*" >&2; exit 2; }
+
+if [ $MVCHECK = 1 ]; then   # the multiview image check (tools/mv_check.sh) instead of the tour
+    MVA=(--tree "$TREE" --eye "$EYE")
+    [ -n "$ONLY" ] && MVA+=(--only "$ONLY")
+    [ $WAIT_HEADSET = 1 ] && MVA+=(--wait)
+    [ $PLAN = 1 ] && MVA+=(--plan)
+    # shellcheck disable=SC2086
+    exec "$SELF/mv_check.sh" BIN="$TREE/build/lasrecomp" "${MVA[@]}" --wait-max "$WAIT_MAX" ${MV_CHECK_ARGS:-}
+fi
 
 # name|level|locator  (the free-camera sweep's list, tools/freecam_sweep.sh; runtime/ui/warp_data.h)
 SPOTS=(
