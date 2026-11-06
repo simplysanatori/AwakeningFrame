@@ -3659,6 +3659,10 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
         uint8_t cb[320];
         if (cam_override_ubo(stage, r.addr, r.size, cb)) return ubo_span(vk_transient_copy(cb, size, 256), size);
     }
+    if (cam_override_active() && size <= 4096) {  // (the camera's matrices copied into the pass's other blocks: cam_override_patch)
+        uint8_t pb[4096];
+        if (cam_override_patch((const void *)(uintptr_t)r.addr, size, pb)) return ubo_span(vk_transient_copy(pb, size, 256), size);
+    }
     // snapshot: later CPU writes must not leak in. Shared by the draws of one submission binding the same range:
     // within a command list nothing writes guest memory (no inline UpdateUniformBuffer: that writes through below
     // and drops the shared copies).
@@ -7019,10 +7023,23 @@ static void draw_(CmdRec *r, bool indexed) {
         const ShaderInfo *si = sg ? pr->fi : pr->vi;
         if (!si->npush) continue;
         uint32_t pw[64];
+        uint8_t cam_cb[4096];  // (free-camera probe: the substituted camera buffer, as cbuf_info binds it; promoted words come from here too)
+        int cam_tried = -1;
+        bool cam_hit = false;
         for (int i = 0; i < si->npush; i++) {
             Range r = st.ubuf[sg][si->push_cb[i] - 3];
             uint32_t o = si->push_off[i];
             pw[i] = r.addr && o + 4 <= (r.size ? r.size : 0x10000) ? *(const uint32_t *)(uintptr_t)(r.addr + o) : 0;  // (as cbuf_info)
+            if (r.addr && cam_override_active()) {
+                int idx = si->push_cb[i] - 3;
+                uint64_t psz = r.size ? r.size : 4096;
+                if (psz > sizeof cam_cb) psz = sizeof cam_cb;
+                if (cam_tried != idx) {
+                    cam_tried = idx;
+                    cam_hit = (r.size == 320 && cam_override_ubo(sg, r.addr, r.size, cam_cb)) || cam_override_patch((const void *)(uintptr_t)r.addr, psz, cam_cb);
+                }
+                if (cam_hit && o + 4 <= psz) memcpy(&pw[i], cam_cb + o, 4);
+            }
         }
         rec_CmdPushConstants(cb, pr->layout, sg ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT, si->push_base,
                              si->npush * 4u, pw);

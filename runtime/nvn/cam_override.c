@@ -413,6 +413,58 @@ bool cam_override_ubo(int stage, uint64_t addr, uint64_t size, void *out320) {
     return true;
 }
 
+// Any other bound buffer (<= 4 KB): the game's passes also keep the camera's matrices in their own scene blocks (a 1 KB
+// block at slot 1 holds the view-projection at 0, the view / inverse view as 3x4 at 144 / 192, inverse projection, inverse
+// view-projection and projection after them: the level's vertex shaders read the view-projection there, not from the
+// 320-byte camera), so the substitute camera has to be written there too. Every 16-byte-aligned block equal to one of the
+// latched camera's matrices (or its transpose; a 3x4 copy: rows 0-2 only) is replaced by the substitute camera's, and
+// every 4-float group whose xyz is the eye position gets the substitute eye. The copy is made only when something matched.
+bool cam_override_patch(const void *guest, uint64_t size, void *out) {
+    const CamCfg *c = cfg_now();
+    if (c->kind == CAM_OFF || c->kind == CAM_IDENTITY || c->kind == CAM_PASSTHROUGH || !g_latch.valid || size < 48 || size > 4096) return false;
+    static const CamLatch *sub_for;
+    static uint64_t sub_frame = ~0ull;
+    static const CamCfg *sub_cfg;
+    static CamRef sub;  // the substitute camera's matrices (per frame and configuration)
+    float pv[3];
+    if (sub_for != &g_latch || sub_frame != g_latch.frame || sub_cfg != c) {
+        float built[80];
+        cam_pivot(&g_latch.ref, g_link, g_link_ok, g_zone_ok, g_zlo, g_zhi, c->pivot_link, pv);
+        cam_build(&g_latch, c, g_latch.orig, g_latch.frame, pv, built);
+        cam_derive(&sub, built, built + 16, built + 32);
+        sub_for = &g_latch, sub_frame = g_latch.frame, sub_cfg = c;
+    }
+    if (!sub.ok) return false;
+    const float *u = guest;
+    float cand[12][16];
+    ref_cand(cand, &g_latch.ref);
+    bool did = false;
+    float *o = out;
+    unsigned n = (unsigned)size;
+    for (unsigned off = 0; off + 16 <= n; off += 16) {
+        const float *f = u + off / 4;
+        if (off + 48 <= n) {
+            for (int i = 0; i < 12; i++) {
+                int j;
+                for (j = 0; j < 12 && ne(f[j], cand[i][j]); j++) {}
+                if (j < 12) continue;
+                bool full = off + 64 <= n;
+                for (int k = 12; full && k < 16; k++) full = ne(f[k], cand[i][k]);
+                if (!did) memcpy(out, guest, size), did = true;
+                float m[16];
+                block_write(m, cand_kind(i), &sub);
+                memcpy(o + off / 4, m, (full ? 16 : 12) * sizeof *m);
+                break;
+            }
+        }
+        if (ne(f[0], g_latch.ref.eye[0]) && ne(f[1], g_latch.ref.eye[1]) && ne(f[2], g_latch.ref.eye[2]) && !(f[0] == 0 && f[1] == 0 && f[2] == 0)) {
+            if (!did) memcpy(out, guest, size), did = true;
+            memcpy(o + off / 4, sub.eye, 3 * sizeof *o);
+        }
+    }
+    return did;
+}
+
 // ---- matrix scan
 int cam_scan_matrices(const float *u, unsigned size, const CamRef *r, CamMatchFn cb, void *user) {
     float c[12][16];
