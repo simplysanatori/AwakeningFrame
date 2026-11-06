@@ -1315,6 +1315,15 @@ static void save_window_image(VkCommandBuffer cb, VkSpan *out) {
     image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 }
 
+#ifdef LARECOMP_HAVE_XR
+static bool stereo_eye_target(int eye, VkImage *img, VkImageView *view, VkFormat *fmt, VkExtent2D *ext) {
+    XrEyeTarget t;
+    if (!xr_eye_target(eye, &t)) return false;
+    *img = t.image, *view = t.view, *fmt = t.format, *ext = t.extent;
+    return true;
+}
+#endif
+
 // End rendering into the window image and present it. shot_path: also save the window image as PNG.
 void vk_frame_end(const char *shot_path) {
     if (!cur_frame.ok) return;
@@ -1325,9 +1334,12 @@ void vk_frame_end(const char *shot_path) {
     uint64_t seq;
 #ifdef LARECOMP_HAVE_XR
     if (xr_mode()) {
-        // VR mode: the eyes nobody drew this set get the stub's clear colour; the HUD image stays in
+        // VR mode: the stereo executor's eye outputs into the eye images (exec.c vk_stereo_eyes; lane 4); the eyes
+        // nobody drew this set get the stub's clear colour; the HUD image stays in
         // COLOR_ATTACHMENT_OPTIMAL (the runtime's layout for a released image); no present: the XR thread releases the
         // set once this submission is done
+        extern int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImageView *, VkFormat *, VkExtent2D *));
+        vk_stereo_eyes(cb, stereo_eye_target);
         for (int eye = 0; eye < 2; eye++) {
             XrEyeTarget t;
             if (xr_eye_used(eye) || !xr_eye_target(eye, &t)) continue;
@@ -1660,7 +1672,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     {   // frame interpolation (runtime/nvn/interp.c): the frame's draws matched with the previous frame's and logged,
         // and with it on, its in-betweens presented (ip_mids)
         bool repeat = rq_on() ? rq_present_is_repeat() : direct_repeat;
-        int want = interp_wanted();
+        int want = xr_mode() ? INTERP_OFF : interp_wanted();  // (VR mode: no frame generation, the XR loop paces)
         if (!repeat) {
             if (want == INTERP_ON && ip_restart) {  // (turned on again: the stats from now, and measured again)
                 ip_restart = false, ip_new_interval = ip_new_rate = true;
@@ -1728,6 +1740,25 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         extern void widescreen_present_crop(uint64_t, double, float *, double *, double *, double *, double *);
         float crop[4];  // uv origin and size
         widescreen_present_crop(frame, shape, crop, &vx, &vy, &vw, &vh);
+        {   // (VR mode, stereo executor: lane 4) the scalable targets at the eye's size (each eye renders the scene
+            // into its twins: anisotropic scale for a square eye); the window image keeps the HUD, drawn by the game in
+            // a centred 16:9 box (exec.c, the uniform part of the scale): that box fills the HUD image
+            extern bool stereo_eye_size(uint32_t *w, uint32_t *h);
+            uint32_t ew, eh;
+            if (stereo_eye_size(&ew, &eh) && t->width && t->height) {
+                os.sx = os.ax = sx = (double)ew / t->width;
+                os.sy = os.ay = sy = (double)eh / t->height;
+                double u = fmin(sx, sy);
+                crop[2] = (float)(u / sx), crop[3] = (float)(u / sy);
+                crop[0] = (1 - crop[2]) * 0.5f, crop[1] = (1 - crop[3]) * 0.5f;
+                vx = vy = 0, vw = dw, vh = dh, shape = 16.0 / 9.0;
+                static uint32_t lw, lh;
+                if (t->width != lw || t->height != lh)
+                    LOG("[stereo] render scale %.4fx%.4f: the game's %ux%u targets at the eye's %ux%u; HUD crop %.3f %.3f %.3f %.3f\n", sx, sy,
+                        t->width, t->height, ew, eh, crop[0], crop[1], crop[2], crop[3]);
+                lw = t->width, lh = t->height;
+            }
+        }
         widescreen_set_factor((float)shape);
         extern void renderer_set_alloc_scale(float ax, float ay);
         renderer_set_alloc_scale((float)os.ax, (float)os.ay);
@@ -1799,6 +1830,23 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                 renderer_save_texture_tex(b, path);
             }
             if (*next == ',') next++;
+        }
+    }
+    {   // LARECOMP_STEREO_DUMP_AT=<frame>,... (VR mode): the eye outputs and the window image -> LARECOMP_STEREO_DUMP_DIR (build/frames)
+        static const char *at, *dir;
+        static int init;
+        if (!init) { init = 1; at = getenv("LARECOMP_STEREO_DUMP_AT"); dir = getenv("LARECOMP_STEREO_DUMP_DIR"); if (!dir) dir = "build/frames"; }
+        for (const char *p = at; p && *p;) {
+            long f = strtol(p, (char **)&p, 10);
+            if (f == (long)frame) {
+                extern void vk_stereo_dump(const char *dir, uint64_t frame);
+                vk_stereo_dump(dir, frame);
+                char path[512];
+                snprintf(path, sizeof path, "%s/stereo_%05llu_window.png", dir, (unsigned long long)frame);
+                renderer_save_texture_tex(b, path);
+                break;
+            }
+            if (*p == ',') p++; else break;
         }
     }
     static long shot_from = -1;

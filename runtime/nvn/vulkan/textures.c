@@ -505,8 +505,94 @@ static void live_remove(TexBackend *b) {
     if (!b->reg) return;
     NvnTexture *last = g_live[--g_nlive];
     g_live[b->reg - 1] = last;
-    if (last->backend) ((TexBackend *)last->backend)->reg = b->reg;
+    TexBackend *lb = last->backend;
+    if (lb) { lb->reg = b->reg; if (lb->twin) lb->twin->reg = b->reg; }
     b->reg = 0;
+}
+
+// ---- stereo twins (VR mode: vk_stereo_swap)
+static NvnTexture **g_twc;   // candidates: textures whose backend is scalable or a guest-sized AO target
+static int g_ntwc, g_cap_twc;
+static NvnTexture **g_sw;    // swapped to eye 1 now
+static int g_nsw, g_cap_sw;
+static bool twin_candidate(const NvnTexture *t, const TexBackend *b) {
+    if (b->scalable) return true;
+    if (t->target != 1 || t->samples > 1 || !(t->flags & 8) || t->height < 16) return false;
+    float a = (float)t->width / (float)t->height;
+    return a > 1.74f && a < 1.81f && tex_guest_sized_ao(t);
+}
+static void twc_add(NvnTexture *t) {
+    if (g_ntwc == g_cap_twc) { g_cap_twc = g_cap_twc ? g_cap_twc * 2 : 256; g_twc = realloc(g_twc, g_cap_twc * sizeof *g_twc); }
+    g_twc[g_ntwc++] = t;
+}
+// (stereo) shared textures eye 0 wrote from a twin (vk_stereo_twin_add): twinned from the next eye-1 run on, their
+// twin first filled with eye 0's image (a copy into part of it keeps the rest)
+static NvnTexture *g_twinit[64];
+static int g_ntwinit;
+bool vk_stereo_twin_add(NvnTexture *t) {
+    TexBackend *b = t ? t->backend : NULL;
+    if (!b || b->twin || b->is_twin || b->presented || !b->image) return false;
+    for (int i = 0; i < g_ntwc; i++) if (g_twc[i] == t) return false;
+    twc_add(t);
+    if (g_ntwinit < 64) g_twinit[g_ntwinit++] = t;
+    return true;
+}
+static void twin_init_copy(NvnTexture *t, TexBackend *b, TexBackend *w) {
+    int k = 0;
+    while (k < g_ntwinit && g_twinit[k] != t) k++;
+    if (k == g_ntwinit) return;
+    g_twinit[k] = g_twinit[--g_ntwinit];
+    if (w->width != b->width || w->height != b->height || w->format != b->format) return;
+    VkCommandBuffer cb = vk_cmd();
+    vk_full_barrier(cb);
+    VkImageCopy c = {.srcSubresource = {b->aspect, 0, 0, b->layers ? b->layers : 1}, .dstSubresource = {b->aspect, 0, 0, b->layers ? b->layers : 1},
+                     .extent = {b->width, b->height, 1}};
+    rec_CmdCopyImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, w->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    vk_full_barrier(cb);
+}
+static void twc_remove(NvnTexture *t) {
+    for (int i = 0; i < g_ntwinit; i++) if (g_twinit[i] == t) { g_twinit[i] = g_twinit[--g_ntwinit]; break; }
+    for (int i = 0; i < g_ntwc; i++) if (g_twc[i] == t) { g_twc[i] = g_twc[--g_ntwc]; break; }
+    for (int i = 0; i < g_nsw; i++) if (g_sw[i] == t) { g_sw[i] = g_sw[--g_nsw]; break; }
+}
+
+extern uint32_t vk_view_gen;
+int vk_stereo_swap(bool eye1) {
+    vk_view_gen++;  // (exec.c's texture-view memos and cached sets name eye 0's views: not valid across the switch)
+    if (!eye1) {
+        for (int i = 0; i < g_nsw; i++) {
+            TexBackend *w = g_sw[i]->backend;
+            if (w && w->is_twin) g_sw[i]->backend = w->twin;
+        }
+        int n = g_nsw;
+        g_nsw = 0;
+        return n;
+    }
+    if (g_nsw) vk_stereo_swap(false);
+    static int made;
+    for (int i = 0; i < g_ntwc; i++) {
+        NvnTexture *t = g_twc[i];
+        TexBackend *b = t->backend;
+        if (!b || b->is_twin || b->presented || !b->image) continue;
+        if (!b->twin) {
+            TexBackend *w = calloc(1, sizeof *w);
+            w->scalable = b->scalable;
+            create_image(t, w);
+            w->gpu_owned = true;
+            w->is_twin = true;
+            w->twin = b;
+            w->reg = b->reg;
+            b->twin = w;
+            twin_init_copy(t, b, w);
+            if (made++ < 64)
+                LOG("[stereo] twin %ux%u fmt %#x (image %ux%u%s)\n", t->width, t->height, t->format, w->width, w->height,
+                    w->scalable ? "" : twin_candidate(t, b) ? ", guest-sized AO" : ", a copy's destination");
+        }
+        if (g_nsw == g_cap_sw) { g_cap_sw = g_cap_sw ? g_cap_sw * 2 : 256; g_sw = realloc(g_sw, g_cap_sw * sizeof *g_sw); }
+        g_sw[g_nsw++] = t;
+        t->backend = b->twin;
+    }
+    return g_nsw;
 }
 
 static TexBackend *tex_backend(NvnTexture *t) {
@@ -524,6 +610,7 @@ static TexBackend *tex_backend(NvnTexture *t) {
     create_image(t, b);
     t->backend = b;
     live_add(t, b);
+    if (twin_candidate(t, b)) twc_add(t);  // (stereo: twinned while eye 1 executes, vk_stereo_swap)
     return b;
 }
 
@@ -531,6 +618,14 @@ void backend_texture_destroyed(NvnTexture *t) {
     TexBackend *b = t->backend;
     extern void interp_texture_destroyed(void);
     interp_texture_destroyed();  // (frame interpolation: a texture the frame may have drawn with went away)
+    if (b && b->is_twin) t->backend = b = b->twin;  // (destroyed while eye 1 executes: eye 0's is the texture's)
+    if (b) twc_remove(t);
+    if (b && b->twin) {  // (stereo: its eye-1 twin goes with it)
+        destroy_image(b->twin);
+        free(b->twin->pending_rgba);
+        free(b->twin);
+        b->twin = NULL;
+    }
     if (b) {
         extern void vk_alias_texture_destroyed(NvnTexture *t);  // (exec.c copy aliases: a source's contents handed over)
         vk_alias_texture_destroyed(t);

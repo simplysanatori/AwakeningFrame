@@ -20,6 +20,11 @@ static struct {  // (XR thread; the presenting thread's fields under g_xr.mu)
     uint64_t refreshes, missed, vsyncs, released, gpu_late, reshown, no_render;
     uint64_t waits, wait_ns, skipped;  // presenting thread: xr_set_begin waits for the last set's release
     uint64_t latency_ns;               // set submitted -> released
+    // the pose check: refreshes whose projection layer did not carry the poses its eye images were rendered with
+    // (the executor's eyes only; stub eyes have no render pose), executor sets made with eyes of two latches, and
+    // sets shown for the first time: their latch -> display and located-for -> display times
+    uint64_t pose_ok, pose_bad, eye_split, firsts;
+    int64_t lat_sum_ns, vt_err_sum_ns, vt_err_max_ns;
 } st;
 
 bool xr_active(void) { return g_xr.thread_on && g_xr.session; }
@@ -52,7 +57,7 @@ bool xr_set_begin(uint64_t timeout_ns, uint32_t *hud_index) {
     if (busy || g_xr.stop) return false;
     uint32_t idx;
     if (!xr_chain_acquire(&g_xr.hud[pair], &idx)) return false;
-    memset(&g_xr.building, 0, sizeof g_xr.building);
+    memset(&g_xr.building, 0, sizeof g_xr.building);  // (views: xr_set_views, from the eye images' latches)
     g_xr.building.pair = pair;
     g_xr.building.hud = idx;
     g_xr.in_set = true;
@@ -63,11 +68,12 @@ bool xr_set_begin(uint64_t timeout_ns, uint32_t *hud_index) {
 void xr_set_submit(uint64_t seq) {
     if (!g_xr.in_set) return;
     XrSet *s = &g_xr.building;
-    if (!s->views_ok) xr_latch_views(NULL);
+    if (!s->views_ok) xr_latch_views(NULL);  // (no eye images of the executor: stub eyes or none)
     s->seq = seq;
     s->made_ns = plat_now_ns();
     s->valid = true;
     pthread_mutex_lock(&g_xr.mu);
+    if (s->exec_eyes && s->rid[0] != s->rid[1]) st.eye_split++;
     g_xr.pending = *s;
     pthread_mutex_unlock(&g_xr.mu);
     g_xr.in_set = false;
@@ -96,9 +102,15 @@ void xr_release_completed(void) {
     pthread_mutex_unlock(&g_xr.mu);
 }
 
+static _Atomic int g_gpu_us[2] = {-1, -1};  // (xr_note_eye_gpu) microseconds
+void xr_note_eye_gpu(float ms0, float ms1) {
+    atomic_store(&g_gpu_us[0], ms0 < 0 ? -1 : (int)(ms0 * 1000.0f));
+    atomic_store(&g_gpu_us[1], ms1 < 0 ? -1 : (int)(ms1 * 1000.0f));
+}
+
 // xr_timing.log in the data folder (the previous session's as xr_timing.log.prev): one line per refresh, ms since
-// xrBeginSession on plat_now_ns's clock (docs/af/TOOLING.md; tools/session-report.py reads it). GPU times per eye are
-// not measured here yet (-1).
+// xrBeginSession on plat_now_ns's clock (docs/af/TOOLING.md; tools/session-report.py reads it).
+// GPU ms per eye come from the stereo executor (xr_note_eye_gpu; -1 while unknown).
 static FILE *tlog;
 static void timing_open(void) {
     char p[1024], q[1040];
@@ -123,10 +135,10 @@ static void timing_line(uint64_t f, uint64_t t_wait0, uint64_t t_ret, const XrFr
     struct timespec rt;
     clock_gettime(CLOCK_REALTIME, &rt);
     double b = (double)g_xr.begin_ns;
-    fprintf(tlog, "%02d:%02d:%02d.%03ld xrt f=%llu t=%.3f pdt=%.3f period=%.3f wait=%.3f begin=%.3f end=%.3f gpu0=-1 gpu1=-1 late=%d\n",
+    fprintf(tlog, "%02d:%02d:%02d.%03ld xrt f=%llu t=%.3f pdt=%.3f period=%.3f wait=%.3f begin=%.3f end=%.3f gpu0=%.3f gpu1=%.3f late=%d\n",
             tm.tm_hour, tm.tm_min, tm.tm_sec, rt.tv_nsec / 1000000, (unsigned long long)f, (t_ret - b) / 1e6,
             time_ms(fs->predictedDisplayTime), fs->predictedDisplayPeriod / 1e6, (t_ret - t_wait0) / 1e6, (t_begin - b) / 1e6,
-            (t_end - b) / 1e6, late);
+            (t_end - b) / 1e6, atomic_load(&g_gpu_us[0]) / 1000.0, atomic_load(&g_gpu_us[1]) / 1000.0, late);
 }
 
 static void end_frame(const XrFrameState *fs, bool new_set) {
@@ -138,6 +150,20 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
     if (fs->shouldRender && g_xr.shown_any) {
         const XrSet *s = &g_xr.shown;
         if (s->views_ok && s->has_eye[0] && s->has_eye[1]) {
+            if (s->exec_eyes) {
+                if (xr_layer_matches_render(s)) st.pose_ok++;
+                else st.pose_bad++;
+            }
+            if (new_set && s->latch_ns) {  // (its first refresh: how far ahead the poses were located, the latency)
+                int64_t disp = fs->predictedDisplayTime - atomic_load(&g_xr.xr_minus_plat);
+                int64_t lat = disp - (int64_t)s->latch_ns, err = s->vtime - fs->predictedDisplayTime;
+                st.firsts++, st.lat_sum_ns += lat, st.vt_err_sum_ns += err < 0 ? -err : err;
+                if ((err < 0 ? -err : err) > st.vt_err_max_ns) st.vt_err_max_ns = err < 0 ? -err : err;
+                if (lat > 0 && lat < 250000000ll) {  // (a load's hitch is not the pipeline's latency)
+                    int64_t l = atomic_load(&g_xr.lat_ns);
+                    atomic_store(&g_xr.lat_ns, l ? l + (lat - l) / 8 : lat);
+                }
+            }
             for (int i = 0; i < 2; i++)
                 pv[i] = (XrCompositionLayerProjectionView){
                     .type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW, .pose = s->views[i].pose, .fov = s->views[i].fov,
@@ -151,6 +177,7 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
         const XrChain *hc = &g_xr.hud[s->pair];
         float w = g_xr.quad_width, h = w * (float)hc->h / (float)hc->w;
         quad.space = g_xr.app;
+        quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;  // (the stereo executor's HUD is transparent around the layout)
         quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
         quad.subImage = (XrSwapchainSubImage){hc->sc, {{0, 0}, {(int32_t)hc->w, (int32_t)hc->h}}, 0};
         quad.pose = (XrPosef){.orientation = {0, 0, 0, 1}, .position = {0, 0, -g_xr.quad_dist}};
@@ -172,10 +199,15 @@ static void log_stats(double secs) {
     pthread_mutex_lock(&g_xr.mu);
     LOG("[xr] %.0f s: %llu refreshes at %.0f Hz (%llu missed), %llu vsyncs, %llu sets shown (%.1f ms after submission), "
         "%llu refreshes re-showed a set, %llu waited for the GPU, %llu without layers; presenting: %llu waits (%.2f ms avg), "
-        "%llu frames skipped\n", secs, (unsigned long long)st.refreshes, g_xr.display_hz, (unsigned long long)st.missed,
+        "%llu frames skipped; pose mismatches %llu of %llu refreshes with the executor's eyes, %llu sets with eyes of two frames; "
+        "latch to display %.1f ms (poses located for %.1f ms off it, max %.1f; predict %s %.1f ms)\n", secs, (unsigned long long)st.refreshes,
+        g_xr.display_hz, (unsigned long long)st.missed,
         (unsigned long long)st.vsyncs, (unsigned long long)st.released, st.released ? st.latency_ns / 1e6 / st.released : 0.0,
         (unsigned long long)st.reshown, (unsigned long long)st.gpu_late, (unsigned long long)st.no_render,
-        (unsigned long long)st.waits, st.waits ? st.wait_ns / 1e6 / st.waits : 0.0, (unsigned long long)st.skipped);
+        (unsigned long long)st.waits, st.waits ? st.wait_ns / 1e6 / st.waits : 0.0, (unsigned long long)st.skipped,
+        (unsigned long long)st.pose_bad, (unsigned long long)(st.pose_ok + st.pose_bad), (unsigned long long)st.eye_split,
+        st.firsts ? st.lat_sum_ns / 1e6 / st.firsts : 0.0, st.firsts ? st.vt_err_sum_ns / 1e6 / st.firsts : 0.0, st.vt_err_max_ns / 1e6,
+        g_xr.predict ? "measured" : "vsync", atomic_load(&g_xr.lat_ns) / 1e6);
     memset(&st, 0, sizeof st);
     pthread_mutex_unlock(&g_xr.mu);
 }
@@ -210,6 +242,11 @@ static void *xr_thread(void *arg) {
             continue;
         }
         uint64_t now = plat_now_ns();
+        {   // XrTime - plat_now_ns() (both CLOCK_MONOTONIC on SteamVR and the mock: 0 there; converted when the runtime can)
+            struct timespec ts;
+            if (p_xrConvertTimeToTimespecTimeKHR && XR_SUCCEEDED(p_xrConvertTimeToTimespecTimeKHR(g_xr.inst, fs.predictedDisplayTime, &ts)))
+                atomic_store(&g_xr.xr_minus_plat, fs.predictedDisplayTime - ((int64_t)ts.tv_sec * 1000000000ll + ts.tv_nsec));
+        }
         int64_t period = fs.predictedDisplayPeriod > 0 ? fs.predictedDisplayPeriod : 8333333;
         if (!g_xr.display_hz || g_xr.display_hz * period < 0.99e9 || g_xr.display_hz * period > 1.01e9) g_xr.display_hz = 1e9f / (float)period;
         {   // below 100 Hz (90): the game held in its 30 fps mode (pace.c pace_xr_lock); 120 Hz: 60 as the pacer decides
@@ -260,6 +297,8 @@ static void *xr_thread(void *arg) {
 
 bool xr_thread_start(void) {
     g_xr.stop = false;
+    const char *pe = getenv("LARECOMP_XR_PREDICT");
+    g_xr.predict = !(pe && !strcmp(pe, "vsync"));
     if (pthread_create(&g_xr.thread, NULL, xr_thread, NULL) != 0) return false;
     pthread_setname_np(g_xr.thread, "xr");
     g_xr.thread_on = true;

@@ -113,12 +113,27 @@ typedef struct TexBackend {
     int tp;              // runtime/nvn/texpatch.c: 0 not checked yet, -1 none, else known UI texture + 1
     uint32_t tp_gen;     // texpatch_generation() it was last uploaded with
     int reg;  // slot in textures.c's live list + 1 (a reboot destroys them all)
+    // (stereo executor, VR mode) the other eye's image of a twinned render target (textures.c vk_stereo_swap): the
+    // texture's backend is eye 0's except while eye 1 executes; is_twin marks eye 1's
+    struct TexBackend *twin;
+    bool is_twin;
     // (g_vk.lean_usage) the only formats views of this image may have: nview_fmt 0 = any compatible one
     VkFormat view_fmt[2];
     uint8_t nview_fmt;
 } TexBackend;
 
 TexBackend *vk_tex(NvnTexture *t, bool for_render);  // backend image (uploads CPU contents unless for_render)
+// (stereo executor) eye1: every twinned render target's backend becomes its eye-1 twin (made on first use); !eye1:
+// back to eye 0's. Twinned: 16:9 render targets (the scalable ones) and the guest-sized ambient occlusion targets,
+// except presented (window) images. Returns how many were swapped.
+int vk_stereo_swap(bool eye1);
+// (stereo) eye 0 wrote shared texture t from a twin (a copy): t is twinned from the next eye-1 run on, its twin filled
+// with eye 0's image first. false: twinned already, or not a candidate (presented, no image).
+bool vk_stereo_twin_add(NvnTexture *t);
+static inline bool vk_tex_twinned(const NvnTexture *t) {  // its backend has (or is) an eye twin
+    const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
+    return b && (b->is_twin || b->twin);
+}
 VkFormat vk_format(uint32_t nvn_format);
 VkFormat vk_image_format(uint32_t nvn_format, VkImageAspectFlags *aspect);  // (shader preparation)
 void vk_pipeline_cache_save(void);

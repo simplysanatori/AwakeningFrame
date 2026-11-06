@@ -16,6 +16,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+struct CamLatch;
+
 extern volatile int g_cam_on;    // a mode, a schedule or the log is set: the latch / rewrite hooks run
 extern volatile int g_cam_cull;  // a culling override is set
 extern volatile int g_cam_log;   // LARECOMP_FREECAM_LOG
@@ -29,6 +31,7 @@ void cam_override_frame(uint64_t frame);
 // Published by widescreen.c each frame while the probe is on: Link's position (game units), the camera zone's box.
 void cam_override_set_link(const float pos[3]);
 void cam_override_set_zone(const float lo[3], const float hi[3]);
+bool cam_override_zone(float lo[3], float hi[3]);  // the latest zone box (false: none)
 // The frame's main camera: called per draw with the vertex stage's slot-5 range (exec.c, next to
 // widescreen_scene_ubo); the first perspective 320-byte buffer of a frame is latched (address, original matrices).
 void cam_override_latch(const float *u, uint64_t addr, uint64_t size, uint64_t frame);
@@ -38,6 +41,9 @@ bool cam_override_ubo(int stage, uint64_t addr, uint64_t size, void *out320);
 // Any other bound buffer (48..4096 bytes): a copy with the camera's matrices (and eye position) found in it replaced by the
 // substitute camera's; false (nothing written) when nothing matched or the probe is off / identity / passthrough.
 bool cam_override_patch(const void *guest, uint64_t size, void *out);
+// Changes whenever the substitutes may change (a new latch, a new configuration): a substitute made for a buffer stays
+// right while this, the eye and the buffer's bytes stay the same.
+uint32_t cam_override_epoch(void);
 
 // Per-draw probe info (LARECOMP_FREECAM_LOG): filled by exec.c on every draw while logging.
 typedef struct {
@@ -49,6 +55,22 @@ typedef struct {
 } CamDrawInfo;
 void cam_override_draw(const CamDrawInfo *d);
 
+// ---- stereo (AwakeningFrame lane 4, runtime/nvn/vulkan/stereo.c): one substitute camera per eye
+// fn is called once per latched frame (the render thread, at the frame's first main-camera draw) with the game's camera
+// and the screen-centre pivot on the floor; it fills each eye's view and projection (game units, the game's conventions:
+// row-major, clip = P * V * x, view down -z) and returns false when there are none (no head pose yet: the game's own
+// camera is kept). identity: both eyes get the game's own bytes (LARECOMP_STEREO_TEST=identity: eye 0 == eye 1 == flat).
+// Turns the probe's hooks on; widened culling (3.2:1.5) unless LARECOMP_FREECAM_CULL says otherwise.
+typedef bool (*CamEyeFn)(const struct CamLatch *l, const float pivot[3], float V[2][16], float P[2][16]);
+void cam_override_stereo(CamEyeFn fn, bool identity);
+// (stereo.c, once per latch) where the table's centre sits in the world (the followed anchor, not the raw pivot)
+void cam_override_table_anchor(const float a[3]);
+void cam_override_set_eye(int eye);         // the eye being executed (0 / 1)
+bool cam_override_eye_ready(void);          // the latched frame has eye cameras (substitution is on for it)
+// Per eye the 320 bytes get floats 0-47 (view, projection, view-projection), 48-63 (the rotation-only block: rows
+// right, back, down as the game has them), 64-67 (back) and 68-71 (eye position) rewritten: every 4-float group of
+// 48-79 whose xyz is +-right / +-up / +-back / the eye position of the game's camera at the latch.
+
 // widescreen.c culling hooks: 0 / 1 when no override.
 float cam_override_cull_aspect(void);   // absolute culling aspect, or 0
 float cam_override_fovy_scale(void);    // multiplier for rt_fovy's angle, or 1
@@ -59,7 +81,7 @@ typedef struct {
     float eye[3], fwd[3], right[3], up[3];
     bool ok;
 } CamRef;
-typedef enum { CAM_OFF, CAM_IDENTITY, CAM_PASSTHROUGH, CAM_ORBIT, CAM_SPIN } CamKind;
+typedef enum { CAM_OFF, CAM_IDENTITY, CAM_PASSTHROUGH, CAM_ORBIT, CAM_SPIN, CAM_STEREO } CamKind;
 typedef struct {
     CamKind kind;
     float yaw, pitch, dist, fovy, spin;  // degrees, units; fovy 0 = the game's; spin: degrees / frame
@@ -68,7 +90,7 @@ typedef struct {
     int fix48;
     float cull_aspect, cull_fovy;        // cull_aspect 0 = stock
 } CamCfg;
-typedef struct {                        // the frame's main camera
+typedef struct CamLatch {               // the frame's main camera
     bool valid;
     uint64_t addr, frame;
     float orig[80];
@@ -77,6 +99,7 @@ typedef struct {                        // the frame's main camera
     int vp_fused;                       // the game's VP product matched fmaf() (1), plain (0), neither (-1)
     uint8_t blk[2], grp[8];             // what floats 48-63 / 64-79 (16-float blocks) and each 4-float group look like
     float near_, far_, fovy_game;
+    int8_t axis[8];                     // (stereo) floats 48-79 by 4-float group: +-1 right, +-2 up, +-3 back (-forward), 4 eye
 } CamLatch;
 void cam_mat_mul(float *out, const float *a, const float *b, bool fused);
 bool cam_mat_inv(float *out, const float *m);

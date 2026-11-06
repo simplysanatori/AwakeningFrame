@@ -234,32 +234,124 @@ bool xr_eye_target(int eye, XrEyeTarget *out) {
 
 bool xr_eye_used(int eye) { return g_xr.in_set && eye >= 0 && eye < 2 && g_xr.building.has_eye[eye]; }
 
-bool xr_latch_views(XrEyeView out[2]) {
-    if (!g_xr.in_set) return false;
-    XrSet *s = &g_xr.building;
-    if (!s->views_ok) {
-        int64_t t = atomic_load(&g_xr.target_time);
-        if (!t) return false;
-        pthread_mutex_lock(&g_xr.mu);  // (the app space changes on the XR thread)
-        XrSpace space = g_xr.app;
-        XrViewLocateInfo li = {.type = XR_TYPE_VIEW_LOCATE_INFO, .viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
-                               .displayTime = t, .space = space};
-        XrViewState vs = {.type = XR_TYPE_VIEW_STATE};
-        s->views[0] = s->views[1] = (XrView){.type = XR_TYPE_VIEW};
-        uint32_t n = 0;
-        XrResult r = p_xrLocateViews(g_xr.session, &li, &vs, 2, &n, s->views);
-        pthread_mutex_unlock(&g_xr.mu);
-        const XrViewStateFlags need = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT;
-        if (XR_FAILED(r) || n != 2 || (vs.viewStateFlags & need) != need) return false;
-        s->space = space;
-        s->views_ok = true;
-    }
+// The display time to locate a frame's views for. Measured (default): now plus the measured time from a latch to the
+// first display of its set (the eyes are shown then, so the poses they were rendered with are the head's then, and the
+// compositor's reprojection has least to correct); until it is measured, or LARECOMP_XR_PREDICT=vsync: the latest
+// vsync's display time (two refreshes after it).
+static XrTime predict_time(void) {
+    int64_t t = atomic_load(&g_xr.target_time), lat = atomic_load(&g_xr.lat_ns);
+    if (!t || !g_xr.predict || !lat) return t;
+    int64_t now = (int64_t)plat_now_ns() + atomic_load(&g_xr.xr_minus_plat);
+    int64_t period = g_xr.display_hz > 0 ? (int64_t)(1e9f / g_xr.display_hz) : 11111111;
+    int64_t p = now + lat;
+    if (p < now + period) p = now + period;
+    if (p > now + 150000000ll) p = now + 150000000ll;
+    return p;
+}
+
+// One xrLocateViews for both eyes at display time t, in the app space.
+static bool locate_views(XrTime t, XrView views[2], XrSpace *space_out) {
+    if (!t || !g_xr.session) return false;
+    pthread_mutex_lock(&g_xr.mu);  // (the app space changes on the XR thread)
+    XrSpace space = g_xr.app;
+    XrViewLocateInfo li = {.type = XR_TYPE_VIEW_LOCATE_INFO, .viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                           .displayTime = t, .space = space};
+    XrViewState vs = {.type = XR_TYPE_VIEW_STATE};
+    views[0] = views[1] = (XrView){.type = XR_TYPE_VIEW};
+    uint32_t n = 0;
+    XrResult r = p_xrLocateViews(g_xr.session, &li, &vs, 2, &n, views);
+    pthread_mutex_unlock(&g_xr.mu);
+    const XrViewStateFlags need = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT;
+    if (XR_FAILED(r) || n != 2 || (vs.viewStateFlags & need) != need) return false;
+    *space_out = space;
+    return true;
+}
+
+static void views_out(const XrView v2[2], XrEyeView out[2]) {
     for (int i = 0; out && i < 2; i++) {
-        const XrView *v = &s->views[i];
+        const XrView *v = &v2[i];
         out[i] = (XrEyeView){{v->pose.orientation.x, v->pose.orientation.y, v->pose.orientation.z, v->pose.orientation.w},
                              {v->pose.position.x, v->pose.position.y, v->pose.position.z},
                              {v->fov.angleLeft, v->fov.angleRight, v->fov.angleUp, v->fov.angleDown}};
     }
+}
+
+bool xr_latch_views(XrEyeView out[2]) {
+    if (!g_xr.in_set) return false;
+    XrSet *s = &g_xr.building;
+    if (!s->views_ok) {
+        XrTime t = predict_time();
+        if (!locate_views(t, s->views, &s->space)) return false;
+        s->views_ok = true, s->vtime = t, s->latch_ns = plat_now_ns();
+    }
+    views_out(s->views, out);
+    return true;
+}
+
+bool xr_latch_views_id(XrEyeView out[2], uint64_t *id) {
+    if (!xr_active()) return false;
+    XrView v[2];
+    XrSpace space;
+    XrTime t = predict_time();
+    if (!locate_views(t, v, &space)) return false;
+    uint64_t n = ++g_xr.latch_next;
+    XrLatch *l = &g_xr.latch[n % XR_LATCHES];
+    pthread_mutex_lock(&g_xr.mu);  // (the XR thread reads a set's latch time; the ring itself is this thread's)
+    *l = (XrLatch){n, {v[0], v[1]}, space, t, plat_now_ns()};
+    pthread_mutex_unlock(&g_xr.mu);
+    views_out(v, out);
+    if (id) *id = n;
+    return true;
+}
+
+static int pose_differs(const XrView *v, const XrEyeView *e) {
+    XrEyeView c[2];
+    XrView two[2] = {*v, *v};
+    views_out(two, c);
+    return memcmp(c[0].orientation, e->orientation, sizeof e->orientation) || memcmp(c[0].position, e->position, sizeof e->position) ||
+           memcmp(c[0].fov, e->fov, sizeof e->fov);
+}
+
+int xr_set_views(const uint64_t id[2], const XrEyeView rendered[2]) {
+    if (!g_xr.in_set) return -1;
+    XrSet *s = &g_xr.building;
+    s->exec_eyes = true;
+    const XrLatch *l[2];
+    XrLatch fb;  // (gone from the ring - frames with camera draws but no composite, a load - : the poses as rendered, in
+                 // the app space now; right unless the view was recentred since)
+    for (int i = 0; i < 2; i++) {
+        l[i] = &g_xr.latch[id[i] % XR_LATCHES];
+        if (!id[i]) return -1;
+        if (l[i]->id != id[i]) {
+            fb = (XrLatch){id[i], {{.type = XR_TYPE_VIEW}, {.type = XR_TYPE_VIEW}}, g_xr.app, 0, 0};
+            for (int e = 0; e < 2; e++) {
+                const XrEyeView *r = &rendered[e];
+                fb.views[e].pose = (XrPosef){{r->orientation[0], r->orientation[1], r->orientation[2], r->orientation[3]},
+                                             {r->position[0], r->position[1], r->position[2]}};
+                fb.views[e].fov = (XrFovf){r->fov[0], r->fov[1], r->fov[2], r->fov[3]};
+            }
+            l[i] = &fb;
+        }
+    }
+    s->views[0] = l[0]->views[0], s->views[1] = l[1]->views[1];
+    s->space = l[0]->space;
+    s->vtime = l[0]->time, s->latch_ns = l[0]->made_ns;
+    s->views_ok = true;
+    s->rendered = true;
+    memcpy(s->rview, rendered, sizeof s->rview);
+    s->rid[0] = id[0], s->rid[1] = id[1];
+    int bad = 0;
+    for (int i = 0; i < 2; i++) bad |= pose_differs(&s->views[i], &rendered[i]) << i;
+    return (id[0] != id[1] || l[0]->space != l[1]->space ? 4 : 0) | bad;
+}
+
+bool xr_layer_matches_render(const XrSet *s) {
+    return s->rendered && !pose_differs(&s->views[0], &s->rview[0]) && !pose_differs(&s->views[1], &s->rview[1]) && s->rid[0] == s->rid[1];
+}
+
+bool xr_eye_size(uint32_t *w, uint32_t *h) {
+    if (!g_xr.eyes[0][0].sc) return false;
+    *w = g_xr.eyes[0][0].w, *h = g_xr.eyes[0][0].h;
     return true;
 }
 
