@@ -30,6 +30,7 @@
 #include "../weather.h"
 #include "../cam_override.h"
 #include "stereo.h"
+#include "edge.h"
 #include "vr_diet.h"
 #include "foveation.h"
 
@@ -1134,10 +1135,11 @@ void renderer_slow_counters(uint64_t *submits, uint64_t *gpu_wait_ns, uint64_t *
 // (shader code addresses and content hashes, as in "[shader] slow build" / shader_variants.txt, and how long they
 // have been skipped without a break). "building" for tens of seconds is a build that never finishes.
 enum { SK_NO_PROGRAM, SK_NO_STAGES, SK_PROG_BUILDING, SK_PROG_FAILED, SK_PIPE_BUILDING, SK_PIPE_FAILED, SK_CS_BUILDING,
-       SK_CS_FAILED, SK_TOPOLOGY, SK_DEBUG_SKIP, SK_HIDDEN, SK_DIET, SK_N };
+       SK_CS_FAILED, SK_TOPOLOGY, SK_DEBUG_SKIP, SK_HIDDEN, SK_DIET, SK_RING, SK_N };
 static const char *const skip_names[SK_N] = {
     "no program", "program missing a stage", "program building", "program failed", "pipeline building", "pipeline failed",
-    "compute building", "compute failed", "topology", "debug skip list", "hidden on purpose", "VR pass diet"};
+    "compute building", "compute failed", "topology", "debug skip list", "hidden on purpose", "VR pass diet",
+    "ring draw (colour only)"};
 static int log_skips = -1;  // (-1: not read yet: the first skip reads it)
 static uint64_t skip_n[SK_N];
 #define SKIP_TOP 32
@@ -6781,6 +6783,195 @@ static void draw(CmdRec *r, bool indexed) {
     if (wx_composite && g_eye <= 0) weather_encode();
     PROF_ADD(prof_draw);
 }
+// ---- (lane ring; vr_cull.h, LARECOMP_VR_RING) in stereo, the draws outside the table fit's footprint ("ring" draws) go
+// into the eyes' colour passes only: not into the shared passes (the shadow casters; LARECOMP_VR_RING_CAST keeps the
+// nearer ones casting) nor the eyes' depth-only pre-pass. In the colour pass their EQUAL against the pre-pass's depth
+// becomes LESS_OR_EQUAL with depth write, which is right in any draw order. A draw is ring when its world box (vertex box
+// through its model matrix: ring_world_box) misses the footprint grown by the margin. Instanced draws, blended draws in
+// the colour pass, draws without a level / character block (HUD, post, effects) stay core.
+// LARECOMP_VR_RING_LOG=1: per pass kind, the draws of each class every 300 frames ("[ring]");
+// LARECOMP_VR_RING_DUMP=<frame>: eye 0's draws of that frame with their blocks, class and boxes.
+static bool g_ring_leq;  // this draw: a ring draw in an eye's colour pass (draw_'s depth state)
+static uint64_t ring_ns[2], ring_boxes;  // (LARECOMP_VR_RING_LOG) this frame: ring_route's time per eye, vertex boxes made
+static bool ring_matrix_at(const float *m, float pos[3], float *scale) {  // 3x4 rows: a rotation-scale and a translation
+    float n[3];
+    for (int i = 0; i < 3; i++) n[i] = sqrtf(m[i * 4] * m[i * 4] + m[i * 4 + 1] * m[i * 4 + 1] + m[i * 4 + 2] * m[i * 4 + 2]);
+    for (int i = 0; i < 3; i++) if (!(n[i] > 0.01f && n[i] < 100.0f) || !(fabsf(m[i * 4 + 3]) < 4096.0f)) return false;
+    if (fmaxf(n[0], fmaxf(n[1], n[2])) > 4 * fminf(n[0], fminf(n[1], n[2]))) return false;
+    for (int i = 0; i < 3; i++) {
+        int j = (i + 1) % 3;
+        float d = m[i * 4] * m[j * 4] + m[i * 4 + 1] * m[j * 4 + 1] + m[i * 4 + 2] * m[j * 4 + 2];
+        if (fabsf(d) > 0.05f * n[i] * n[j]) return false;
+    }
+    pos[0] = m[3], pos[1] = m[7], pos[2] = m[11], *scale = fmaxf(n[0], fmaxf(n[1], n[2]));
+    return true;
+}
+static float ring_half(uint16_t h) {
+    uint32_t e = (h >> 10) & 31, m = h & 1023, sg = (uint32_t)(h >> 15) << 31, u;
+    if (!e) return (h >> 15 ? -1.0f : 1.0f) * ldexpf((float)m, -24);
+    u = sg | (e == 31 ? 0x7F800000u | m << 13 : (e + 112) << 23 | m << 13);
+    float f;
+    memcpy(&f, &u, 4);
+    return f;
+}
+// the object-space box of the vertices the draw uses (vertex attribute 0: float3/4 or half4), memoised by geometry
+// (index buffer, count, vertex buffer, base vertex: static meshes keep theirs); false: unknown layout
+static bool ring_bounds(CmdRec *r, bool indexed, float lo[3], float hi[3]) {
+    if (st.nattrib < 1) return false;
+    uint32_t a = st.attrib[0], fmt = a & 0xFF, sm = (a >> 8) & 0x1F, off = a >> 13;
+    if (sm >= 16 || sm >= (uint32_t)st.nstream || !st.vbuf[sm].addr || (fmt != 0x22 && fmt != 0x2E && fmt != 0x29)) return false;
+    uint32_t stride = st.stream[sm][0], vsz = fmt == 0x29 ? 6 : 12;
+    if (!stride || stride > 256) return false;
+    uint64_t vb = st.vbuf[sm].addr, vbs = st.vbuf[sm].size, nv = vbs / stride;
+    uint32_t count = (uint32_t)r->x[2], itype = indexed ? (uint32_t)r->x[1] : 0;
+    uint64_t ia = indexed ? r->x[3] : 0;
+    int64_t base = indexed ? (int32_t)r->x[4] : (int64_t)r->x[1];
+    enum { BC = 8192 };
+    static struct { uint64_t vb, ia, key; float lo[3], hi[3]; bool ok; } bc[BC];
+    uint64_t key = ((uint64_t)count << 32 | (uint32_t)base) ^ (uint64_t)fmt << 56 ^ (uint64_t)stride << 48 ^ off;
+    uint64_t h = (vb * 0x9E3779B97F4A7C15ull) ^ (ia * 0xBF58476D1CE4E5B9ull) ^ key;
+    uint32_t k = (uint32_t)(h ^ h >> 31) & (BC - 1);
+    if (bc[k].vb == vb && bc[k].ia == ia && bc[k].key == key) {
+        if (bc[k].ok) memcpy(lo, bc[k].lo, 12), memcpy(hi, bc[k].hi, 12);
+        return bc[k].ok;
+    }
+    ring_boxes++;
+    float l[3] = {1e30f, 1e30f, 1e30f}, u[3] = {-1e30f, -1e30f, -1e30f};
+    uint32_t isz = itype == 1 ? 2 : itype == 2 ? 4 : 1, restart = st.prim_restart ? st.restart_index : 0xFFFFFFFFu;
+    int nin = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        int64_t v = !indexed ? base + i : (int64_t)(isz == 2 ? ((const uint16_t *)(uintptr_t)ia)[i] : isz == 4 ? ((const uint32_t *)(uintptr_t)ia)[i]
+                                                                   : ((const uint8_t *)(uintptr_t)ia)[i]);
+        if (indexed && (uint32_t)v == (isz == 2 ? (restart & 0xFFFF) : isz == 1 ? (restart & 0xFF) : restart)) continue;
+        if (indexed) v += base;
+        if (v < 0 || (uint64_t)v >= nv || (uint64_t)v * stride + off + vsz > vbs) continue;
+        const uint8_t *p = (const uint8_t *)(uintptr_t)(vb + (uint64_t)v * stride + off);
+        float q[3];
+        if (fmt == 0x29) for (int c = 0; c < 3; c++) { uint16_t hv; memcpy(&hv, p + c * 2, 2); q[c] = ring_half(hv); }
+        else memcpy(q, p, 12);
+        if (!(fabsf(q[0]) < 1e5f && fabsf(q[1]) < 1e5f && fabsf(q[2]) < 1e5f)) continue;
+        for (int c = 0; c < 3; c++) l[c] = fminf(l[c], q[c]), u[c] = fmaxf(u[c], q[c]);
+        nin++;
+    }
+    bool ok = nin > 0;
+    bc[k].vb = vb, bc[k].ia = ia, bc[k].key = key, bc[k].ok = ok;
+    memcpy(bc[k].lo, l, 12), memcpy(bc[k].hi, u, 12);
+    if (ok) memcpy(lo, l, 12), memcpy(hi, u, 12);
+    return ok;
+}
+// the draw's world box (x, z; y too): its vertex box through its model matrix. Level draws (vertex block 4 of 912 / 928
+// bytes) carry the model matrix in block 2 (3x4 rows, the room's offset); characters and props (1056 / 1072) a zero
+// translation there and, as u32 12, the index of their matrix in block 3 (the world-space bone palette)
+static bool ring_world_box(CmdRec *r, bool indexed, float wlo[3], float whi[3]) {
+    uint64_t s4 = st.ubuf[0][4].addr ? st.ubuf[0][4].size : 0;
+    if (!(s4 == 912 || s4 == 928 || s4 == 1056 || s4 == 1072) || !st.ubuf[0][2].addr || st.ubuf[0][2].size < 64) return false;
+    const float *m2 = (const float *)(uintptr_t)st.ubuf[0][2].addr, *m = NULL;
+    float pos[3], sc;
+    if (!ring_matrix_at(m2, pos, &sc)) return false;
+    if (s4 == 912 || s4 == 928 || pos[0] != 0 || pos[2] != 0) m = m2;
+    else {
+        uint32_t idx;
+        memcpy(&idx, m2 + 12, 4);
+        if (st.ubuf[0][3].addr && (uint64_t)idx * 48 + 48 <= st.ubuf[0][3].size &&
+            ring_matrix_at((const float *)(uintptr_t)st.ubuf[0][3].addr + idx * 12, pos, &sc))
+            m = (const float *)(uintptr_t)st.ubuf[0][3].addr + idx * 12;
+    }
+    float lo[3], hi[3];
+    if (!m || !ring_bounds(r, indexed, lo, hi)) return false;
+    for (int i = 0; i < 3; i++) {
+        float c = m[i * 4 + 3], e = 0;
+        for (int k = 0; k < 3; k++) c += m[i * 4 + k] * (lo[k] + hi[k]) * 0.5f, e += fabsf(m[i * 4 + k]) * (hi[k] - lo[k]) * 0.5f;
+        wlo[i] = c - e, whi[i] = c + e;
+    }
+    return true;
+}
+static int ring_class(CmdRec *r, bool indexed, int kind) {  // 0 core, 1 ring, 2 ring that casts
+    extern int vr_ring_class(const float lo[3], const float hi[3], uint64_t frame);
+    uint64_t inst = indexed ? r->x[6] : r->x[4];
+    if (inst > 1 || !st.ubuf[0][2].addr) return 0;  // (instanced: grass and the like stay core)
+    if (kind == 2 && (st.color_state[0] & 1)) return 0;  // (blended: decals, effects)
+    enum { RC = 4096 };
+    static struct { uint64_t key, frame; int8_t c; } rc[RC];
+    uint64_t frame = renderer_exec_frame();
+    uint64_t key = ((st.ubuf[0][2].addr * 0x9E3779B97F4A7C15ull) ^ (r->x[3] * 0xBF58476D1CE4E5B9ull) ^ st.vbuf[0].addr ^ (r->x[2] << 40)) | 1;
+    uint32_t k = (uint32_t)(key ^ key >> 29) & (RC - 1);
+    if (rc[k].key == key && rc[k].frame == frame) return rc[k].c;
+    float lo[3], hi[3];
+    int c = ring_world_box(r, indexed, lo, hi) ? vr_ring_class(lo, hi, frame) : 0;
+    rc[k].key = key, rc[k].frame = frame, rc[k].c = (int8_t)c;
+    return c;
+}
+static void ring_dump(CmdRec *r, bool indexed, int kind, int c) {  // (LARECOMP_VR_RING_DUMP=<frame>, eye 0)
+    static int64_t at = -2;
+    static int n;
+    if (at == -2) at = getenv("LARECOMP_VR_RING_DUMP") ? atoll(getenv("LARECOMP_VR_RING_DUMP")) : -1;
+    if (at < 0 || g_eye != 0 || renderer_exec_frame() != (uint64_t)at || n >= 3000) return;
+    if (!n++) {
+        extern bool vr_cull_core_box(float lo[3], float hi[3]);
+        float lo[3] = {0}, hi[3] = {0};
+        bool ok = vr_cull_core_box(lo, hi);
+        LOG("[ringdump] frame %lld core %d x %.2f..%.2f z %.2f..%.2f\n", (long long)at, ok, lo[0], hi[0], lo[2], hi[2]);
+    }
+    char b[512];
+    int l = snprintf(b, sizeof b, "[ringdump] kind %d class %d fs %016llx inst %llu n %llu blend %d depth %d/%d/%d |", kind, c,
+                     (unsigned long long)g_cur_fs_hash, (unsigned long long)(indexed ? r->x[6] : r->x[4]), (unsigned long long)r->x[2],
+                     st.color_state[0] & 1, st.ds[0], st.ds[1], st.ds[2]);
+    for (int i = 1; i < 5 && l < (int)sizeof b - 48; i++)
+        if (st.ubuf[0][i].addr) l += snprintf(b + l, sizeof b - l, " s%d:%llu", i, (unsigned long long)st.ubuf[0][i].size);
+    float lo[3], hi[3];
+    if (ring_bounds(r, indexed, lo, hi) && l < (int)sizeof b - 96)
+        l += snprintf(b + l, sizeof b - l, " | local %.1f,%.1f,%.1f..%.1f,%.1f,%.1f", lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
+    if (ring_world_box(r, indexed, lo, hi) && l < (int)sizeof b - 64)
+        l += snprintf(b + l, sizeof b - l, " world x %.1f..%.1f z %.1f..%.1f", lo[0], hi[0], lo[2], hi[2]);
+    LOG("%s\n", b);
+}
+static bool ring_route_(CmdRec *r, bool indexed, int log);
+static bool ring_route(CmdRec *r, bool indexed) {  // true: skip this draw
+    extern bool vr_ring_on(void);
+    g_ring_leq = false;
+    static int on = -1, log = 0;
+    if (on < 0) on = vr_ring_on(), log = getenv("LARECOMP_VR_RING_LOG") != NULL;
+    if (!on || g_eye < 0) return false;
+    if (!log) return ring_route_(r, indexed, 0);
+    uint64_t t0 = SDL_GetTicksNS();
+    bool skip = ring_route_(r, indexed, 1);
+    ring_ns[g_eye] += SDL_GetTicksNS() - t0;
+    return skip;
+}
+static bool ring_route_(CmdRec *r, bool indexed, int log) {
+    bool tw = false;
+    int nc = 0;
+    for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) nc++, tw |= vk_tex_twinned(st.rt.color[i]);
+    if (st.rt.depth) tw |= vk_tex_twinned(st.rt.depth);
+    int kind = !tw ? 0 : !nc ? 1 : 2;  // shared / an eye's depth-only pass / an eye's colour pass
+    int c = ring_class(r, indexed, kind);
+    bool skip = (kind == 0 && c == 1) || (kind == 1 && c >= 1);
+    static int lowres = -1;  // LARECOMP_VR_RING_LOWRES=0: ring draws stay out of the eyes' smaller colour passes too
+    if (lowres < 0) lowres = !getenv("LARECOMP_VR_RING_LOWRES") || atoi(getenv("LARECOMP_VR_RING_LOWRES")) != 0;
+    if (!lowres && kind == 2 && c >= 1 && wx_scene_w && st.rt.color[0] && st.rt.color[0]->width * 4 < wx_scene_w * 3) skip = true;
+    g_ring_leq = kind == 2 && c >= 1;
+    ring_dump(r, indexed, kind, c);
+    if (log) {
+        static uint64_t hist[2][3][3][2], hframe;
+        uint64_t f = renderer_exec_frame();
+        if (f != hframe) {
+            if (hframe % 300 == 0) {
+                LOG("[ring] frame %llu: classification %.3f + %.3f ms (eye 0 + 1), %llu vertex boxes made; (kind: class core/ring/cast, "
+                    "drawn+skipped):", (unsigned long long)hframe, ring_ns[0] / 1e6, ring_ns[1] / 1e6, (unsigned long long)ring_boxes);
+                static const char *kn[3] = {"shared", "eye depth-only", "eye colour"};
+                for (int e = 0; e < 2; e++)
+                    for (int kk = 0; kk < 3; kk++)
+                        LOG(" | e%d %s %llu/%llu+%llu/%llu+%llu", e, kn[kk], (unsigned long long)hist[e][kk][0][0],
+                            (unsigned long long)hist[e][kk][1][0], (unsigned long long)hist[e][kk][1][1],
+                            (unsigned long long)hist[e][kk][2][0], (unsigned long long)hist[e][kk][2][1]);
+                LOG("\n");
+            }
+            memset(hist, 0, sizeof hist), hframe = f, ring_ns[0] = ring_ns[1] = ring_boxes = 0;
+        }
+        hist[g_eye][kind][c][skip]++;
+    }
+    return skip;
+}
 static uint64_t prof_tp_;
 static void diet_copy(NvnTexture *src, NvnTexture *dst);
 // (VR pass diet, vr_diet.c: the tilt-shift) the draw's verdict: true = left out; else it may draw into another target
@@ -6951,11 +7142,12 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     if (g_debug_frame) debug_draw(pr, r, indexed);
     snow_cover_check(r, indexed, pr);  // (the snow on the ground: its stencil marks, the cover after the opaque draws)
+    if (ring_route(r, indexed)) { SKIP(SK_RING); return; }  // (lane ring: a ring draw outside the eyes' colour passes)
     if (ct_on()) ct_draw(pr, "draw");
     alias_draw_check();
     resolve_feedback(pr);
     snap_reason = "draw-depthwrite";
-    if (st.rt.depth && st.ds[0] && st.ds[1]) snapshots_invalidate(st.rt.depth);
+    if (st.rt.depth && st.ds[0] && (st.ds[1] || g_ring_leq)) snapshots_invalidate(st.rt.depth);
     snap_reason = "draw-colorwrite";
     for (int i = 0; i < st.rt.ncolor; i++)
         if (st.rt.color[i] && ((st.channel_mask >> (i * 4)) & 0xF)) snapshots_invalidate(st.rt.color[i]);
@@ -7051,9 +7243,11 @@ static void draw_(CmdRec *r, bool indexed) {
     if (nodt < 0) nodt = getenv("LARECOMP_NO_DEPTH_TEST") != NULL;
     bool dt = st.ds[0] && !nodt && pass_depth;
     if (ss_need(SS_DT, ss.dt == (VkBool32)dt)) { ss.dt = dt; rec_CmdSetDepthTestEnable(cb, dt); }
-    VkBool32 dw = dt && st.ds[1];
-    if (ss_need(SS_DW, ss.dw == dw)) { ss.dw = dw; rec_CmdSetDepthWriteEnable(cb, dw); }
     VkCompareOp dop = dt ? compare_fn(st.ds[2]) : VK_COMPARE_OP_ALWAYS;
+    bool ring_leq = g_ring_leq && dop == VK_COMPARE_OP_EQUAL;  // (lane ring: no pre-pass depth of its own: tests and writes)
+    if (ring_leq) dop = VK_COMPARE_OP_LESS_OR_EQUAL;
+    VkBool32 dw = dt && (st.ds[1] || ring_leq);
+    if (ss_need(SS_DW, ss.dw == dw)) { ss.dw = dw; rec_CmdSetDepthWriteEnable(cb, dw); }
     // EQUAL against a depth pre-pass written by a different vertex shader (foliage, trees) needs both shaders to land
     // on identical depths. They do since the translator stopped using unpackHalf2x16 (NVIDIA ran the half math after
     // it in fp16, differently per shader: black slashes in foliage). LARECOMP_VK_EQUAL_TOL=1 brings back the old
@@ -8922,6 +9116,8 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
         VkExtent2D ext;
         if (!eye_target(eye, &img, &view, &fmt, &ext)) continue;
         vk_full_barrier(cb);
+        float fx = b->scalable && b->ax > 0 ? b->sx / b->ax : 1, fy = b->scalable && b->ay > 0 ? b->sy / b->ay : 1;
+        if (edge_eye(cb, eye, view, fmt, ext.width, ext.height)) { drawn |= 1 << eye; continue; }  // (the edge pass instead of the present draw)
         VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = view,
                                         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                         .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
@@ -8930,7 +9126,6 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
         rec_CmdBeginRendering(cb, &ri);
         VkRect2D sc = {{0, 0}, ext};
         rec_CmdSetScissor(cb, 0, 1, &sc);
-        float fx = b->scalable && b->ax > 0 ? b->sx / b->ax : 1, fy = b->scalable && b->ay > 0 ? b->sy / b->ay : 1;
         VkPipeline p = present_pipeline_ex(fmt, false);
         VkDescriptorSet ds = vk_alloc_set(present_set_layout);
         VkDescriptorImageInfo ii = {vk_default_sampler(true), raw_view(b), VK_IMAGE_LAYOUT_GENERAL};

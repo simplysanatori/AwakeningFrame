@@ -36,6 +36,9 @@ There are three limits, from the nearest to the farthest:
 |---|---|---|
 | `LARECOMP_VR_CULL_EXTENT=<x>,<z>` | the VR culling rectangle becomes the world-axis box of these half-extents about the table centre; `52,42` covers the resident 7 x 7 | off (the 1.2 x 1 table fit) |
 | `LARECOMP_VR_CULL_TMAX=<tan>` | the widest half-angle tangent the fit may ask for | 4 (76 degrees) |
+| `LARECOMP_VR_RING=<margin>` | ring draws (below): draws whose world box misses the table fit's footprint grown by this go into the eye colour passes only | off |
+| `LARECOMP_VR_RING_CAST=<margin>` | ring draws within this of the footprint still cast shadows | 0 (none) |
+| `LARECOMP_VR_RING_LOWRES=0` | ring draws also stay out of the eyes' smaller colour passes (the 704 x 396 one) | 1 (drawn there) |
 | `LARECOMP_FREECAM_CULL=<aspect>:<fovy scale>` | flat free-camera probe: a fixed widened culling (docs/af/FREECAM.md) | stock |
 
 Both VR overrides change only what is drawn. Nothing extra is loaded and no game logic sees them.
@@ -72,6 +75,72 @@ prepasses: about 70 % of the extra time is outside the eye colour passes. Keepin
 passes needs either a second cull in that pass (one list for the shadow and depth passes, one for colour) or a per-draw
 position test in the executor, and a depth prepass that misses draws breaks the colour pass's depth test. Neither is
 done here.
+
+## Ring draws: the world past the table at a lower cost (lane ring)
+
+`LARECOMP_VR_RING=4` with `LARECOMP_VR_CULL_EXTENT` draws the extra rooms in the eyes' colour passes only. The executor
+(`exec.c` `ring_route`, before `begin_pass`) sorts each draw into core or ring:
+
+- Its world box is the box of the vertices it uses (vertex attribute 0, memoised per mesh) through its model matrix.
+  Level draws (vertex block 4 of 912 / 928 bytes) carry that matrix in block 2 (3 x 4 rows, the room's centre as the
+  translation: room-local vertices). Characters and props (1056 / 1072) have a zero translation there and, as u32 12, the
+  index of their matrix in block 3, the world-space bone palette (Link's first bone is his position). Block 3 on a level
+  draw is stale state from an earlier character draw and means nothing.
+- Ring: the box misses the table fit's footprint (`vr_cull_fit`'s rectangle before the EXTENT box replaces it, as a
+  world-axis box, taken once per frame) grown by the margin. Instanced draws, blended draws in colour passes and
+  anything without one of those blocks (HUD, post, effects) stay core.
+- Routing: in a shared pass (no twinned attachment: the shadow casters), a ring draw is skipped (`LARECOMP_LOG_SKIPS`
+  reason "ring draw"), unless it is within `LARECOMP_VR_RING_CAST` of the footprint. In an eye's depth-only pass (the
+  pre-pass and the 704 x 396 pass's own) it is skipped. In an eye's colour pass its EQUAL test becomes LESS_OR_EQUAL
+  with depth write: right in any order, since the core draws were in the pre-pass and a ring draw nearer the eye wins
+  either way.
+- `LARECOMP_VR_RING_LOG=1`: per pass kind the draws of each class every 300 frames (`[ring]`).
+  `LARECOMP_VR_RING_DUMP=<frame>`: that frame's draws with their blocks, local and world boxes.
+
+At Mabe with EXTENT 52,42, each eye's colour pass has about 225 core draws (the table fit drew 238) and 560 ring draws.
+The shared and pre-pass rows get none, and the pre-pass is back to 139 draws, 1.15 ms an eye.
+
+### Measured (xrmock 90 Hz, 1680 x 1760, head static 45 degrees down; `tools/stream_vr.sh` timing; fps = the game's)
+
+| spot | config | GPU ms / game frame | game fps | render CPU ms | eye void % |
+|---|---|---|---|---|---|
+| Mabe | table fit | 22.1 | 28.8 | 12.7 | 21.3 |
+| Mabe | EXTENT 52,42 | 33.3 | 14.6 | 28.4 | 18.2 |
+| Mabe | EXTENT 52,42 + RING 4 | 27.6 | 19.5 | 21.2 | 18.0 |
+| Mabe | EXTENT 52,42 + RING 4 + CAST 12 | 27.9 | 19.3 | 22.9 | 18.0 |
+| Mabe | EXTENT 52,42 + RING 4 + LOWRES 0 | 27.0 | 19.3 | 19.7 | 18.0 |
+| Mabe | EXTENT 36,30 | 32.7 | 14.8 | 26.4 | 18.1 |
+| Mabe | EXTENT 36,30 + RING 4 | 27.1 | 19.3 | 20.6 | 18.0 |
+| forest | table fit | 21.4 | 28.6 | 10.9 | 28.2 |
+| forest | EXTENT 52,42 | 36.3 | 14.7 | 35.5 | 20.9 |
+| forest | EXTENT 52,42 + RING 4 | 33.2 | 15.0 | 27.3 | 21.1 |
+| forest | EXTENT 52,42 + RING 4 + CAST 12 | 33.5 | 14.6 | 27.8 | 21.0 |
+| forest | EXTENT 52,42 + RING 4 + LOWRES 0 | 29.8 | 19.3 | 22.0 | 21.1 |
+| forest | EXTENT 36,30 | 35.9 | 14.6 | 32.0 | 21.1 |
+| forest | EXTENT 36,30 + RING 4 | 32.8 | 15.1 | 26.8 | 21.4 |
+
+- The void % is the EXTENT run's in every ring configuration: nothing goes missing, and the eye images show no holes
+  or z-fighting at the table edge. What changes is the shadows: ring objects cast none, so the ground just past the
+  footprint (behind Mabe's north wall, under the north trees and the library) is lit. `CAST 12` brings them back for
+  +0.3 ms (about 120 more casters).
+- 36,30 costs the same as 52,42 from this pose: the eye frusta, not the box, bound what the fit asks for.
+- Turnip's LRZ is not a factor: `TU_DEBUG=nolrz` gives 28.0 (ring) and 33.1 (EXTENT only) at Mabe.
+- Where the time goes (forest, both eyes): the pre-pass 5.2 -> 1.6 ms and the casters 1.7 -> 0.6, but the main colour
+  pass 15.6 -> 17.3 (ring draws are shaded in draw order, without the pre-pass's EQUAL: overdraw). `LOWRES 0` also
+  keeps them out of the 704 x 396 pass (1.7 ms an eye): no visible difference in the dumps, but what that pass feeds
+  is not known, so it is opt-in.
+- The 704 x 396 row of the stream lane's breakdown is not the casters: with fs d3e83e0301de7e42 skipped (the casters
+  went from 565 to 147 draws) it stayed at 11 ms. It is the last row before a submission boundary in eye 0 only, so it
+  holds the GPU's idle time while the render thread records (render CPU went 12.7 -> 28.4 ms with EXTENT). That fs is
+  also the depth-only shader of 422 of the 600 eye pre-pass draws, so skipping it by hash leaves holes (63 % void).
+- Render CPU (Mabe): the executor runs 1593 draws a game frame with the table fit, 3702 with EXTENT (about 7.4 us of
+  render CPU per extra draw) and 2084 with ring. The classification itself (`ring_route`, timed by
+  `LARECOMP_VR_RING_LOG`) is 0.7 - 0.9 ms a game frame (eye 1 mostly hits eye 0's memo; about 26 vertex boxes are made
+  again each frame). The rest of the gap to the draw count's prediction (about 4 ms) is `draw_`'s work before the
+  route on the ~1700 draws it then skips (program lookup, shader hash, camera / weather / snow bookkeeping): routing
+  earlier in `draw_` is the next lever.
+- Neither spot reaches 30 fps with EXTENT. The game holds 30 only with both the GPU and the render thread well under
+  33 ms; Mabe with ring alternates (19 fps).
 
 ## Probes (runtime/hle/stream.c; research only, off by default)
 

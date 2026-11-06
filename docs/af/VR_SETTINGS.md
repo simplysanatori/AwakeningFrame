@@ -34,7 +34,7 @@ The refresh rate is the one option the game cannot apply itself: SteamVR's per-a
 | Size | 100%, 40 to 300% in steps of 10 | none (the rig's, `vr_rig.ini`) | none | live (`xr_rig_set_size_pct`) |
 | Tilt | 0, -20 to +50 degrees in steps of 5 | none (the rig's, `vr_rig.ini`) | none | live (`xr_rig_set_tilt_deg`) |
 | Recentre Table | button | none | none | live (`xr_rig_recentre`; greyed out in a flat build) |
-| Table Edge | Fog, Gradient, Black, Passthrough | `vr_edge = fog \| gradient \| black \| passthrough` | `LARECOMP_VR_EDGE` | hook `edge_set_mode` (stub), else restart |
+| Table Edge | Off, Haze, Sky Only, Passthrough (outdoors only; default Off) | `vr_edge_mode = black \| fog \| gradient \| passthrough` | `LARECOMP_VR_EDGE` | restart (no live hook) |
 | Foveation | Off, Low, Medium, High (eye-tracked only) | `vr_foveation = off \| low \| medium \| high` | `LARECOMP_VR_FOVEATION` (default medium) | live (`fov_set_level`); Off at start: restart to turn it on |
 | Dynamic Resolution | Off, On | `vr_dynamic_resolution = 1 \| 0` | `LARECOMP_VR_DYNRES=0` | hook `diet_set_dynres` (stub) |
 | Culling | Fit, Wide, Stock | `vr_culling = fit \| wide \| stock` | `LARECOMP_VR_CULL` | hook `vr_cull_set_mode` (stub) |
@@ -79,7 +79,7 @@ was: the variable, or the existing menu text. Style as Moonlight / Apollo: Title
 | `LARECOMP_VR_SCALE` | Size | 40% to 300% | How big the table is. |
 | `LARECOMP_VR_PITCH` | Tilt | -20 to +50 degrees | How far the table leans toward you. |
 | right stick click with left grip held | Recentre Table | (button) | Puts the table in front of you again. |
-| `LARECOMP_VR_EDGE=fog` / `gradient` / `black` / `passthrough` | Table Edge | Fog, Gradient, Black, Passthrough | What surrounds the table. Fog fades the world into the distance, Gradient fills the empty space with a soft backdrop, Black leaves it empty, Passthrough shows the room. |
+| `LARECOMP_VR_EDGE=black` / `fog` / `gradient` / `passthrough` | Table Edge | Off, Haze, Sky Only, Passthrough | What fills the empty space past the world outdoors. Haze fades it into the sky, Sky Only fills the space without touching the world, Passthrough shows the room. |
 | `LARECOMP_VR_FOVEATION=off` / `low` / `medium` / `high` | Foveation | Off, Low, Medium, High | Follows your eyes and draws what you aren't looking at in less detail. Higher levels save more GPU time. Without eye tracking it draws everything in full detail. |
 | `LARECOMP_VR_DYNRES` | Dynamic Resolution | Off, On | Lowers the resolution when the GPU can't keep up and raises it again when it can. |
 | `LARECOMP_VR_CULL=fit` / `wide` / `stock` | Culling | Fit, Wide, Stock | How much of the world outside the table is skipped. Fit follows the table's edges, Wide keeps more, Stock keeps everything the game would draw. |

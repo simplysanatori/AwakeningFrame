@@ -21,7 +21,9 @@ static struct {
     int init, mode, eyes;   // mode: VR_CULL_FIT / WIDE / STOCK
     float kx, kz, hlo, hhi, margin;
     float ex, ez, tmax;     // LARECOMP_VR_CULL_EXTENT (world half-extents about the table centre, 0 = off), _TMAX
+    float ring, ring_cast;  // LARECOMP_VR_RING / _RING_CAST margins (0 = off)
 } C;
+static struct { bool have; float quad[4][2], floor_y, hlo, hhi, shrink[4]; } g_rect;  // the latest fit's floor quadrilateral (vr_cull_rect)
 static _Atomic float g_aspect, g_fs;   // the fitted culling aspect (absolute) and fovy scale; 0 = none yet
 static _Atomic float g_fovy_orig = 0;  // the game's own fovy field (radians or degrees, as it is)
 static _Atomic float g_aspect_orig = 0;
@@ -43,6 +45,66 @@ static void init(void) {
     if ((e = getenv("LARECOMP_VR_CULL_EXTENT"))) sscanf(e, "%f,%f", &C.ex, &C.ez);
     if ((e = getenv("LARECOMP_VR_CULL_TMAX"))) C.tmax = (float)atof(e);
     if (!(C.tmax > 0.5f)) C.tmax = 4.0f;
+    // (lane ring) LARECOMP_VR_RING=<margin>: draws whose position is outside the table fit's footprint grown by this are
+    // "ring" draws (exec.c: colour passes only, no shadow casters, no depth pre-pass). LARECOMP_VR_RING_CAST=<margin>:
+    // ring draws within this of the footprint still cast shadows.
+    C.ring = C.ring_cast = 0;
+    if ((e = getenv("LARECOMP_VR_RING"))) C.ring = (float)atof(e);
+    if ((e = getenv("LARECOMP_VR_RING_CAST"))) C.ring_cast = (float)atof(e);
+    if (!(C.ring > 0)) C.ring = 0;
+    if (!(C.ring_cast > 0)) C.ring_cast = 0;
+}
+
+// the table fit's footprint as a world-axis box (x, z), before the EXTENT override: written by vr_cull_fit (the render
+// thread at each latch), read by the executor. A sequence count keeps the four values together.
+static _Atomic unsigned g_core_seq;
+static _Atomic float g_core[4];  // lo x, lo z, hi x, hi z
+static _Atomic int g_core_ok;
+static void core_set(const float corner[4][3], bool ok) {
+    atomic_fetch_add(&g_core_seq, 1);
+    if (ok) {
+        float lx = corner[0][0], hx = lx, lz = corner[0][2], hz = lz;
+        for (int c = 1; c < 4; c++)
+            lx = fminf(lx, corner[c][0]), hx = fmaxf(hx, corner[c][0]), lz = fminf(lz, corner[c][2]), hz = fmaxf(hz, corner[c][2]);
+        atomic_store(&g_core[0], lx), atomic_store(&g_core[1], lz), atomic_store(&g_core[2], hx), atomic_store(&g_core[3], hz);
+    }
+    atomic_store(&g_core_ok, ok);
+    atomic_fetch_add(&g_core_seq, 1);
+}
+
+bool vr_cull_core_box(float lo[3], float hi[3]) {
+    for (int tries = 0; tries < 8; tries++) {
+        unsigned s0 = atomic_load(&g_core_seq);
+        if (s0 & 1) continue;
+        int ok = atomic_load(&g_core_ok);
+        float b[4];
+        for (int i = 0; i < 4; i++) b[i] = atomic_load(&g_core[i]);
+        if (atomic_load(&g_core_seq) != s0) continue;
+        if (!ok) return false;
+        lo[0] = b[0], lo[1] = -1e30f, lo[2] = b[1], hi[0] = b[2], hi[1] = 1e30f, hi[2] = b[3];
+        return true;
+    }
+    return false;
+}
+
+bool vr_ring_on(void) {
+    if (!C.init) init();
+    return C.ring > 0;
+}
+
+int vr_ring_class(const float blo[3], const float bhi[3], uint64_t frame) {
+    if (!C.init) init();
+    // one footprint per frame (the executor's thread only): a refit between a frame's depth pre-pass and its colour
+    // pass must not turn a draw the pre-pass left out into one that tests EQUAL against it
+    static float lo[3], hi[3];
+    static bool ok;
+    static uint64_t at = ~0ull;
+    if (frame != at) at = frame, ok = vr_cull_core_box(lo, hi);
+    if (!(C.ring > 0) || !ok) return 0;
+    float m = C.ring, c = C.ring_cast;  // (the draw's box against the footprint grown by the margin, in x and z)
+    if (bhi[0] >= lo[0] - m && blo[0] <= hi[0] + m && bhi[2] >= lo[2] - m && blo[2] <= hi[2] + m) return 0;
+    if (c > 0 && bhi[0] >= lo[0] - c && blo[0] <= hi[0] + c && bhi[2] >= lo[2] - c && blo[2] <= hi[2] + c) return 2;
+    return 1;
 }
 
 int vr_cull_mode(void) {
@@ -59,6 +121,20 @@ bool vr_cull_get(float *aspect, float *fovy_scale) {
     float a = atomic_load(&g_aspect), f = atomic_load(&g_fs);
     if (!(a > 0) || !(f > 0)) return false;
     *aspect = a, *fovy_scale = f;
+    return true;
+}
+
+bool vr_cull_rect(float quad[4][2], float *floor_y, float *hlo, float *hhi) {
+    if (!g_rect.have) return false;  // (render thread, like vr_cull_fit)
+    memcpy(quad, g_rect.quad, sizeof g_rect.quad), *floor_y = g_rect.floor_y, *hlo = g_rect.hlo, *hhi = g_rect.hhi;
+    return true;
+}
+
+// Per edge of that quadrilateral (the same order): how far the stock screen's own edge lies inside it, as a share of
+// the distance from the quadrilateral's middle to that edge (1 - 1 / k of LARECOMP_VR_CULL_RECT; 0 at k = 1)
+bool vr_cull_rect_shrink(float shrink[4]) {
+    if (!g_rect.have) return false;
+    memcpy(shrink, g_rect.shrink, sizeof g_rect.shrink);
     return true;
 }
 
@@ -90,7 +166,7 @@ static void eye_planes(const CamRef *r, float m, float pl[4][4]) {  // left, rig
 
 void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3], const CamRef *eye0, const CamRef *eye1) {
     if (!C.init) init();
-    if (C.mode != VR_CULL_FIT || !l || !l->valid) return;
+    if (C.mode != VR_CULL_FIT || !l || !l->valid) { g_rect.have = false; return; }
     const CamRef *g = &l->ref;
     float fo = atomic_load(&g_fovy_orig);
     if (!(fo > 0)) return;
@@ -101,6 +177,8 @@ void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3],
     float wide_a = 3.2f, wide_fs = 1.5f;
     if (fabsf(g->fwd[1]) < 0.26f) {  // side view (or a level look): no floor rectangle; the old fixed widening
         atomic_store(&g_aspect, wide_a), atomic_store(&g_fs, wide_fs);
+        core_set(NULL, false);  // (no footprint: every draw is core)
+        g_rect.have = false;
         return;
     }
     // the stock footprint on the floor (y = pivot), scaled about the pivot along the camera's ground axes
@@ -121,7 +199,19 @@ void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3],
         float rx = (p[0] - pivot[0]) * hr[0] + (p[2] - pivot[2]) * hr[2], rz = (p[0] - pivot[0]) * hf[0] + (p[2] - pivot[2]) * hf[2];
         rx *= C.kx, rz *= C.kz;
         corner[c][0] = anchor[0] + rx * hr[0] + rz * hf[0], corner[c][1] = anchor[1], corner[c][2] = anchor[2] + rx * hr[2] + rz * hf[2];
-        if (C.ex > 0 && C.ez > 0) corner[c][0] = anchor[0] + sx * C.ex, corner[c][2] = anchor[2] + sy * C.ez;  // (the world box)
+    }
+    core_set(corner, true);  // (lane ring: the table fit's footprint, before the EXTENT box replaces it)
+    for (int c = 0; c < 4 && C.ex > 0 && C.ez > 0; c++)  // (the world box)
+        corner[c][0] = anchor[0] + (c & 1 ? 1.0f : -1.0f) * C.ex, corner[c][2] = anchor[2] + (c & 2 ? 1.0f : -1.0f) * C.ez;
+    {   // the floor quadrilateral, counter-clockwise seen from above in (x, z) (the edge pass fades to it)
+        static const int rg[4] = {0, 1, 3, 2};
+        float q[4][2], area = 0;
+        for (int i = 0; i < 4; i++) q[i][0] = corner[rg[i]][0], q[i][1] = corner[rg[i]][2];
+        for (int i = 0; i < 4; i++) area += q[i][0] * q[(i + 1) % 4][1] - q[(i + 1) % 4][0] * q[i][1];
+        for (int i = 0; i < 4; i++) memcpy(g_rect.quad[i], q[area >= 0 ? i : 3 - i], 8);
+        float so[4] = {1 - 1 / fmaxf(C.kz, 1.0f), 1 - 1 / fmaxf(C.kx, 1.0f), 1 - 1 / fmaxf(C.kz, 1.0f), 1 - 1 / fmaxf(C.kx, 1.0f)};
+        for (int i = 0; i < 4; i++) g_rect.shrink[i] = area >= 0 ? so[i] : so[(2 - i + 4) % 4];
+        g_rect.floor_y = anchor[1], g_rect.hlo = C.hlo, g_rect.hhi = C.hhi, g_rect.have = true;
     }
     // the prism: 8 points (bottom 0-3, top 4-7 in the order 0 1 3 2 around), 6 faces
     static const int ring[4] = {0, 1, 3, 2};
@@ -166,7 +256,10 @@ void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3],
     static uint64_t logged;
     if (getenv("LARECOMP_LOG_CULL") && l->frame >= logged + 120) {
         logged = l->frame;
-        LOG("[vrcull] f%llu fitted: tan x %.3f y %.3f (stock %.3f %.3f): aspect %.3f, fovy x%.3f; %d points%s\n", (unsigned long long)l->frame,
-            tx, ty, tx0, ty0, tx / ty, fs, npts, behind ? ", some behind the camera" : "");
+        float lo[3], hi[3];
+        bool core = vr_cull_core_box(lo, hi);
+        LOG("[vrcull] f%llu fitted: tan x %.3f y %.3f (stock %.3f %.3f): aspect %.3f, fovy x%.3f; %d points%s; core x %.1f..%.1f z %.1f..%.1f\n",
+            (unsigned long long)l->frame, tx, ty, tx0, ty0, tx / ty, fs, npts, behind ? ", some behind the camera" : "",
+            core ? lo[0] : 0, core ? hi[0] : 0, core ? lo[2] : 0, core ? hi[2] : 0);
     }
 }
