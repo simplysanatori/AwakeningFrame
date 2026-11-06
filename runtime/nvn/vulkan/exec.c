@@ -1029,6 +1029,26 @@ static struct {
     uint64_t copy_row_stride, copy_image_stride;
 } st;
 
+// The largest index of an index buffer (restart index excluded), for bounding the vertex copy. In stereo, eye 1 runs the
+// same list over the same memory (eye 0's writes are undone), so eye 0's results are reused (LARECOMP_STEREO_NO_IDX_MEMO=1: off).
+static struct { const void *src; uint32_t count, isz, restart, max, gen; } idx_memo[4096];
+static uint32_t idx_memo_gen = 1;
+static uint32_t index_max(const void *src, uint32_t count, uint32_t isz, uint32_t restart) {
+    static int off = -1;
+    if (off < 0) off = getenv("LARECOMP_STEREO_NO_IDX_MEMO") != NULL;
+    uint64_t a = (uint64_t)(uintptr_t)src;
+    unsigned h = (unsigned)((a >> 2) ^ (a >> 14) ^ count * 0x9E37u) & 4095;
+    if (g_eye == 1 && !off && idx_memo[h].gen == idx_memo_gen && idx_memo[h].src == src && idx_memo[h].count == count &&
+        idx_memo[h].isz == isz && idx_memo[h].restart == restart)
+        return idx_memo[h].max;
+    uint32_t m = 0;
+    if (isz == 2) { const uint16_t *q = src; for (uint32_t i = 0; i < count; i++) if (q[i] > m && q[i] != (uint16_t)restart) m = q[i]; }
+    else { const uint32_t *q = src; for (uint32_t i = 0; i < count; i++) if (q[i] > m && q[i] != restart) m = q[i]; }
+    if (g_eye == 0) idx_memo[h].src = src, idx_memo[h].count = count, idx_memo[h].isz = isz, idx_memo[h].restart = restart, idx_memo[h].max = m,
+                    idx_memo[h].gen = idx_memo_gen;
+    return m;
+}
+
 static bool eye1_skip_rt(void) {
     if (g_eye != 1) return false;
     bool tw = false, shared = false;
@@ -7209,8 +7229,7 @@ static void draw_(CmdRec *r, bool indexed) {
                 scan_src = src; scan_isz = isz; scan_restart = restart;  // max_index only if a stream gets copied
             } else {
                 ib = vk_transient_copy(src, (uint64_t)count * isz + 4, 4);
-                if (isz == 2) { const uint16_t *s = src; for (uint32_t i = 0; i < count; i++) if (s[i] > max_index && s[i] != (uint16_t)restart) max_index = s[i]; }
-                else { const uint32_t *s = src; for (uint32_t i = 0; i < count; i++) if (s[i] > max_index && s[i] != restart) max_index = s[i]; }
+                max_index = index_max(src, count, isz, restart);
             }
         } else if (native) {  // 8-bit indices: widen to 16
             ib = vk_transient((uint64_t)count * 2 + 4, 4);
@@ -7253,8 +7272,7 @@ static void draw_(CmdRec *r, bool indexed) {
                 continue;
             }
             if (scan_src) {  // copying after all: the index scan bounds the copy
-                if (scan_isz == 2) { const uint16_t *q = scan_src; for (uint32_t i = 0; i < icount; i++) if (q[i] > max_index && q[i] != (uint16_t)scan_restart) max_index = q[i]; }
-                else { const uint32_t *q = scan_src; for (uint32_t i = 0; i < icount; i++) if (q[i] > max_index && q[i] != scan_restart) max_index = q[i]; }
+                max_index = index_max(scan_src, icount, scan_isz, scan_restart);
                 max_index += 1;
                 if (base_vertex > 0) max_index += (uint32_t)base_vertex;
                 scan_src = NULL;
@@ -8692,19 +8710,36 @@ static void st_ts_resolve(void) {  // (the present) finished frames' sums
     }
 }
 
+// render-thread time of each eye's run of the lists, per game frame, every 2 s (what sharing eye 1's work could save)
+static void stereo_note_cpu(uint64_t ns0, uint64_t ns1) {
+    static uint64_t frame = ~0ull, s0, s1, t_last;
+    static unsigned nf;
+    uint64_t f = renderer_exec_frame(), now = plat_now_ns();
+    if (f != frame) frame = f, nf++;
+    s0 += ns0, s1 += ns1;
+    if (!t_last) t_last = now;
+    if (now - t_last >= 2000000000ull && nf) {
+        LOG("[stereo] render CPU per game frame: eye 0 %.2f ms, eye 1 %.2f ms over %u frames\n", s0 / 1e6 / nf, s1 / 1e6 / nf, nf);
+        s0 = s1 = 0, nf = 0, t_last = now;
+    }
+}
+
 static void stereo_execute(uint64_t handle) {
     static bool cams;
     if (!cams) { cams = true; stereo_cameras_init(); }
     __typeof__(st) start = st;
     vk_end_pass();
     gw_n = 0, gw_used = 0;
+    idx_memo_gen++;
     g_eye = 0;
     cam_override_set_eye(0);
+    uint64_t t0 = plat_now_ns();
     uint32_t q = st_ts_begin();
     exec_list(handle, 0);
     vk_end_pass();
     st_ts_end(q, 0);
     gw_restore();
+    uint64_t t1 = plat_now_ns();
     st = start;
     st.rt_dirty = true;
     g_eye = 1;
@@ -8715,6 +8750,7 @@ static void stereo_execute(uint64_t handle) {
     vk_end_pass();
     st_ts_end(q, 1);
     vk_stereo_swap(false);
+    stereo_note_cpu(t1 - t0, plat_now_ns() - t1);
     g_eye = -1;
     cam_override_set_eye(0);
     st.rt_dirty = true;
