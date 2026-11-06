@@ -48,6 +48,8 @@ bool warp_tab_draw(float scale);  // warp_tab.mm: true when a warp started
 extern "C" void cheats_draw(float scale);  // cheats.mm
 extern "C" void difficulty_draw(float scale);  // difficulty.mm
 void controls_tab_draw(float scale);  // controls_ui.mm
+void vr_tab_draw(float scale);  // vr_tab.mm
+bool vr_tab_visible(void);  // (VR mode)
 bool controls_ui_took_back(void);
 bool rando_tab_took_back(void);  // rando_tab.mm: B went back a step in the right column
 bool save_editor_took_back(void);  // save_editor.mm (the same)
@@ -963,15 +965,16 @@ bool menu_preview_frame(float scale, ImFont *font, ImFont *font_big) {
 static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     // (id: the page; -1 = Prelaunch)
     struct Tab { const char *name; int id; bool on; };
-    Tab tabs[11];
+    Tab tabs[12];
     int ntabs = 0;
     if (prelaunch) tabs[ntabs++] = {LN("Game files"), -1, true};
     static const char *names[] = {LN("Video"), LN("Audio"), LN("Save Editor"), LN("Randomizer"), LN("Warp"),
-                                  LN("Cheats"), LN("Gameplay"), LN("Cosmetics"), LN("Controls"), LN("Quit")};
-    static const int order[] = {8, 0, 1, 6, 7, 3, 5, 4, 2, 9};  // Controls, Video, Audio, Gameplay, Cosmetics, Randomizer,
+                                  LN("Cheats"), LN("Gameplay"), LN("Cosmetics"), LN("Controls"), LN("Quit"), LN("VR")};
+    static const int order[] = {8, 10, 0, 1, 6, 7, 3, 5, 4, 2, 9};  // Controls, VR (VR mode only), Video, Audio, Gameplay, Cosmetics, Randomizer,
                                                                 // Cheats, Warp, Save Editor, Quit (ids stay: test hooks)
     for (int i : order)  // (Quit: in game only - the start screen has its own QUIT, and an eleventh tab cut names short)
-        if (i != 9 || !prelaunch) tabs[ntabs++] = {names[i], i, in_game || (i != 2 && i != 4 && i != 5)};
+        if ((i != 9 || !prelaunch) && (i != 10 || vr_tab_visible()))
+            tabs[ntabs++] = {names[i], i, in_game || (i != 2 && i != 4 && i != 5)};
     int cur = 0;  // g_tab / g_tab_request hold ids
     for (int i = 0; i < ntabs; i++) if (tabs[i].id == g_tab) cur = i;
     if (!tabs[cur].on) cur = 0;
@@ -1120,6 +1123,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
         case 7: tab_cosmetics(); break;
         case 8: controls_tab_draw(scale); break;
         case 9: tab_quit(scale, in_game); break;
+        case 10: vr_tab_draw(scale); break;
         }
         static const char *scroll_test = getenv("LARECOMP_MENU_SCROLL");  // test hook: page scroll, 0..1
         if (scroll_test) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(scroll_test));
