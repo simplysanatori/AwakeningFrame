@@ -19,8 +19,10 @@
 //     once, finished or not;
 //   - one image waited per swapchain at a time: the next set is acquired only after the last one was released
 //     (xr_set_begin waits for that: back-pressure, at most one set ahead of the display);
-//   - both eyes of a set come from one xrLocateViews (xr_latch_views), and those poses go into the projection layer
-//     for every refresh the set is shown;
+//   - both eyes of a set come from one xrLocateViews, the one their images were rendered with (xr_latch_views_id /
+//     xr_set_views: the executor keeps the latch with each eye output, so an eye image drawn again into a later set
+//     takes its old poses along), and those poses go into the projection layer for every refresh the set is shown;
+//     the [xr] 5 s line counts the refreshes whose layer pose was not the render pose ("pose mismatches");
 //   - swapchains have one mip level; images are in COLOR_ATTACHMENT_OPTIMAL when acquired and when released;
 //   - the GPU is drained before the session goes (exit faults otherwise);
 //   - no layer names a swapchain that has an image acquired at xrEndFrame: every swapchain exists twice (a pair of
@@ -100,11 +102,18 @@ typedef struct {
     float fov[4];          // angleLeft, angleRight, angleUp, angleDown (radians; left / down negative)
 } XrEyeView;
 bool xr_latch_views(XrEyeView out[2]);
-// (lane 4, the stereo executor) The same, for the game frame being executed before its set exists (the render thread
-// translates a frame's command lists before its present opens the set): located now, for the latest vsync's display
-// time, and kept for the next set - xr_set_begin hands them to it, so the layer carries the poses the eyes were
-// rendered with. A later call before that set replaces them (the newest frame's). false: no session / no valid pose.
-bool xr_latch_views_early(XrEyeView out[2]);
+// (the stereo executor) One xrLocateViews for a game frame being executed before its set exists (the render thread
+// translates a frame's command lists before its present opens the set), kept under the returned *id (the last 16 are
+// kept). Located for the display time that frame is expected at (LARECOMP_XR_PREDICT: measured latch -> display,
+// default; vsync: the latest vsync's display time). false: no session / no valid pose.
+bool xr_latch_views_id(XrEyeView out[2], uint64_t *id);
+// Between xr_set_begin and xr_set_submit: the projection layer of this set gets the views of the latches its eye images
+// were rendered with (eye i's pose from latch id[i]; both ids are the same unless the eyes come from different frames),
+// for every refresh it is shown. rendered: the views the eye cameras were built with, as the executor kept them (the
+// pose check: compared with the latch's). Returns -1 when a latch is gone (the set then gets a fresh locate, counted
+// as a mismatch), else a mask: 1 / 2 eye 0 / 1 differs from what it was rendered with, 4 the eyes come from different
+// latches.
+int xr_set_views(const uint64_t id[2], const XrEyeView rendered[2]);
 // The eye swapchains' size (false before xr_start).
 bool xr_eye_size(uint32_t *w, uint32_t *h);
 // (lane 4) GPU ms of eye 0 and eye 1 of the latest finished game frame: xr_timing.log's gpu0 / gpu1 (-1: unknown).

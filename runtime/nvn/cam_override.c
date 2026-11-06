@@ -226,6 +226,11 @@ void cam_override_set_zone(const float lo[3], const float hi[3]) {
     if (lo && hi) memcpy(g_zlo, lo, sizeof g_zlo), memcpy(g_zhi, hi, sizeof g_zhi), g_zone_ok = 1;
     else g_zone_ok = 0;
 }
+bool cam_override_zone(float lo[3], float hi[3]) {
+    if (!g_zone_ok) return false;
+    memcpy(lo, g_zlo, sizeof g_zlo), memcpy(hi, g_zhi, sizeof g_zhi);
+    return true;
+}
 
 // ---------------------------------------------------------------- the latched camera
 static CamLatch g_latch;

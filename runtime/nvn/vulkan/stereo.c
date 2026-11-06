@@ -11,6 +11,8 @@
 #include "../cam_override.h"
 #ifdef LARECOMP_HAVE_XR
 #include "../../xr/xr.h"
+#else
+typedef struct { float orientation[4], position[3], fov[4]; } XrEyeView;
 #endif
 
 bool stereo_wanted(void) {
@@ -60,7 +62,10 @@ static struct {
     bool init, have_pitch, have_table;
     float s, dist, pitch, yaw, near_;
     float A[3];
+    int follow;        // LARECOMP_VR_FOLLOW: FOLLOW_SMOOTH (default), FOLLOW_ROOM, FOLLOW_FIXED
+    float tau;         // LARECOMP_VR_FOLLOW_TAU: seconds (smooth)
 } cfg;
+enum { FOLLOW_SMOOTH, FOLLOW_ROOM, FOLLOW_FIXED };
 
 static void cfg_init(void) {
     const char *e;
@@ -71,7 +76,61 @@ static void cfg_init(void) {
     cfg.near_ = (e = getenv("LARECOMP_VR_NEAR")) ? (float)atof(e) : 0.0f;
     if ((e = getenv("LARECOMP_VR_PITCH"))) cfg.pitch = (float)atof(e), cfg.have_pitch = true;
     if ((e = getenv("LARECOMP_VR_TABLE")) && sscanf(e, "%f,%f,%f", &cfg.A[0], &cfg.A[1], &cfg.A[2]) == 3) cfg.have_table = true;
+    e = getenv("LARECOMP_VR_FOLLOW");
+    cfg.follow = e && !strcmp(e, "room") ? FOLLOW_ROOM : e && !strcmp(e, "fixed") ? FOLLOW_FIXED : FOLLOW_SMOOTH;
+    cfg.tau = (e = getenv("LARECOMP_VR_FOLLOW_TAU")) && atof(e) > 0 ? (float)atof(e) : 0.5f;
+    LOG("[stereo] the table follows the game's camera: %s (%.2f s time constant; a cut snaps it)\n",
+        cfg.follow == FOLLOW_ROOM ? "room (held; glides to a new camera zone)" : cfg.follow == FOLLOW_FIXED ? "fixed (held)" : "smooth", cfg.tau);
 }
+
+// The table's anchor in the world: where the game's camera looks (the raw pivot, once per game frame) followed per
+// LARECOMP_VR_FOLLOW, on new game frames only (called once per latch):
+//   smooth  filtered (time constant cfg.tau; the height twice that: Link's jumps)
+//   room    held; when the camera zone changes it glides (as smooth) until the game's camera has settled, then holds
+//   fixed   held
+// A cut (the raw pivot more than CUT_UNITS away: a level change, a teleport, a camera cut) snaps in every mode.
+#define CUT_UNITS 24.0f
+static struct { bool ok, gliding; float p[3], last[3], lo[3], hi[3]; bool zone; uint64_t t_ns, still_ns; uint64_t snaps, glides; } anc;
+static void anchor_update(const float raw[3], float out[3]) {
+    float lo[3], hi[3];
+    bool zone = cam_override_zone(lo, hi);
+    uint64_t now = plat_now_ns();
+    bool zchg = anc.ok && (zone != anc.zone || (zone && (fabsf(lo[0] - anc.lo[0]) + fabsf(lo[2] - anc.lo[2]) + fabsf(hi[0] - anc.hi[0]) +
+                                                       fabsf(hi[2] - anc.hi[2]) > 0.5f)));
+    float d2 = 0, m2 = 0;
+    for (int i = 0; i < 3; i++) d2 += (raw[i] - anc.p[i]) * (raw[i] - anc.p[i]), m2 += (raw[i] - anc.last[i]) * (raw[i] - anc.last[i]);
+    float dt = anc.ok ? (float)((now - anc.t_ns) / 1e9) : 0;
+    if (dt > 0.1f) dt = 0.1f;
+    if (!anc.ok || d2 > CUT_UNITS * CUT_UNITS) {
+        memcpy(anc.p, raw, sizeof anc.p);
+        anc.snaps++, anc.gliding = false;
+        if (anc.snaps < 50 || anc.snaps % 100 == 0)
+            LOG("[stereo] table anchor at (%.2f %.2f %.2f) (%s; %llu so far)\n", raw[0], raw[1], raw[2], !anc.ok ? "first" : "a cut",
+                (unsigned long long)anc.snaps);
+    } else {
+        if (zchg && cfg.follow == FOLLOW_ROOM) {
+            if (!anc.gliding && (anc.glides++ < 50 || anc.glides % 100 == 0))
+                LOG("[stereo] table anchor: the camera zone changed, gliding to the new one (%llu so far)\n", (unsigned long long)anc.glides);
+            anc.gliding = true, anc.still_ns = now;
+        }
+        if (anc.gliding && m2 > 0.0025f) anc.still_ns = now;  // (the game's camera still moving: 0.05 units a frame)
+        if (anc.gliding && now - anc.still_ns > 400000000ull && d2 < 0.01f) anc.gliding = false;
+        if (cfg.follow == FOLLOW_SMOOTH || anc.gliding) {
+            float a = 1.0f - expf(-dt / cfg.tau), ay = 1.0f - expf(-dt / (cfg.tau * 2.0f));
+            anc.p[0] += (raw[0] - anc.p[0]) * a, anc.p[2] += (raw[2] - anc.p[2]) * a, anc.p[1] += (raw[1] - anc.p[1]) * ay;
+        }
+    }
+    anc.ok = true, anc.t_ns = now, anc.zone = zone;
+    memcpy(anc.last, raw, sizeof anc.last);
+    if (zone) memcpy(anc.lo, lo, sizeof lo), memcpy(anc.hi, hi, sizeof hi);
+    memcpy(out, anc.p, sizeof anc.p);
+}
+
+// What the latest latch's eye cameras were built with: the latch (the poses go into the projection layer of the set its
+// eye images are shown in: stereo_note_composite / stereo_set_views), the head views, and the per-eye V / P (game units).
+static struct { bool ok; uint64_t id; XrEyeView ev[2]; float V[2][16], P[2][16]; } g_rv;
+// Per eye output: the latch it was composited with (0: none, or the game's own camera)
+static struct { uint64_t id; XrEyeView ev; float V[16], P[16]; } g_out[2];
 
 static void quat_mat(const float q[4], float m[3][3]) {  // x y z w -> rotation (columns: the eye's axes in app space)
     float x = q[0], y = q[1], z = q[2], w = q[3];
@@ -83,10 +142,14 @@ static void quat_mat(const float q[4], float m[3][3]) {  // x y z w -> rotation 
 static uint64_t g_logged_frame;
 
 #ifdef LARECOMP_HAVE_XR
-static bool eye_fn(const CamLatch *l, const float pivot[3], float V[2][16], float P[2][16]) {
+static bool eye_fn(const CamLatch *l, const float pivot_in[3], float V[2][16], float P[2][16]) {
     XrEyeView ev[2];
-    if (!xr_latch_views_early(ev)) return false;
+    uint64_t vid;
+    g_rv.ok = false;
+    if (!xr_latch_views_id(ev, &vid)) return false;
     if (!cfg.init) cfg_init();
+    float pivot_raw[3] = {pivot_in[0], pivot_in[1], pivot_in[2]}, pivot[3];
+    anchor_update(pivot_raw, pivot);
     if (!cfg.have_table) {
         if (!cfg.have_pitch) {
             float p = asinf(fminf(fmaxf(-l->ref.fwd[1], -1.0f), 1.0f)) * (float)(180.0 / M_PI);
@@ -157,9 +220,50 @@ static bool eye_fn(const CamLatch *l, const float pivot[3], float V[2][16], floa
                 gp[0], gp[5], gp[2], gp[6], l->ref.V[4], l->ref.V[5], l->ref.V[6], -v[8], -v[9], -v[10], c[0] / c[3], c[1] / c[3], c[2] / c[3]);
         }
     }
+    g_rv.ok = true, g_rv.id = vid;
+    memcpy(g_rv.ev, ev, sizeof ev);
+    memcpy(g_rv.V, V, sizeof g_rv.V), memcpy(g_rv.P, P, sizeof g_rv.P);
     return true;
 }
 #endif
+
+void stereo_note_composite(int eye) {
+    if (eye < 0 || eye > 1) return;
+#ifdef LARECOMP_HAVE_XR
+    if (g_rv.ok && cam_override_eye_ready()) {
+        g_out[eye].id = g_rv.id, g_out[eye].ev = g_rv.ev[eye];
+        memcpy(g_out[eye].V, g_rv.V[eye], 64), memcpy(g_out[eye].P, g_rv.P[eye], 64);
+        return;
+    }
+#endif
+    g_out[eye].id = 0;
+}
+
+bool stereo_eye_matrices(int eye, float V[16], float P[16]) {
+    if (eye < 0 || eye > 1 || !g_out[eye].id) return false;
+    memcpy(V, g_out[eye].V, 64), memcpy(P, g_out[eye].P, 64);
+    return true;
+}
+
+int stereo_set_views(void) {
+#ifdef LARECOMP_HAVE_XR
+    static uint64_t n, bad, split, gone;
+    uint64_t id[2] = {g_out[0].id, g_out[1].id};
+    XrEyeView ev[2] = {g_out[0].ev, g_out[1].ev};
+    int r = id[0] && id[1] ? xr_set_views(id, ev) : -1;
+    n++;
+    if (r < 0) gone++;
+    else if (r & 3) bad++;
+    if (r >= 0 && (r & 4)) split++;
+    if ((r < 0 || (r & 7)) && (gone + bad + split) <= 20)
+        LOG("[stereo] set %llu: eye images' poses %s (latches %llu / %llu)\n", (unsigned long long)n,
+            r < 0 ? "unknown (no latch: the layer gets a fresh pose)" : (r & 3) ? "differ from their latch" : "from two frames",
+            (unsigned long long)id[0], (unsigned long long)id[1]);
+    return r;
+#else
+    return -1;
+#endif
+}
 
 void stereo_cameras_init(void) {
 #ifdef LARECOMP_HAVE_XR

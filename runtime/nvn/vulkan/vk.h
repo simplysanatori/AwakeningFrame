@@ -127,6 +127,9 @@ TexBackend *vk_tex(NvnTexture *t, bool for_render);  // backend image (uploads C
 // back to eye 0's. Twinned: 16:9 render targets (the scalable ones) and the guest-sized ambient occlusion targets,
 // except presented (window) images. Returns how many were swapped.
 int vk_stereo_swap(bool eye1);
+// (stereo) eye 0 wrote shared texture t from a twin (a copy): t is twinned from the next eye-1 run on, its twin filled
+// with eye 0's image first. false: twinned already, or not a candidate (presented, no image).
+bool vk_stereo_twin_add(NvnTexture *t);
 static inline bool vk_tex_twinned(const NvnTexture *t) {  // its backend has (or is) an eye twin
     const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
     return b && (b->is_twin || b->twin);
