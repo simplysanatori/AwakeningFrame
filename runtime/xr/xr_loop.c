@@ -177,6 +177,9 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
             layers[n++] = (const XrCompositionLayerBaseHeader *)&proj;
         }
         // the HUD: a flat screen straight ahead at eye height, LARECOMP_XR_QUAD="distance,width" (2 m, 2.2 m)
+        // (LARECOMP_XR_HUD=0, a test: no HUD / menu layer at all, to tell what is on it from what is in the eye images)
+        static int hud_on = -1;
+        if (hud_on < 0) hud_on = !getenv("LARECOMP_XR_HUD") || atoi(getenv("LARECOMP_XR_HUD")) != 0;
         const XrChain *hc = &g_xr.hud[s->pair];
         float w = g_xr.quad_width, h = w * (float)hc->h / (float)hc->w;
         quad.space = g_xr.app;
@@ -185,7 +188,7 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
         quad.subImage = (XrSwapchainSubImage){hc->sc, {{0, 0}, {(int32_t)hc->w, (int32_t)hc->h}}, 0};
         quad.pose = (XrPosef){.orientation = {0, 0, 0, 1}, .position = {0, 0, -g_xr.quad_dist}};
         quad.size = (XrExtent2Df){w, h};
-        layers[n++] = (const XrCompositionLayerBaseHeader *)&quad;
+        if (hud_on) layers[n++] = (const XrCompositionLayerBaseHeader *)&quad;
         if (!new_set) st.reshown++;
     } else {
         st.no_render++;
