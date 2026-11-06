@@ -40,7 +40,18 @@ void plat_os_write(uint64_t addr, uint64_t size);
 // protects nothing until plat_os_write_end
 void plat_os_write_begin(uint64_t addr, uint64_t size);
 void plat_os_write_end(void);
+// The OS is about to read [addr, addr+size) (a file write from guest memory): the lazy range's granules there are made
+void plat_os_read(uint64_t addr, uint64_t size);
+// A lazy range (the guest heap as driver memory made on first use, exec.c heap_lazy_try): [lo, hi) is anonymous guest
+// memory nothing has touched yet; a thread's first access to a granule of it waits while make(addr, granule) maps that
+// granule's memory over it (MAP_FIXED). make runs on a thread of its own or on the caller of plat_lazy_touch, one at a
+// time, and must not touch the range itself. False: no userfaultfd here (the range is left as it was).
+bool plat_lazy_range(uint64_t lo, uint64_t hi, uint64_t granule, void (*make)(uint64_t addr, uint64_t size));
+void plat_lazy_touch(uint64_t addr, uint64_t size);  // the granules over [addr, addr+size) made now (the GPU's use)
+bool plat_lazy_made(uint64_t addr);                  // whether addr's granule is made
+void plat_lazy_off(void);                            // the range is ordinary memory again (a reboot, before it is reset)
 #else
+static inline void plat_os_read(uint64_t addr, uint64_t size) { (void)addr, (void)size; }
 static inline void plat_os_write(uint64_t addr, uint64_t size) { (void)addr, (void)size; }
 static inline void plat_os_write_begin(uint64_t addr, uint64_t size) { (void)addr, (void)size; }
 static inline void plat_os_write_end(void) {}

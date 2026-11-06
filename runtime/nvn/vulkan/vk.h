@@ -46,6 +46,8 @@ typedef struct {
     bool map_placed, unmap_reserve;  // VK_EXT_map_memory_placed: driver memory mapped at a given address (exec.c guest_heap_dmabuf)
     bool heap_dmabuf_default;  // the heap as driver memory by default: RADV and Mesa's PanVK (device.c; LARECOMP_VK_HEAP_DMABUF overrides)
     bool heap_no_split;        // ... whose mapping page protection must never split (Turnip / msm: exec.c backend_guest_heap_prepare)
+    bool heap_sparse;          // ... made lazily: a sparse buffer, driver memory per granule on first use (exec.c heap_lazy_try)
+    VkQueue sparse_queue;      // (heap_sparse: the queue its binds go to - a sparse-only family's own, else NULL: the main queue)
     bool ssbo_chunks;  // stores and atomics from fragment and vertex shaders (exec.c: the heap in chunks counts misses)
     bool lazy_heap, bda;  // the heap imported chunk by chunk (device.c lazy_heap_predicted), buffer device addresses enabled for it
     bool heap_probe;      // one import tried at the start, lazy chunks if it runs out of memory (exec.c whole_import_probe_oom)

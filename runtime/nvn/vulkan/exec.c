@@ -180,6 +180,8 @@ static void gmir_writeback(void);  // (... what the GPU stored, into guest memor
 #ifdef __linux__
 static bool gmem_mprotect_broken;  // (exec.c guest heap: driver memory that page protection corrupts)
 #endif
+static void heap_lazy_touch(uint64_t addr, uint64_t size);  // (the lazy heap: the GPU is to use [addr, addr+size))
+static void heap_lazy_stats(char *out, size_t n);           // (renderer_stats: the lazy heap's granules so far)
 // The page the "is there write tracking?" probes query (a query may protect it): the top of the heap range, which
 // the game's heap never reaches - not HEAP_BASE, where the game's heap allocator keeps its header and lock.
 #define TRACK_PROBE_PAGE (HEAP_BASE + HEAP_MAX - 4096)
@@ -1347,6 +1349,8 @@ const char *renderer_stats(void) {
         if (gc_shift) {
             snprintf(stats_text + n, sizeof stats_text - n, " | heap chunks %d imported (%llu MB), %llu misses", gc_imported,
                      (unsigned long long)gc_imported_bytes >> 20, (unsigned long long)stat_gc_misses);
+            n = strlen(stats_text);
+            heap_lazy_stats(stats_text + n, sizeof stats_text - n);
             n = strlen(stats_text);
             if (gc_lazy) {
                 snprintf(stats_text + n, sizeof stats_text - n, ", pointer scans %llu (%.2f MB), %llu skipped",
@@ -3264,6 +3268,7 @@ static bool snap_on(void) {
             LOG("[vk] storage snapshots off: the game's heap fills the range\n");
         } else {
             plat_commit(HEAP_BASE + snap_base, SNAP_RING);  // (Windows: backed before the import pins it)
+            heap_lazy_touch(HEAP_BASE + snap_base, SNAP_RING);  // (the lazy heap: the GPU stores there)
             LOG("[vk] storage buffers the CPU rewrites: copies at %llx (%llu MB ring after the game's heap)\n",
                 (unsigned long long)(HEAP_BASE + snap_base), (unsigned long long)(SNAP_RING >> 20));
             snap_ring_import_tail();  // (lazy chunks: one imported short of the ring already is imported again over it)
@@ -4118,7 +4123,7 @@ static bool gmem_import(uint64_t size) {
 // memory is mapped at HEAP_BASE before the game starts, so the GPU sees an ordinary buffer. Called from boot (main.c)
 // on the main thread before any guest thread exists; a reboot frees it with gmem_buf (vk_exec_reset) and the guest
 // window's reset unmaps it, so the next boot gets fresh zeroed memory. Costs: the whole HEAP_MAX is committed once the
-// GPU first uses it, and Linux write tracking can't watch this mapping (the heap is then re-checked like on Beta 4).
+// GPU first uses it (not on Turnip: made lazily there, heap_lazy_try), and Linux write tracking can't watch this mapping (the heap is then re-checked like on Beta 4).
 // Nothing writes the heap before boot (the start screen doesn't use guest memory): the mapping replaces it unseen.
 // The mapping: where the driver has VK_EXT_map_memory_placed (RADV, Mesa 24.1+), it maps the memory at HEAP_BASE
 // itself, through its own DRM file as for any vkMapMemory. Else the memory is exported as a dma-buf and that is
@@ -4175,6 +4180,150 @@ static void heap_unmap_placed(void) {
 #endif
     if (unmap2) unmap2(g_vk.dev, &ui);
     gmem_placed = false;
+}
+
+// The heap as driver memory made lazily (Turnip: g_vk.heap_sparse). One driver allocation of HEAP_MAX is resident
+// from the GPU's first use of it (msm allocates a buffer's pages all at once), 3.3 GB, though the game's own use is far
+// less - and on the Steam Frame that ended the owner's game in an OOM kill at its start (2026-11-06). Instead gmem_buf
+// is a sparse buffer over the heap (one device address, as the whole allocation's: the shaders and chunks above are
+// unchanged), and each granule of the heap gets its own allocation, mapped at its place (placed map) and bound to
+// the buffer there, when it is first used:
+// - by the CPU: HEAP_BASE stays anonymous memory that nothing has touched, registered with a userfaultfd for missing
+//   pages (platform/linux.c plat_lazy_range); a thread's first access to a granule waits while it is made;
+// - by the GPU: the ranges draws and dispatches bind (gc_touch), what copies store into the heap (gmem_copy), and the
+//   storage snapshots' ring. A granule neither has touched holds zeros, which is what the GPU reads where nothing is
+//   bound (residencyNonResidentStrict); only a GPU store through a pointer into one would be lost.
+// Granules of LARECOMP_VK_HEAP_GRANULE_MB (a power of two; default 2). LARECOMP_VK_HEAP_LAZY=0: one allocation as before.
+#define LZ_GRAN_MAX (HEAP_MAX >> 20)  // (granules of 1 MB at least)
+static bool gmem_lazy_heap;            // gmem_buf is the sparse buffer, made granule by granule
+static VkDeviceMemory lz_mem[LZ_GRAN_MAX];
+static uint64_t lz_gran;
+static VkFence lz_fence;
+static _Atomic uint64_t lz_made_bytes, lz_make_ns, lz_made_n;
+
+static void lz_make(uint64_t addr, uint64_t size) {  // (plat_lazy_range: one at a time)
+    uint64_t t0 = SDL_GetTicksNS(), g = (addr - HEAP_BASE) / lz_gran;
+    VkMemoryAllocateFlagsInfo af = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
+    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = g_vk.bda ? &af : NULL,
+                               .allocationSize = size, .memoryTypeIndex = gmem_dmabuf_type};
+    VkDeviceMemory mem;
+    VkResult r = vkAllocateMemory(g_vk.dev, &ai, NULL, &mem);
+    if (r != VK_SUCCESS) FATAL("the guest heap: no driver memory for %llu MB at %llx (%d)\n", (unsigned long long)(size >> 20), (unsigned long long)addr, r);
+#ifdef VK_EXT_map_memory_placed
+    static PFN_vkMapMemory2KHR map2;
+    if (!map2) map2 = (PFN_vkMapMemory2KHR)vkGetDeviceProcAddr(g_vk.dev, "vkMapMemory2KHR");
+    VkMemoryMapPlacedInfoEXT pl = {.sType = VK_STRUCTURE_TYPE_MEMORY_MAP_PLACED_INFO_EXT, .pPlacedAddress = (void *)(uintptr_t)addr};
+    VkMemoryMapInfoKHR mi = {.sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO_KHR, .pNext = &pl, .flags = VK_MEMORY_MAP_PLACED_BIT_EXT,
+                             .memory = mem, .size = VK_WHOLE_SIZE};
+    void *p = NULL;
+    r = map2(g_vk.dev, &mi, &p);
+    if (r != VK_SUCCESS || p != (void *)(uintptr_t)addr) FATAL("the guest heap: driver memory not mapped at %llx (%d)\n", (unsigned long long)addr, r);
+#endif
+    VkSparseMemoryBind b = {.resourceOffset = addr - HEAP_BASE, .size = size, .memory = mem};
+    VkSparseBufferMemoryBindInfo bb = {.buffer = gmem_buf, .bindCount = 1, .pBinds = &b};
+    VkBindSparseInfo bi = {.sType = VK_STRUCTURE_TYPE_BIND_SPARSE_INFO, .bufferBindCount = 1, .pBufferBinds = &bb};
+    vkResetFences(g_vk.dev, 1, &lz_fence);
+    extern void vk_queue_lock(void), vk_queue_unlock(void);
+    if (g_vk.sparse_queue) r = vkQueueBindSparse(g_vk.sparse_queue, 1, &bi, lz_fence);
+    else vk_queue_lock(), r = vkQueueBindSparse(g_vk.queue, 1, &bi, lz_fence), vk_queue_unlock();
+    if (r == VK_SUCCESS) r = vkWaitForFences(g_vk.dev, 1, &lz_fence, VK_TRUE, 10000000000ull);
+    if (r != VK_SUCCESS) FATAL("the guest heap: binding %llx for the GPU failed (%d)\n", (unsigned long long)addr, r);
+    lz_mem[g] = mem;
+    lz_made_bytes += size;
+    lz_made_n++;
+    lz_make_ns += SDL_GetTicksNS() - t0;
+}
+
+static void heap_lazy_touch(uint64_t addr, uint64_t size) {
+    if (!gmem_lazy_heap) return;
+    // (a binding's size can be "the rest of the heap": at most 64 MB from its start are made, the rest stays as it is)
+    if (size > (64ull << 20)) {
+        static int nlog;
+        if (nlog++ < 8) LOG("[vk] lazy heap: a %llu MB GPU range at %llx: its first 64 MB made\n", (unsigned long long)(size >> 20), (unsigned long long)addr);
+        size = 64ull << 20;
+    }
+    plat_lazy_touch(addr, size);
+    // (logged here, on the render thread: lz_make may run on the fault thread while the faulting one holds the log's lock)
+    static uint64_t logged;
+    if (lz_made_bytes >> 28 != logged) {
+        logged = lz_made_bytes >> 28;
+        LOG("[vk] lazy heap: %llu MB made in %llu granules (%.1f ms)\n", (unsigned long long)(lz_made_bytes >> 20),
+            (unsigned long long)lz_made_n, lz_make_ns / 1e6);
+    }
+}
+void vk_heap_lazy_log(void) {  // (device.c vk_log_memory)
+    if (gmem_lazy_heap)
+        LOG("[vk] memory: the lazy heap holds %llu MB in %llu granules\n", (unsigned long long)(lz_made_bytes >> 20), (unsigned long long)lz_made_n);
+}
+static void heap_lazy_stats(char *out, size_t n) {
+    if (gmem_lazy_heap)
+        snprintf(out, n, ", lazy heap %llu MB in %llu granules (%.1f ms making them)", (unsigned long long)(lz_made_bytes >> 20),
+                 (unsigned long long)lz_made_n, lz_make_ns / 1e6);
+}
+
+// The heap as granules made on first use (guest_heap_dmabuf_try, memory type `type`; buffer usage `usage`). False:
+// not here (then one allocation as before).
+static bool heap_lazy_try(int type, VkBufferUsageFlags usage) {
+    const char *e = getenv("LARECOMP_VK_HEAP_LAZY"), *ge = getenv("LARECOMP_VK_HEAP_GRANULE_MB");
+    if (!g_vk.heap_sparse || (e && !atoi(e)) || !g_vk.map_placed) return false;
+    uint64_t gran = (ge && atoi(ge) > 0 ? (uint64_t)atoi(ge) : 2) << 20;
+    if (gran & (gran - 1) || HEAP_MAX % gran || gran > HEAP_MAX) { LOG("[vk] lazy heap: granule %s MB is no power of two dividing the heap\n", ge); return false; }
+    VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = HEAP_MAX, .usage = usage,
+                              .flags = VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT};
+    VkBuffer buf;
+    if (vkCreateBuffer(g_vk.dev, &bci, NULL, &buf) != VK_SUCCESS) { LOG("[vk] lazy heap: no sparse buffer\n"); return false; }
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(g_vk.dev, buf, &req);
+    const char *why = !(req.memoryTypeBits & (1u << type)) ? "memory type not allowed" : gran % req.alignment ? "granule below the binding alignment" :
+                      req.size != HEAP_MAX ? "buffer size" : NULL;
+    if (!why && !lz_fence) {
+        VkFenceCreateInfo fci = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        if (vkCreateFence(g_vk.dev, &fci, NULL, &lz_fence) != VK_SUCCESS) why = "no fence";
+    }
+    if (!why) {
+        plat_write_tracking_off("the guest heap is driver memory");  // (a range has one userfaultfd: the lazy range's)
+        gmem_buf = buf;  // (lz_make binds to it, from the first touch on)
+        lz_gran = gran;
+        gmem_dmabuf_type = (uint32_t)type;
+        if (!plat_lazy_range(HEAP_BASE, HEAP_BASE + HEAP_MAX, gran, lz_make)) why = "no userfaultfd";
+    }
+    if (why) {
+        LOG("[vk] lazy heap: not possible here (%s): one allocation\n", why);
+        gmem_buf = VK_NULL_HANDLE;
+        vkDestroyBuffer(g_vk.dev, buf, NULL);
+        return false;
+    }
+    heap_note_type((uint32_t)type);
+    gmem_mem = VK_NULL_HANDLE;
+    gmem_size = HEAP_MAX;
+    gmem_dmabuf = true;
+    gmem_lazy_heap = true;
+    lz_made_bytes = lz_make_ns = lz_made_n = 0;
+    LOG("[vk] guest heap as driver memory, made lazily (memory type %d, %llu MB granules, sparse buffer%s): %llu MB at %llx\n",
+        type, (unsigned long long)(gran >> 20), g_vk.sparse_queue ? ", binds on a sparse queue" : "",
+        (unsigned long long)(HEAP_MAX >> 20), (unsigned long long)HEAP_BASE);
+    return true;
+}
+
+// At a reboot (vk_exec_reset, GPU idle, guest threads stopped): the range is ordinary memory again, each granule's
+// mapping left reserved and its memory freed; the caller then resets the range to fresh zeroed memory.
+static void heap_lazy_free(void) {
+    plat_lazy_off();
+#ifdef VK_EXT_map_memory_placed
+    PFN_vkUnmapMemory2KHR unmap2 = (PFN_vkUnmapMemory2KHR)vkGetDeviceProcAddr(g_vk.dev, "vkUnmapMemory2KHR");
+#endif
+    for (uint64_t g = 0; g < HEAP_MAX / lz_gran; g++) {
+        if (!lz_mem[g]) continue;
+#ifdef VK_EXT_map_memory_placed
+        VkMemoryUnmapInfoKHR ui = {.sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO_KHR, .memory = lz_mem[g],
+                                   .flags = g_vk.unmap_reserve ? VK_MEMORY_UNMAP_RESERVE_BIT_EXT : 0};
+        if (unmap2) unmap2(g_vk.dev, &ui);
+#endif
+        vkFreeMemory(g_vk.dev, lz_mem[g], NULL);
+        lz_mem[g] = VK_NULL_HANDLE;
+    }
+    LOG("[vk] lazy heap: %llu granules (%llu MB) freed at the reboot\n", (unsigned long long)lz_made_n, (unsigned long long)(lz_made_bytes >> 20));
+    gmem_lazy_heap = false;
 }
 
 // Whether the heap is to be the driver's memory (gmir_on asks this before the heap is set up: no copies then)
@@ -4236,6 +4385,7 @@ static bool guest_heap_dmabuf_try(void) {
     if (!placed && !g_vk.dmabuf) { LOG("[vk] heap as driver memory: no way to map it here\n"); return false; }
     bi.pNext = placed ? NULL : &eb;  // (an exportable buffer only for the dma-buf mapping)
     if (g_vk.bda) bi.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;  // (Turnip: chunks of it by address, gc_import)
+    if (placed && heap_lazy_try(type, bi.usage)) return true;
     VkBuffer buf;
     if (vkCreateBuffer(g_vk.dev, &bi, NULL, &buf) != VK_SUCCESS) { LOG("[vk] heap as driver memory: buffer failed\n"); return false; }
     VkMemoryRequirements req;
@@ -4324,6 +4474,11 @@ mapped:;
         "once the GPU first uses it\n", gmem_placed ? "placed map" : "dma-buf", type, (unsigned long long)(size >> 20), (unsigned long long)HEAP_BASE);
     return true;
 }
+#else
+static const bool gmem_lazy_heap = false;
+static void heap_lazy_touch(uint64_t addr, uint64_t size) { (void)addr, (void)size; }
+static void heap_lazy_stats(char *out, size_t n) { (void)out, (void)n; }
+void vk_heap_lazy_log(void) {}
 #endif
 
 // The guest heap's GPU memory on Linux: the driver's own (above) where it can be, else host-pointer imports - the
@@ -4750,6 +4905,7 @@ static bool gc_scan_needed(void) {
 // 1-9 MB into the chunk after the bound range), and a size of 0 means "the rest of the buffer".
 static void gc_touch(uint64_t off, uint64_t size) {
     if (!gc_lazy || off >= HEAP_MAX) return;
+    heap_lazy_touch(HEAP_BASE + off, size ? size : 1);  // (the lazy heap: the range itself)
     int k0 = (int)(off >> gc_shift), k1 = (int)((off + (size ? size : 1) - 1) >> gc_shift) + 1;
     if (k1 >= gc_n) k1 = gc_n - 1;
     for (int k = k0; k <= k1; k++) if (!gc[k].buf) gc_import(k);
@@ -4956,6 +5112,8 @@ static void gc_frame(void) {
 
 // In lazy mode the heap-side offsets of a copy are in chunks: one vkCmdCopyBuffer per chunk piece. other = the GPU side.
 static void gmem_copy(VkCommandBuffer cb, VkBuffer other, const VkBufferCopy *cp, int n, bool to_heap) {
+    if (to_heap && gmem_lazy_heap)  // (the lazy heap: what the GPU stores there must exist)
+        for (int i = 0; i < n; i++) heap_lazy_touch(HEAP_BASE + cp[i].dstOffset, cp[i].size);
     if (!to_heap && heap_noncoherent())  // (the GPU's copies out of the heap - the vertex cache, gfast - read memory)
         for (int i = 0; i < n; i++) heap_clean(HEAP_BASE + cp[i].srcOffset, cp[i].size);
     if (!gc_lazy) {
@@ -5913,7 +6071,8 @@ void vk_exec_reset(void) {
     gmir_reset();
     if (gmem_buf) {
 #ifdef __linux__
-        bool placed = gmem_placed;
+        bool placed = gmem_placed || gmem_lazy_heap;
+        if (gmem_lazy_heap) heap_lazy_free();
         heap_unmap_placed();
 #endif
         vkDestroyBuffer(g_vk.dev, gmem_buf, NULL);

@@ -341,6 +341,8 @@ void vk_log_memory(const char *why) {
             (unsigned long long)(mp->memoryHeaps[i].size >> 20), (unsigned long long)(b[i].budget >> 20),
             (unsigned long long)(b[i].usage >> 20), (unsigned long long)(b[i].statistics.allocationBytes >> 20),
             b[i].statistics.allocationCount);
+    extern void vk_heap_lazy_log(void);
+    vk_heap_lazy_log();
 }
 
 // ---- pipeline cache file
@@ -769,6 +771,9 @@ static void create_device(void) {
         // Turnip: the kernel's msm driver maps a page of the heap that faults in again counted from the start of the VMA
         // it is in, not of the buffer (exec.c backend_guest_heap_prepare), so soft write tracking is never used over it
         g_vk.heap_no_split = drv.driverID == VK_DRIVER_ID_MESA_TURNIP;
+        // ... and made lazily there (exec.c heap_lazy_try): the whole 3.3 GB heap as one driver allocation was resident
+        // from the first GPU use, and an OOM kill ended the owner's game at its start (2026-11-06)
+        g_vk.heap_sparse = g_vk.heap_no_split && have.features.sparseBinding && have.features.sparseResidencyBuffer;
 #ifdef VK_EXT_graphics_pipeline_library
         if (gpl_ext)
             snprintf(gpl, sizeof gpl, "%s (fast linking %s, independent interpolation decoration %s)",
@@ -936,16 +941,34 @@ static void create_device(void) {
     }
     if (xr_mode()) fov_device_setup(g_vk.phys, fdm_ext, fsr_ext, ext, &n_ext, &f);
     float prio = 1.0f;
-    VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
-                                  .queueCount = 1, .pQueuePriorities = &prio};
-    VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = 1,
-                             .pQueueCreateInfos = &qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
+    VkDeviceQueueCreateInfo qi[2] = {{.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
+                                      .queueCount = 1, .pQueuePriorities = &prio}};
+    // The lazy heap's binds (exec.c heap_lazy_get) come from whichever thread first touches a part of the heap, while
+    // the render thread may hold the main queue: a sparse-only queue family's queue of their own where there is one
+    // (Turnip: family 1), else the main queue under its lock
+    uint32_t sparse_fam = UINT32_MAX;
+    if (g_vk.heap_sparse) {
+        b->sparseBinding = b->sparseResidencyBuffer = VK_TRUE;
+        uint32_t nq = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, NULL);
+        VkQueueFamilyProperties *qp = calloc(nq, sizeof *qp);
+        vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, qp);
+        for (uint32_t i = 0; i < nq && sparse_fam == UINT32_MAX; i++)
+            if (i != g_vk.qfam && (qp[i].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) && qp[i].queueCount) sparse_fam = i;
+        free(qp);
+        if (sparse_fam != UINT32_MAX)
+            qi[1] = (VkDeviceQueueCreateInfo){.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = sparse_fam,
+                                              .queueCount = 1, .pQueuePriorities = &prio};
+    }
+    VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = sparse_fam != UINT32_MAX ? 2 : 1,
+                             .pQueueCreateInfos = qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
 #ifdef LARECOMP_HAVE_XR
     if (xr_mode()) VK_CHECK(xr_vk_create_device(g_vk.phys, &di, &g_vk.dev));  // (the same create info, pNext chain intact)
     else
 #endif
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
+    if (sparse_fam != UINT32_MAX) vkGetDeviceQueue(g_vk.dev, sparse_fam, 0, &g_vk.sparse_queue);
     if (g_vk.vids) {
         g_vk.set_vertex_input = (PFN_vkCmdSetVertexInputEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetVertexInputEXT");
         if (!g_vk.set_vertex_input) g_vk.vids = false;
