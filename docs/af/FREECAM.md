@@ -4,8 +4,13 @@ The headset-free GO / NO-GO test for the diorama design: on the flat window, rep
 or pulled-back one and look at whether the world holds up from other angles (geometry present, lighting, shadows, water
 and fog plausible) and which shaders use camera data outside the camera buffer. Design: `~/.claude/plans/awakeningframe-vr-design.md` section 7.
 
-Status: implemented and unit-tested; **never run against the game** (no game files when it was written). Items marked
-**[G]** are guesses the first real run has to check.
+Status: run against the game on the Frame (flat, `SDL_VIDEODRIVER=offscreen ENABLE_GAMESCOPE_WSI=0`). Two things the first run
+found: the level's shaders read the view-projection from a 1 KB scene block at slot 1 (and other blocks hold inverse /
+projection copies), not from the 320-byte camera, so `cam_override_patch` now writes the substitute camera into every bound
+buffer up to 4 KB where it finds the latched matrices or the eye position (cbuf copies and promoted push-constant words);
+and the game is not deterministic from run to run, so the identity check compares modes inside one run. Floats 48-79: 48-63 is
+a rotation-only 4x4 (rows right, back, down; translation 0; not rewritten even with FIX48), 64-67 the back vector, 68-71 the
+eye, 72-75 near / far / ... (0.1, 45, 4.5, 44.9), 76-79 (1, 1, 0.01, 0). Items marked **[G]** are guesses still unchecked.
 
 ## What it does
 
@@ -67,7 +72,7 @@ steam-frame/prepare-game.sh game.nsp prod.keys --dest $PWD/extracted     # once 
 ~/Games/AwakeningFrame/afbuild.sh                                        # make gen + make; refuses while ~/.cache/headset-in-use exists
 tools/test_cam_override.sh                                               # unit test, no game files
 tools/freecam_sweep.sh --plan                                            # what it will do, no game files needed
-tools/freecam_sweep.sh --identity-check                                  # identity vs off, same warp, same frame
+tools/freecam_sweep.sh --identity-check                                  # identity / off alternating inside one run
 tools/freecam_sweep.sh --quick --only mabe                               # a first look (6 shots)
 tools/freecam_sweep.sh                                                   # 7 spots x 34 steps = 238 shots, ~26000 frames
 ```
