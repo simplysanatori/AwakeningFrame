@@ -2093,8 +2093,10 @@ static VkPipelineLayout make_layout(Prog *p, int nsets, VkShaderStageFlags s0, V
     uint32_t npcr = 0;
     if (!direct && p->vi && p->vi->npush) pcr[npcr++] = (VkPushConstantRange){VK_SHADER_STAGE_VERTEX_BIT, 0, p->vi->npush * 4u};
     if (!direct && p->fi && p->fi->npush) pcr[npcr++] = (VkPushConstantRange){VK_SHADER_STAGE_FRAGMENT_BIT, p->fi->push_base, p->fi->npush * 4u};
-    if (p->vkey.mv && !direct)  // (multiview programs: the per-view cbuf masks, no promoted words)
+#ifdef MV_PUSH_BYTES  // (first translator interface: the per-view cbuf masks as push constants, no promoted words)
+    if (p->vkey.mv && !direct)
         npcr = 1, pcr[0] = (VkPushConstantRange){VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, MV_PUSH_BYTES};
+#endif
     VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = (uint32_t)nsets,
                                      .pSetLayouts = p->set_layout, .pushConstantRangeCount = direct ? 1 : npcr,
                                      .pPushConstantRanges = direct ? &gd : npcr ? pcr : NULL};
@@ -7255,12 +7257,22 @@ static Prog *mv_program(Prog *pr, const ShaderKey *vkey, const ShaderKey *fkey) 
                     if (mvs.bad_cb++ < 8) LOG("[mv] camera block cbuf %d (stage %d, %llu bytes) can't take a second eye's copy\n", k, sg, (unsigned long long)size);
                     continue;
                 }
+#ifndef MV_PUSH_BYTES
+                if (k > 10) {  // (ShaderKey.mv: a mask of cbufs 3-10)
+                    if (mvs.bad_cb++ < 8) LOG("[mv] camera block cbuf %d (stage %d) is past the multiview key's mask: eye 0's in both\n", k, sg);
+                    continue;
+                }
+#endif
                 bits[sg] |= 1u << k;
             }
         }
     if (!amask && !bits[0] && !bits[1]) { mvs.baseprog++; return pr; }
     ShaderKey vk2 = *vkey, fk2 = *fkey;
+#ifdef MV_PUSH_BYTES
     vk2.mv = fk2.mv = 1;
+#else  // (the stage's per-eye cbufs, known when the program is made: their reads keep constant indices)
+    vk2.mv = (uint8_t)(bits[0] >> 3), fk2.mv = (uint8_t)(bits[1] >> 3);
+#endif
     for (int b = 0; b < 3; b++) vk2.tex_amask[b] = fk2.tex_amask[b] = (uint8_t)(amask >> (b * 8));
     Prog *mp = get_program(st.program, &vk2, &fk2);
     int ps = mp ? atomic_load(&mp->state) : 2;
@@ -7782,8 +7794,10 @@ static void draw_(CmdRec *r, bool indexed) {
         rec_CmdPushConstants(cb, pr->layout, sg ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT, si->push_base,
                              si->npush * 4u, pw);
     }
+#ifdef MV_PUSH_BYTES
     if (g_mvp)  // (multiview program: which cbufs have both eyes' copies)
         rec_CmdPushConstants(cb, pr->layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, MV_PUSH_BYTES, g_mv_bits);
+#endif
     if (gc_shift && (pr->vi->uses_gmem || pr->fi->uses_gmem))
         gmem_chunk_bind(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, GMEM_CHUNK_SET(STAGE_FRAGMENT),
                         (pr->vi->uses_gmem ? 1u << STAGE_VERTEX : 0) | (pr->fi->uses_gmem ? 1u << STAGE_FRAGMENT : 0));
