@@ -24,6 +24,7 @@ typedef struct {
     int layout;        // VRS_LAYOUT_*
     int follow;        // VRS_FOLLOW_*
     int height_cm;     // the table's height, cm from the default (the rig's: not saved here, read back by vr_settings_sync_rig)
+    int dist_cm;       // the table's distance, cm from the head; the rig's, not saved here
     int size_pct;      // the table's size, percent of the default (0.067 m per game unit); the rig's, not saved here
     int tilt_deg;      // the table's tilt, degrees from the default view; the rig's, not saved here
     int turn;          // VRS_TURN_*
@@ -36,7 +37,7 @@ typedef struct {
 } VrSettings;
 
 #define VR_DEFAULTS {.refresh = VRS_REFRESH_120, .layout = VRS_LAYOUT_SWITCH, .turn = VRS_TURN_SMOOTH, .follow = VRS_FOLLOW_SMOOTH, \
-                     .height_cm = 0, .size_pct = 100, .tilt_deg = 0, .edge = VRS_EDGE_OFF, .foveation = VRS_FOV_HIGH, .dynres = true, \
+                     .height_cm = 0, .dist_cm = 120, .size_pct = 100, .tilt_deg = 30, .edge = VRS_EDGE_OFF, .foveation = VRS_FOV_HIGH, .dynres = true, \
                      .hud_dist = 2.0f, .hud_width = 2.2f}
 
 #ifdef __cplusplus
@@ -44,7 +45,7 @@ extern "C" {
 #endif
 
 typedef enum {
-    VRO_REFRESH, VRO_LAYOUT, VRO_TURN, VRO_FOLLOW, VRO_HEIGHT, VRO_SIZE, VRO_TILT, VRO_RECENTRE, VRO_EDGE, VRO_FOVEATION, VRO_DYNRES,
+    VRO_REFRESH, VRO_LAYOUT, VRO_TURN, VRO_FOLLOW, VRO_HEIGHT, VRO_DIST, VRO_SIZE, VRO_TILT, VRO_RECENTRE, VRO_EDGE, VRO_FOVEATION, VRO_DYNRES,
     VRO_HUD_DIST, VRO_HUD_WIDTH, VRO_POINTER_HAND, VRO_COUNT
 } VrOpt;
 

@@ -6,8 +6,9 @@
 //   anchor  the world point on the table's centre: per area type (overworld: the game camera's focus at Link's height,
 //           filtered; interiors and dungeon rooms: the room's centre, snapped behind a blink on a room change; side
 //           views: the focus on the side plane, filtered) or, with LARECOMP_VR_FOLLOW set, the Follow Mode's follow
-//   A       the table point in app space: LARECOMP_VR_DIST in front of the head at LARECOMP_VR_PITCH below the horizon
-//           (side views: SIDE_PITCH, a wall at about eye height), plus the player's height offset
+//   A       the table point in app space: the player's Distance in front of the head (default 1.2 m, LARECOMP_VR_DIST) at
+//           LARECOMP_VR_PITCH below the horizon (default 15: Link is about where a relaxed gaze rests; side views:
+//           SIDE_PITCH, a wall at about eye height), plus the player's height offset
 //   s       LARECOMP_VR_SCALE (0.067 m per unit) times the player's size
 //   R       Rx(tilt) * Ry(yaw): the player's tilt (side views: none) and yaw (side views: the side plane faces the player)
 //
@@ -53,19 +54,28 @@ float xr_rig_fade(void);
 #define XR_RIG_HEIGHT_MAX (0.40f)
 #define XR_RIG_SIZE_MIN (0.40f)     // times LARECOMP_VR_SCALE (1: one tile about 10 cm)
 #define XR_RIG_SIZE_MAX (3.00f)
-#define XR_RIG_TILT_MIN (-20.0f)    // degrees; positive lifts the table's far edge towards the player
+#define XR_RIG_TILT_MIN (0.0f)      // degrees; positive lifts the table's far edge towards the player
 #define XR_RIG_TILT_MAX (50.0f)
+#define XR_RIG_DIST_MIN (0.60f)     // metres from the head to the table's centre
+#define XR_RIG_DIST_MAX (3.00f)
+// the defaults (a new player, and the full view reset): the table's centre 15 degrees below the horizon, 1.2 m away, leaned
+// 30 degrees so that the head looks onto it at 15 + 30 = 45 degrees, the game camera's own angle (docs/af/RIG.md)
+#define XR_RIG_PITCH_DEFAULT (15.0f)
+#define XR_RIG_TILT_DEFAULT (30.0f)
+#define XR_RIG_DIST_DEFAULT (1.20f)
 typedef struct {
     float height;  // metres
     float size;    // scale factor
     float tilt;    // degrees
+    float dist;    // metres, the table's centre in front of the head (XR_RIG_DIST_*)
     float yaw;     // degrees, counter-clockwise seen from above (snap turns step it by 45, smooth turning moves it)
 } XrRigUser;
 void xr_rig_get_user(XrRigUser *u);
 void xr_rig_set_user(const XrRigUser *u);  // applied on the next game frame (a yaw change behind a blink)
-void xr_rig_reset_user(void);              // height 0, size 1, tilt 0, yaw 0 (saved)
+void xr_rig_reset_user(void);              // height 0, size 1, tilt and distance the defaults, yaw 0 (saved)
 void xr_rig_recentre(void);                // the table in front of the player again, at the head's height (a blink)
-void xr_rig_reset_view(void);              // the same, and the yaw back to 0 (the game's own angle); tilt, height and size kept (a blink)
+void xr_rig_reset_view(void);              // the same, and the yaw back to 0 (the game's own angle); tilt, height, size and distance kept (a blink)
+void xr_rig_reset_view_full(void);         // the view reset, and tilt, height, size and distance back to the defaults too (a blink; saved)
 void xr_rig_set_turn_mode(int snap);       // 1: right stick sideways snaps 45 degrees behind a blink; 0 (default): turns smoothly
 
 #ifdef __cplusplus

@@ -27,8 +27,8 @@ Plus, Minus) name the Frame control that does it:
 | stick clicks | stick clicks | no function in play that this port knows of; a single click still reaches the game as the stick-click buttons |
 | right stick left / right | (rig) | turns the table smoothly (`XrRigInput.turn`); with the Turning option on Snap, a flick turns it 45 degrees behind a blink (`xr_input_take_snap`) |
 | right stick up / down | (rig) | table tilt (`XrRigInput.tilt`) |
-| both stick clicks together (held 0.1 s) | (rig) | reset the view: the table goes back to the game's own angle and in front of you again (tilt, height and size are kept) |
-| left grip held | (rig modifier) | the left D-pad becomes height (up / down) and size (right / left); a click of the right stick does the same reset as both stick clicks |
+| both stick clicks together (held 0.1 s) | (rig) | reset the view: the table goes back to the game's own angle and in front of you again (tilt, height, distance and size are kept). Held 2 s from the press: the full view reset, which also puts tilt, height, distance and size back to the defaults |
+| left grip held | (rig modifier) | the left D-pad becomes height (up / down) and size (right / left); a click of the right stick does the same two resets as both stick clicks (0.1 s, 2 s) |
 
 What the rig does with these (ranges, the blink, side views): docs/af/RIG.md.
 
@@ -49,7 +49,7 @@ stick scrolls while the dot is on the panel, and the controller ticks when the d
 The right stick turns or tilts, not both: the axis it was first pushed along wins until the other is 1.4 times bigger, and
 the other reads zero, so a thumb that wanders does not tilt a turn. Both stick clicks pressed together for 0.1 s are the
 rig's: the game gets neither until both are let go. A single click, or both for less than 0.1 s, goes to the game (as far as this port knows the
-game has no use for them, but a rebind in the Controls tab could give them one). "View Reset" shows on the HUD for a moment, no sound.
+game has no use for them, but a rebind in the Controls tab could give them one). "View Reset" shows on the HUD for a moment, "Full View Reset" after the 2 s hold, no sound.
 
 The shield is R and the Pegasus Boots are L (they have no slot on the Items page, so they are fixed buttons; the touch
 build's prompts say the same: "R appears with the shield, L with the Pegasus Boots"). In the Switch version ZL and ZR have no

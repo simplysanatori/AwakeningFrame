@@ -33,7 +33,7 @@ static const char *const k_hand[] = {"right", "left"};
 // The hooks. Each is the function that changes one option while the game runs (weak: an absent one, as in a flat
 // build, leaves the row at "Applies After Restart", and nothing breaks). Where they live: the rig (runtime/xr/xr_rig.h),
 // edge.c, foveation.c, output_scale.c, xr_input.c and stereo.c.
-// Height, size and tilt belong to the rig (runtime/xr/xr_rig.h, vr_rig.ini): the three xr_rig_set_* hooks are provided by
+// Height, distance, size and tilt belong to the rig (runtime/xr/xr_rig.h, vr_rig.ini): the four xr_rig_set_* hooks are provided by
 // runtime/xr/xr_rig_settings.c (XR builds only), the tab reads the live values back through xr_rig_get_user, and
 // larecomp.ini no longer keeps them (the old vr_table_* keys are read and ignored).
 #define WEAK __attribute__((weak))
@@ -41,6 +41,7 @@ static const char *const k_hand[] = {"right", "left"};
 extern void xr_rig_get_user(XrRigUser *u) WEAK;
 extern void stereo_set_follow(int mode) WEAK;             // VRS_FOLLOW_*: stereo.c cfg.follow
 extern void xr_rig_set_height_cm(float cm) WEAK;          // table height: cm above / below the default (negative: lower)
+extern void xr_rig_set_dist_cm(float cm) WEAK;            // table distance: cm from the head to the table's centre
 extern void xr_rig_set_size_pct(float pct) WEAK;          // table size: percent of the default scale
 extern void xr_rig_set_tilt_deg(float deg) WEAK;          // table tilt: degrees from the default view (positive: toward the player)
 extern void xr_rig_recentre(void) WEAK;                   // put the table in front of the player again (xr_rig.c)
@@ -109,7 +110,7 @@ static const char *const k_env[VRO_COUNT] = {
     [VRO_REFRESH] = "LARECOMP_XR_HZ", [VRO_LAYOUT] = "LARECOMP_XR_LAYOUT", [VRO_TURN] = "LARECOMP_VR_TURN", [VRO_FOLLOW] = "LARECOMP_VR_FOLLOW",
     // (height, size and tilt: the rig's, vr_rig.ini; LARECOMP_VR_TABLE / _PITCH / _SCALE are its base and the player's values
     // come on top, so the environment does not grey these rows)
-    [VRO_HEIGHT] = "", [VRO_SIZE] = "", [VRO_TILT] = "",
+    [VRO_HEIGHT] = "", [VRO_DIST] = "", [VRO_SIZE] = "", [VRO_TILT] = "",
     [VRO_RECENTRE] = "", [VRO_EDGE] = "LARECOMP_VR_EDGE", [VRO_FOVEATION] = "LARECOMP_VR_FOVEATION",
     [VRO_DYNRES] = "LARECOMP_VR_DYNRES", [VRO_HUD_DIST] = "LARECOMP_XR_QUAD",
     [VRO_HUD_WIDTH] = "LARECOMP_XR_QUAD", [VRO_POINTER_HAND] = "LARECOMP_VR_POINTER_HAND"};
@@ -160,13 +161,14 @@ void vr_settings_apply_env(void) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The rig's live height / size / tilt into the rows' values (the tab calls this each time it draws, so a change made with
+// The rig's live height / distance / size / tilt into the rows' values (the tab calls this each time it draws, so a change made with
 // the controller shows). Without the rig (a flat build) the rows keep their defaults.
 void vr_settings_sync_rig(void) {
     if (!xr_rig_get_user) return;
     XrRigUser u;
     xr_rig_get_user(&u);
     VR.height_cm = clampi((int)lroundf(u.height * 100.0f), (int)lroundf(XR_RIG_HEIGHT_MIN * 100.0f), (int)lroundf(XR_RIG_HEIGHT_MAX * 100.0f));
+    VR.dist_cm = clampi((int)lroundf(u.dist * 100.0f), (int)lroundf(XR_RIG_DIST_MIN * 100.0f), (int)lroundf(XR_RIG_DIST_MAX * 100.0f));
     VR.size_pct = clampi((int)lroundf(u.size * 100.0f), (int)lroundf(XR_RIG_SIZE_MIN * 100.0f), (int)lroundf(XR_RIG_SIZE_MAX * 100.0f));
     VR.tilt_deg = clampi((int)lroundf(u.tilt), (int)XR_RIG_TILT_MIN, (int)XR_RIG_TILT_MAX);
 }
@@ -185,6 +187,7 @@ bool vr_opt_live(VrOpt o) {
     case VRO_TURN: return xr_rig_set_turn_mode != NULL;
     case VRO_FOLLOW: return stereo_set_follow != NULL;
     case VRO_HEIGHT: return xr_rig_set_height_cm != NULL;
+    case VRO_DIST: return xr_rig_set_dist_cm != NULL;
     case VRO_SIZE: return xr_rig_set_size_pct != NULL;
     case VRO_TILT: return xr_rig_set_tilt_deg != NULL;
     case VRO_RECENTRE: return xr_rig_recentre != NULL;
@@ -205,6 +208,7 @@ void vr_settings_changed(VrOpt o) {
     case VRO_TURN: if (xr_rig_set_turn_mode) xr_rig_set_turn_mode(VR.turn == VRS_TURN_SNAP); break;
     case VRO_FOLLOW: if (stereo_set_follow) stereo_set_follow(VR.follow); break;
     case VRO_HEIGHT: if (xr_rig_set_height_cm) xr_rig_set_height_cm((float)VR.height_cm); break;
+    case VRO_DIST: if (xr_rig_set_dist_cm) xr_rig_set_dist_cm((float)VR.dist_cm); break;
     case VRO_SIZE: if (xr_rig_set_size_pct) xr_rig_set_size_pct((float)VR.size_pct); break;
     case VRO_TILT: if (xr_rig_set_tilt_deg) xr_rig_set_tilt_deg((float)VR.tilt_deg); break;
     case VRO_EDGE: if (edge_set_mode) edge_set_mode(VR.edge); break;
