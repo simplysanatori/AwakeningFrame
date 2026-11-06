@@ -98,6 +98,23 @@ and it works in both of Turnip's modes (sysmem and GMEM).
 - **Log:** `[fov] eye gaze in N of M game frames ... ; X of Y eye passes foveated` every 10 s.
   `LARECOMP_VR_FOVEATION_LOG=1` logs each pass decision (the first 400).
 
+## Tiled lights (interiors and caves)
+
+Rooms are lit through the game's tile lists: a compute program (once per frame, eye 0 only) lists, for each 64-pixel
+tile of the 1920x1080 image, the lights whose spheres reach the tile's frustum, and the lit draws read the list of the
+tile their pixel falls in. The game builds the tiles' frustums from its own vertical fov and aspect (plain numbers in
+the scene block, which the camera substitution leaves alone) around eye 0's view; the eyes look their tiles up through
+their own projections, much wider and off-centre on the headset. So a pixel got the lights of another part of the view,
+and a light ended along a tile row or column: a translucent dark box with straight edges in every room as soon as the
+table was turned (Tail Cave 04B at a 40-degree turn: a step along tile row 13, eye row 1320 of 1728; at the game's own
+angle the same row lies in the void below the room).
+
+In the VR mode the program gives every tile one frustum, 70 degrees each way around eye 0's view (wider than any eye's
+field), keeping the game's sphere / plane and near / far tests (`translate.c light_tiles_fix`, signature-checked; the
+flag `maxwell_vr_light_tiles` is set in `vk_exec_init`). Every tile then lists every light that can reach either eye,
+so what a pixel is lit by no longer depends on its tile. The lists keep the game's limit of 16 lights; a room has a
+few. `LARECOMP_VR_LIGHT_TILES=0`: the game's tiles (the boxes come back).
+
 ## Diorama placement
 
 The rig (`runtime/xr/xr_rig.c`, docs/af/RIG.md) now places the table: per-area anchoring, the player's snap turn,
@@ -178,6 +195,7 @@ One run of a list draws both eyes (VK_KHR_multiview, `viewMask` 3) instead of ru
 | `LARECOMP_VR_DYNRES=1`, `_MIN` / `_MAX` / `_MS` | dynamic eye resolution (off by default; docs/af/PASSES.md) |
 | `LARECOMP_GPU_OVERLAP=0\|1` | the CPU / GPU overlap (VR default on, flat off on Turnip; docs/af/PASSES.md) |
 | `LARECOMP_VR_FOVEATION=off\|low\|medium\|high` | eye-tracked foveation of the eye passes (above) |
+| `LARECOMP_VR_LIGHT_TILES=0` | the game's own light tiles in the VR mode (default: one wide frustum per tile; above) |
 | `LARECOMP_MV=1` | multiview stereo: twins as layer 1, one run per list (above) |
 | `LARECOMP_MV_PASSES=0` | with `LARECOMP_MV=1`: the layered twins, but each list still runs once per eye |
 
