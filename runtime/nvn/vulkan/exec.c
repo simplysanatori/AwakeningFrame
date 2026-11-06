@@ -3778,7 +3778,10 @@ static bool whole_import_probe_oom(void) {
         if (r == VK_SUCCESS) {
             VkCommandBufferSubmitInfo cbs = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = cb};
             VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = 1, .pCommandBufferInfos = &cbs};
+            extern void vk_queue_lock(void), vk_queue_unlock(void);  // (the queue's external sync: record.c, runtime/xr)
+            vk_queue_lock();
             r = vkQueueSubmit2(g_vk.queue, 1, &si, fence);
+            vk_queue_unlock();
             if (r == VK_SUCCESS) r = vkWaitForFences(g_vk.dev, 1, &fence, VK_TRUE, 10000000000ull);
         }
     }

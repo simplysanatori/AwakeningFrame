@@ -52,6 +52,12 @@ bool xr_set_begin(uint64_t timeout_ns, uint32_t *hud_index) {
     uint32_t idx;
     if (!xr_chain_acquire(&g_xr.hud[pair], &idx)) return false;
     memset(&g_xr.building, 0, sizeof g_xr.building);
+    if (g_xr.early_ok) {  // (the stereo executor rendered this frame's eyes with these: xr_latch_views_early)
+        memcpy(g_xr.building.views, g_xr.early_views, sizeof g_xr.building.views);
+        g_xr.building.space = g_xr.early_space;
+        g_xr.building.views_ok = true;
+        g_xr.early_ok = false;
+    }
     g_xr.building.pair = pair;
     g_xr.building.hud = idx;
     g_xr.in_set = true;
@@ -95,9 +101,15 @@ void xr_release_completed(void) {
     pthread_mutex_unlock(&g_xr.mu);
 }
 
+static _Atomic int g_gpu_us[2] = {-1, -1};  // (xr_note_eye_gpu) microseconds
+void xr_note_eye_gpu(float ms0, float ms1) {
+    atomic_store(&g_gpu_us[0], ms0 < 0 ? -1 : (int)(ms0 * 1000.0f));
+    atomic_store(&g_gpu_us[1], ms1 < 0 ? -1 : (int)(ms1 * 1000.0f));
+}
+
 // xr_timing.log in the data folder (the previous session's as xr_timing.log.prev): one line per refresh, ms since
 // xrBeginSession on plat_now_ns's clock (docs/af/TOOLING.md; tools/session-report.py reads it). GPU times per eye are
-// not measured here yet (-1).
+// GPU ms per eye come from the stereo executor (xr_note_eye_gpu; -1 while unknown).
 static FILE *tlog;
 static void timing_open(void) {
     char p[1024], q[1040];
@@ -122,10 +134,10 @@ static void timing_line(uint64_t f, uint64_t t_wait0, uint64_t t_ret, const XrFr
     struct timespec rt;
     clock_gettime(CLOCK_REALTIME, &rt);
     double b = (double)g_xr.begin_ns;
-    fprintf(tlog, "%02d:%02d:%02d.%03ld xrt f=%llu t=%.3f pdt=%.3f period=%.3f wait=%.3f begin=%.3f end=%.3f gpu0=-1 gpu1=-1 late=%d\n",
+    fprintf(tlog, "%02d:%02d:%02d.%03ld xrt f=%llu t=%.3f pdt=%.3f period=%.3f wait=%.3f begin=%.3f end=%.3f gpu0=%.3f gpu1=%.3f late=%d\n",
             tm.tm_hour, tm.tm_min, tm.tm_sec, rt.tv_nsec / 1000000, (unsigned long long)f, (t_ret - b) / 1e6,
             time_ms(fs->predictedDisplayTime), fs->predictedDisplayPeriod / 1e6, (t_ret - t_wait0) / 1e6, (t_begin - b) / 1e6,
-            (t_end - b) / 1e6, late);
+            (t_end - b) / 1e6, atomic_load(&g_gpu_us[0]) / 1000.0, atomic_load(&g_gpu_us[1]) / 1000.0, late);
 }
 
 static void end_frame(const XrFrameState *fs, bool new_set) {
