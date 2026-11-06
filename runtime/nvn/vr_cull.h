@@ -20,3 +20,6 @@ void vr_cull_note_game(float fovy_field, float aspect_field);
 void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3], const CamRef *eye0, const CamRef *eye1);
 // the fitted culling aspect (absolute) and fovy scale; false until the first fit
 bool vr_cull_get(float *aspect, float *fovy_scale);
+// (edge pass, render thread) the latest fit's floor quadrilateral in world (x, z), counter-clockwise from above, the floor
+// height (the anchor's y) and the prism's extent below / above it in game units; false: none (stock / wide culling, a side view)
+bool vr_cull_rect(float quad[4][2], float *floor_y, float *hlo, float *hhi);

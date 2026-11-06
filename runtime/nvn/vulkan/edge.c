@@ -17,6 +17,7 @@
 
 #include "../../platform.h"
 #include "../../rt.h"
+#include "../vr_cull.h"
 #include "record.h"
 #include "stereo.h"
 #include "vk.h"
@@ -28,6 +29,7 @@ static struct {
     float fog_start, fog_end;  // multiples of the pivot distance
     float soft;                // the edge fade's radius, as a share of the image height
     float strength;            // 0..1 of the edge fade
+    float rect_soft, rect_strength;  // the floor quadrilateral fade: width in game units, 0..1
     float top[3], bot[3];      // the colours the backdrop starts with (and LARECOMP_VR_EDGE_TOP / _BOTTOM: kept)
     bool fixed_colours;
     float desat, bright;       // how the scene's average is turned into haze
@@ -60,6 +62,8 @@ static void cfg_init(void) {
     }
     cfg.soft = (e = getenv("LARECOMP_VR_EDGE_SOFT")) && atof(e) >= 0 ? (float)atof(e) : 0.07f;
     cfg.strength = (e = getenv("LARECOMP_VR_EDGE_STRENGTH")) ? fminf(fmaxf((float)atof(e), 0.0f), 1.0f) : 1.0f;
+    cfg.rect_soft = (e = getenv("LARECOMP_VR_EDGE_RECT")) && atof(e) >= 0 ? (float)atof(e) : 3.0f;
+    cfg.rect_strength = cfg.rect_soft > 0 ? 1.0f : 0.0f;
     cfg.top[0] = 0.36f, cfg.top[1] = 0.46f, cfg.top[2] = 0.40f;
     cfg.bot[0] = 0.16f, cfg.bot[1] = 0.24f, cfg.bot[2] = 0.18f;
     bool t = hex3(getenv("LARECOMP_VR_EDGE_TOP"), cfg.top), b = hex3(getenv("LARECOMP_VR_EDGE_BOTTOM"), cfg.bot);
@@ -100,6 +104,9 @@ bool edge_passthrough_wanted(void) { return edge_mode() == EDGE_PASSTHROUGH; }
     "  vec4 top;   // starting top colour, 1: the first frame\n"                                                       \
     "  vec4 bot;   // starting bottom colour, the smoothing step\n"                                                    \
     "  vec4 mi;    // desaturation, brightness, debug, fixed colours\n"                                               \
+    "  vec4 vr[3]; // the view's rows (world -> eye), translation in w\n"                                             \
+    "  vec4 rq[2]; // the table's floor quadrilateral: x0 z0 x1 z1 / x2 z2 x3 z3 (counter-clockwise)\n"               \
+    "  vec4 rc;    // quadrilateral on, floor y, fade width (units), strength\n"                                      \
     "} u;\n"                                                                                                           \
     "layout(set = 0, binding = 1) uniform sampler2D dt;\n"                                                             \
     "layout(set = 0, binding = 2) uniform sampler2D ct;\n"                                                             \
@@ -193,9 +200,22 @@ static const char *main_fs =
     "  float g = smoothstep(-0.45, 0.50, elev);\n"
     "  vec3 back = mix(bc * 0.85, tc, g);\n"
     "  float fog = smoothstep(u.fog.x, u.fog.y, r);\n"
+    "  float rect = 0.0;\n"
+    "  if (u.rc.x > 0.5 && geo) {\n"   // (the table's floor quadrilateral: the culling's: fade to the backdrop at its edge)
+    "    vec3 v = vec3(xy * pd, -pd);\n"
+    "    vec3 w = u.vr[0].xyz * (v.x - u.vr[0].w) + u.vr[1].xyz * (v.y - u.vr[1].w) + u.vr[2].xyz * (v.z - u.vr[2].w);\n"
+    "    float dmin = 1e9;\n"
+    "    for (int i = 0; i < 4; i++) {\n"
+    "      vec2 a = i < 2 ? (i == 0 ? u.rq[0].xy : u.rq[0].zw) : (i == 2 ? u.rq[1].xy : u.rq[1].zw);\n"
+    "      vec2 b = i == 3 ? u.rq[0].xy : (i == 0 ? u.rq[0].zw : (i == 1 ? u.rq[1].xy : u.rq[1].zw));\n"
+    "      vec2 e = b - a, f = w.xz - a;\n"
+    "      dmin = min(dmin, (e.x * f.y - e.y * f.x) / max(length(e), 1e-4));\n"
+    "    }\n"
+    "    rect = (1.0 - smoothstep(0.0, u.rc.z, dmin)) * u.rc.w;\n"
+    "  }\n"
     "  float cover = texture(mk, p).r;\n"
     "  float edge = (1.0 - smoothstep(0.5, 0.97, cover)) * u.fog.w;\n"
-    "  float fade = !geo ? 1.0 : (u.fl.z < 1.5 ? max(fog, edge) : 0.0);\n"
+    "  float fade = !geo ? 1.0 : (u.fl.z < 1.5 ? max(max(fog, edge), rect) : 0.0);\n"
     "  vec3 c = mix(s.rgb, back, fade);\n"
     "  float a = 1.0;\n"
     "  if (u.fl.z > 2.5) { a = 1.0 - fade; c = s.rgb * a; }\n"  // (passthrough: premultiplied)
@@ -205,11 +225,15 @@ static const char *main_fs =
     "    if (quad == 0) c = s.rgb;\n"
     "    else if (quad == 1) c = geo ? vec3(clamp(r / (4.0 * u.up.w), 0.0, 1.0), fract(d * 64.0), d) : vec3(1.0, 0.0, d);\n"
     "    else if (quad == 2) c = vec3(cover, fog, edge);\n"
+    "  } else if (u.mi.z > 7.5) {\n"
+    "    if (p.x < 0.5) c = s.rgb;\n"  // (debug 8: before | after, in one frame)
+    "    if (abs(p.x - 0.5) < 0.0008) c = vec3(1.0);\n"
+    "    a = 1.0;\n"
     "  } else if (u.mi.z > 0.5) {\n"
     "    int m = int(u.mi.z + 0.5);\n"
     "    if (m == 1) c = vec3(geo ? 0.2 + 0.8 * (1.0 - d) : 0.0, 0.0, geo ? 0.0 : 1.0);\n"
     "    else if (m == 2) c = vec3(cover);\n"
-    "    else if (m == 3) c = geo ? vec3(fract(r / u.up.w), fog, edge) : vec3(1.0, 0.0, 1.0);\n"
+    "    else if (m == 3) c = geo ? vec3(rect, fog, edge) : vec3(1.0, 0.0, 1.0);\n"
     "    else if (m == 4) c = vec3(elev * 0.5 + 0.5, g, 0.0);\n"
     "    else if (m == 5) c = back;\n"
     "    a = 1.0;\n"
@@ -347,7 +371,7 @@ static void begin(VkCommandBuffer cb, VkImageView view, VkImageLayout layout, ui
     }
 }
 
-typedef struct { float proj[4], zt[4], fl[4], up[4], cc[4], sz[4], fog[4], top[4], bot[4], mi[4]; } UBlock;
+typedef struct { float proj[4], zt[4], fl[4], up[4], cc[4], sz[4], fog[4], top[4], bot[4], mi[4], vr[3][4], rq[2][4], rc[4]; } UBlock;
 
 static VkDescriptorSet make_set(const UBlock *ub, VkImageView depth, VkImageView color, VkImageView mask, VkImageView tint) {
     VkSpan s = vk_transient_copy(ub, sizeof *ub, 256);
@@ -506,12 +530,29 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
         g.t_last = now;
         u.bot[3] = 1.0f - expf(-(float)fminf((float)dt, 0.25f) / cfg.tau);
     }
+    for (int r = 0; r < 3; r++) u.vr[r][0] = V[r * 4], u.vr[r][1] = V[r * 4 + 1], u.vr[r][2] = V[r * 4 + 2], u.vr[r][3] = V[r * 4 + 3];
+    {
+        float quad[4][2], fy, hlo, hhi;
+        if (cfg.rect_strength > 0 && vr_cull_rect(quad, &fy, &hlo, &hhi)) {
+            memcpy(u.rq, quad, sizeof quad);
+            u.rc[0] = 1.0f, u.rc[1] = fy, u.rc[2] = cfg.rect_soft, u.rc[3] = cfg.rect_strength;
+            // the eye's world position (-R^T t) and its distance to the quadrilateral's middle: the fog scales with it
+            float E[3];
+            for (int k = 0; k < 3; k++) E[k] = -(V[k] * V[3] + V[4 + k] * V[7] + V[8 + k] * V[11]);
+            float cx = 0, cz = 0;
+            for (int i = 0; i < 4; i++) cx += quad[i][0] * 0.25f, cz += quad[i][1] * 0.25f;
+            pd = sqrtf((E[0] - cx) * (E[0] - cx) + (E[1] - fy) * (E[1] - fy) + (E[2] - cz) * (E[2] - cz));
+            u.up[3] = pd, u.fog[0] = cfg.fog_start * pd, u.fog[1] = cfg.fog_end * pd;
+        }
+    }
     u.mi[0] = cfg.desat, u.mi[1] = cfg.bright, u.mi[2] = (float)cfg.debug, u.mi[3] = cfg.fixed_colours ? 1.0f : 0.0f;
 
     // the backdrop colours: eye 0 makes this frame's from the last (the other image); eye 1 reads them
     int prev = g.tint_cur, cur = in->eye == 0 ? 1 - g.tint_cur : g.tint_cur;
     vk_full_barrier(cb);  // (the scene and the eye output)
-    if (in->eye == 0) {
+    static int bench = -1;  // (LARECOMP_VR_EDGE_BENCH: 1 no backdrop colours, 2 no mask, 4 no main pass: timing only)
+    if (bench < 0) bench = getenv("LARECOMP_VR_EDGE_BENCH") ? atoi(getenv("LARECOMP_VR_EDGE_BENCH")) : 0;
+    if (in->eye == 0 && !(bench & 1)) {
         VkDescriptorSet set = make_set(&u, in->depth, in->color, g.mask[0].view, g.tint[prev].view);
         begin(cb, g.tint[cur].view, VK_IMAGE_LAYOUT_GENERAL, 2, 1);
         fullscreen(cb, g.pipe[P_TINT], set);
@@ -521,7 +562,9 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
     }
     // the coverage of geometry, blurred
     float fl3 = u.fl[3];
-    VkDescriptorSet set = make_set(&u, in->depth, in->color, g.mask[1].view, g.tint[cur].view);
+    VkDescriptorSet set;
+    if (!(bench & 2)) {
+    set = make_set(&u, in->depth, in->color, g.mask[1].view, g.tint[cur].view);
     begin(cb, g.mask[0].view, VK_IMAGE_LAYOUT_GENERAL, mw, mh);
     fullscreen(cb, g.pipe[P_COV], set);
     rec_CmdEndRendering(cb);
@@ -538,11 +581,12 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
     fullscreen(cb, g.pipe[P_BLUR], set);
     rec_CmdEndRendering(cb);
     vk_full_barrier(cb);
+    }
     // the eye image
     u.fl[3] = fl3;
     set = make_set(&u, in->depth, in->color, g.mask[0].view, g.tint[cur].view);
     begin(cb, target, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, w, h);
-    fullscreen(cb, mp, set);
+    if (!(bench & 4)) fullscreen(cb, mp, set);
     rec_CmdEndRendering(cb);
     ts_end(cb, tq, in->eye);
     return true;

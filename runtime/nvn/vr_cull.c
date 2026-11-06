@@ -21,6 +21,7 @@ static struct {
     int init, mode, eyes;   // mode: VR_CULL_FIT / WIDE / STOCK
     float kx, kz, hlo, hhi, margin;
 } C;
+static struct { bool have; float quad[4][2], floor_y, hlo, hhi; } g_rect;  // the latest fit's floor quadrilateral (vr_cull_rect)
 static _Atomic float g_aspect, g_fs;   // the fitted culling aspect (absolute) and fovy scale; 0 = none yet
 static _Atomic float g_fovy_orig = 0;  // the game's own fovy field (radians or degrees, as it is)
 static _Atomic float g_aspect_orig = 0;
@@ -54,6 +55,12 @@ bool vr_cull_get(float *aspect, float *fovy_scale) {
     return true;
 }
 
+bool vr_cull_rect(float quad[4][2], float *floor_y, float *hlo, float *hhi) {
+    if (!g_rect.have) return false;  // (render thread, like vr_cull_fit)
+    memcpy(quad, g_rect.quad, sizeof g_rect.quad), *floor_y = g_rect.floor_y, *hlo = g_rect.hlo, *hhi = g_rect.hhi;
+    return true;
+}
+
 // ---- convex clipping: a polygon (<= 32 points) against the plane n.x + d >= 0
 typedef struct { float p[32][3]; int n; } Poly;
 static void clip(Poly *io, const float pl[4]) {
@@ -82,7 +89,7 @@ static void eye_planes(const CamRef *r, float m, float pl[4][4]) {  // left, rig
 
 void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3], const CamRef *eye0, const CamRef *eye1) {
     if (!C.init) init();
-    if (C.mode != VR_CULL_FIT || !l || !l->valid) return;
+    if (C.mode != VR_CULL_FIT || !l || !l->valid) { g_rect.have = false; return; }
     const CamRef *g = &l->ref;
     float fo = atomic_load(&g_fovy_orig);
     if (!(fo > 0)) return;
@@ -93,6 +100,7 @@ void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3],
     float wide_a = 3.2f, wide_fs = 1.5f;
     if (fabsf(g->fwd[1]) < 0.26f) {  // side view (or a level look): no floor rectangle; the old fixed widening
         atomic_store(&g_aspect, wide_a), atomic_store(&g_fs, wide_fs);
+        g_rect.have = false;
         return;
     }
     // the stock footprint on the floor (y = pivot), scaled about the pivot along the camera's ground axes
@@ -113,6 +121,14 @@ void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3],
         float rx = (p[0] - pivot[0]) * hr[0] + (p[2] - pivot[2]) * hr[2], rz = (p[0] - pivot[0]) * hf[0] + (p[2] - pivot[2]) * hf[2];
         rx *= C.kx, rz *= C.kz;
         corner[c][0] = anchor[0] + rx * hr[0] + rz * hf[0], corner[c][1] = anchor[1], corner[c][2] = anchor[2] + rx * hr[2] + rz * hf[2];
+    }
+    {   // the floor quadrilateral, counter-clockwise seen from above in (x, z) (the edge pass fades to it)
+        static const int rg[4] = {0, 1, 3, 2};
+        float q[4][2], area = 0;
+        for (int i = 0; i < 4; i++) q[i][0] = corner[rg[i]][0], q[i][1] = corner[rg[i]][2];
+        for (int i = 0; i < 4; i++) area += q[i][0] * q[(i + 1) % 4][1] - q[(i + 1) % 4][0] * q[i][1];
+        for (int i = 0; i < 4; i++) memcpy(g_rect.quad[i], q[area >= 0 ? i : 3 - i], 8);
+        g_rect.floor_y = anchor[1], g_rect.hlo = C.hlo, g_rect.hhi = C.hhi, g_rect.have = true;
     }
     // the prism: 8 points (bottom 0-3, top 4-7 in the order 0 1 3 2 around), 6 faces
     static const int ring[4] = {0, 1, 3, 2};
