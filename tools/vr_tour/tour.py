@@ -155,7 +155,13 @@ def analyse_session(row, spots):
             S['mock_wait'] = l[len('xrmock: timing: '):]
         if l.startswith('xrmock: timing:') and 'begin to xrEndFrame' in l.replace('xrBeginFrame to ', 'begin to '):
             S['mock_end'] = l[len('xrmock: timing: '):]
-    S['vuids'] = [(t, l) for t, l in log if 'VUID-' in l or 'Validation Error' in l]
+    # the layer prints each message twice (the second without the leading '['): count the second
+    S['vuids'] = [(t, l) for t, l in log if l.startswith('Validation Error: [')]
+    S['vwarns'] = {}
+    for t, l in log:
+        m = re.match(r'^Validation Warning: \[ ([\w-]+) \]', l)
+        if m:
+            S['vwarns'][m.group(1)] = S['vwarns'].get(m.group(1), 0) + 1
     S['errors_game'] = [(t, l) for t, l in log if re.match(r'^\[xr\] .*(failed|lacks|cannot)', l)]
     # the session's own totals from the mock's timing CSV
     tc = os.path.join(d, 'timing.csv')
@@ -509,8 +515,8 @@ def build_report(out, keep_raw=False):
         spot['vvl'] = None
         for S in vvl_S:
             m = window_metrics(S, i, 30 if S['hz'] < 100 else 60)
-            spot['vvl'] = {'vuids': m['vuids'] if m else None, 'unique': sorted({re.search(r'VUID-[\w-]+', l).group(0) for t, l in S['vuids']
-                                                                                 if re.search(r'VUID-[\w-]+', l)
+            spot['vvl'] = {'vuids': m['vuids'] if m else None, 'unique': sorted({re.search(r'\[ ([\w-]+) \]', l).group(1) for t, l in S['vuids']
+                                                                                 if re.search(r'\[ ([\w-]+) \]', l)
                                                                                  and S['windows'].get(i) and S['windows'][i][0] <= t < S['windows'][i][2]})}
         spot['img'] = None
         for S in shot_S:
@@ -527,7 +533,7 @@ def build_report(out, keep_raw=False):
                           ('name', 'kind', 'hz', 'rc', 'wall_s', 'lines') if k in S} | {
                               'crash': list(S['crash']) if S['crash'] else None, 'mock_summary': S.get('mock_summary'), 'csv': S.get('csv'),
                               'mock_wait': S.get('mock_wait'), 'mock_end': S.get('mock_end'),
-                              'mock_errors': len(S['mock_errors']), 'vuids': len(S['vuids']),
+                              'mock_errors': len(S['mock_errors']), 'vuids': len(S['vuids']), 'vwarns': S['vwarns'],
                               'mock_error_text': sorted({re.sub(r'f\d+', 'f#', l)[:200] for t, l in S['mock_errors']})[:8]} for S in sess],
             'spots': spots}
     json.dump(data, open(os.path.join(out, 'data.json'), 'w'), indent=1)
@@ -589,6 +595,15 @@ def write_md(out, meta, spots, sess, hzs, nominal_of):
         c = S.get('csv') or {}
         L.append('| %s | %d | %.0f | %d | %d | %s | %s |' % (S['name'], S['rc'], S['wall_s'], len(S['mock_errors']), len(S['vuids']),
                                                          '%d / %d of %d' % (c['late'], c['lost'], c['frames']) if c else '-', S['crash'][1] if S['crash'] else 'no'))
+    for S in sess:
+        if S['kind'] == 'vvl':
+            errs = {}
+            for t, l in S['vuids']:
+                mm = re.search(r'\[ ([\w-]+) \]', l)
+                errs[mm.group(1) if mm else l[:60]] = errs.get(mm.group(1) if mm else l[:60], 0) + 1
+            L.append('')
+            L.append('%s: %d validation errors%s; warnings: %s' % (S['name'], len(S['vuids']), ' (' + ', '.join('%s x%d' % kv for kv in sorted(errs.items())) + ')' if errs else '',
+                                                              ', '.join('%s x%d' % kv for kv in sorted(S['vwarns'].items())) or 'none'))
     for S in sess:
         if S.get('mock_wait'):
             L.append('')

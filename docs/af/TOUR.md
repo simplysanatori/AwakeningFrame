@@ -22,7 +22,7 @@ Needs, in the tree it checks: `build/lasrecomp`, `build/lasgame.so`, `extracted/
 
 - `~/.cache/headset-in-use` exists: it refuses (exit 75); `--wait` waits for the flag to go. (`AF_HEADSET_FLAG` and
   `AF_BENCH_LOCK` name other files for the two flags, to test the waiting without touching the real ones.)
-- `~/.cache/af-bench-lock` exists, or another `lasrecomp` runs: it waits (polling every 10 s, `--wait-max`, default an
+- `~/.cache/af-bench-lock` exists, or another `lasrecomp` runs: it waits (polling every 2 s, `--wait-max`, default an
   hour, then exit 75). It then takes the lock itself (the file holds `vr_tour <pid>`), keeps it for the whole run and
   removes it on exit (trap, also on interrupt); the analysis afterwards runs without it.
 - `nice -n 5` for the game, `nice -n 10` for the mock's build; no builds. It checks again before each session.

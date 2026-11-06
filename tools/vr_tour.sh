@@ -156,7 +156,7 @@ wait_for() {   # <what> <test command...>: poll while the test succeeds (the thi
     while "$@"; do
         [ "$said" = 0 ] && echo "vr_tour: waiting for $what"; said=1
         [ "$(date +%s)" -gt "$DEADLINE" ] && { echo "vr_tour: still waiting for $what after ${WAIT_MAX}s: giving up" >&2; exit 75; }
-        sleep 10
+        sleep 2
     done
 }
 other_lasrecomp() { pgrep -x lasrecomp >/dev/null 2>&1; }
