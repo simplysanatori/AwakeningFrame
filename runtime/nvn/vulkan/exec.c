@@ -1104,33 +1104,37 @@ static uint32_t index_max(const void *src, uint32_t count, uint32_t isz, uint32_
     return m;
 }
 
+bool renderer_texture_presented(NvnTexture *t);
 static bool mv_passes_on(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("LARECOMP_MV_PASSES"); on = vk_mv_on() && g_vk.multiview && (!e || atoi(e) != 0); }
     return on;
 }
 // The bound attachments: 1 all layered (one multiview pass draws both eyes), 0 none twinned, -1 layered and shared
-// ones, a layered one through a view of another layer, or a twin without an eye-1 layer (eye 1 draws it)
+// ones, a layered one through a view of another layer, or a twin without an eye-1 layer (eye 1 draws it); 2 layered
+// and presented ones only (the HUD clone, the window image over the scene's depth: eye 0's view only, as eye 1's
+// draws into them are never shown - no eye-1 run for them)
 static int mv_rt_kind(void) {
-    int lay = 0, other = 0, twu = 0;
+    int lay = 0, other = 0, twu = 0, pres = 0;
     for (int i = 0; i < st.rt.ncolor; i++) {
         NvnTexture *t = st.rt.color[i];
         if (!t) continue;
         if (!t->backend) vk_tex(t, true);
         if (vk_b_layered(t->backend) && !(st.rt.has_cview[i] && (st.rt.cview[i].setmask & 2) && st.rt.cview[i].min_layer)) lay++;
-        else other++, twu += vk_tex_twinned(t);
+        else other++, twu += vk_tex_twinned(t), pres += renderer_texture_presented(t) && !vk_tex_twinned(t);
     }
     if (st.rt.depth) {
         NvnTexture *t = st.rt.depth;
         if (!t->backend) vk_tex(t, true);
         if (vk_b_layered(t->backend) && !(st.rt.has_dview && (st.rt.dview.setmask & 2) && st.rt.dview.min_layer)) lay++;
-        else other++, twu += vk_tex_twinned(t);
+        else other++, twu += vk_tex_twinned(t), pres += renderer_texture_presented(t) && !vk_tex_twinned(t);
     }
+    if (lay && other && other == pres && !twu) return 2;
     return lay && !other ? 1 : lay || twu ? -1 : 0;
 }
 static bool eye1_skip_rt(void) {
     if (g_eye != 1) return false;
-    if (g_mv_run && mv_rt_kind() == 1) { st_skipped[0]++; return true; }  // (eye 0's multiview pass drew it)
+    if (g_mv_run && mv_rt_kind() >= 1) { st_skipped[0]++; return true; }  // (eye 0's multiview pass drew it)
     bool tw = false, shared = false;
     for (int i = 0; i < st.rt.ncolor; i++)
         if (st.rt.color[i]) { if (vk_tex_twinned(st.rt.color[i])) tw = true; else shared = true; }
@@ -1544,30 +1548,35 @@ static inline bool ss_need(uint32_t bit, bool same) {
 static void vk_end_pass_at(int line);
 void vk_end_pass(void) { vk_end_pass_at(0); }
 #define vk_end_pass() vk_end_pass_at(__LINE__)
+static __typeof__(st.rt) pass_rt;  // (VR pass diet, merge: the open pass's attachments as bound)
 static void vk_end_pass_at(int line) {
     if (!in_pass) return;
     if (prof && line < 4096) prof_end_line[line]++;
     rec_CmdEndRendering(vk_cmd());
     in_pass = false;
-    if (g_debug_frame && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->backend) {
+    if (g_debug_frame && pass_rt.ncolor && pass_rt.color[0] && pass_rt.color[0]->backend) {
         char path[256];
         static uint64_t debug_pass_frame = ~0ull;
         static int multi = -1;
         if (multi < 0) multi = getenv("LARECOMP_DEBUG_FRAMES") != NULL;
         if (multi && renderer_present_count() != debug_pass_frame) { debug_pass_frame = renderer_present_count(); debug_pass_no = 0; }
-        if (multi) snprintf(path, sizeof path, "build/pass_%llu_%03d_e%d.png", (unsigned long long)debug_pass_frame, debug_pass_no++, g_eye);
-        else if (g_eye >= 0) snprintf(path, sizeof path, "build/pass_%03d_e%d.png", debug_pass_no++, g_eye);
-        else snprintf(path, sizeof path, "build/pass_%03d.png", debug_pass_no++);
+        int no = debug_pass_no++;
+        for (int ve = 0; ve < (pass_view_mask ? 2 : 1); ve++) {  // (a multiview pass: both eyes' layers, as passes of eye 0 / 1)
+        int eye = pass_view_mask ? ve : g_eye;
+        if (multi) snprintf(path, sizeof path, "build/pass_%llu_%03d_e%d%s.png", (unsigned long long)debug_pass_frame, no, eye, pass_view_mask ? "m" : "");
+        else if (g_eye >= 0) snprintf(path, sizeof path, "build/pass_%03d_e%d%s.png", no, eye, pass_view_mask ? "m" : "");
+        else snprintf(path, sizeof path, "build/pass_%03d.png", no);
         extern uint32_t vk_debug_save_layer;
-        vk_debug_save_layer = vk_b_layer(st.rt.color[0]->backend);  // (multiview storage: the eye's layer)
+        vk_debug_save_layer = pass_view_mask ? (uint32_t)ve : vk_b_layer(pass_rt.color[0]->backend);  // (multiview storage: the eye's layer)
         {
-            const TexBackend *db = st.rt.color[0]->backend;
-            LOG("[dbgpass] %s: %d color, first %ux%u fmt %#x %p (mv2 %d twinned %d layer %u), depth %p (twinned %d)\n", path, st.rt.ncolor,
-                st.rt.color[0]->width, st.rt.color[0]->height, st.rt.color[0]->format, (void *)st.rt.color[0], db->mv2,
-                vk_tex_twinned(st.rt.color[0]), vk_debug_save_layer, (void *)st.rt.depth, st.rt.depth ? vk_tex_twinned(st.rt.depth) : -1);
+            const TexBackend *db = pass_rt.color[0]->backend;
+            LOG("[dbgpass] %s: %d color, first %ux%u fmt %#x %p (mv2 %d twinned %d layer %u), depth %p (twinned %d)\n", path, pass_rt.ncolor,
+                pass_rt.color[0]->width, pass_rt.color[0]->height, pass_rt.color[0]->format, (void *)pass_rt.color[0], db->mv2,
+                vk_tex_twinned(pass_rt.color[0]), vk_debug_save_layer, (void *)pass_rt.depth, pass_rt.depth ? vk_tex_twinned(pass_rt.depth) : -1);
         }
-        renderer_save_texture_tex(st.rt.color[0]->backend, path);
+        renderer_save_texture_tex(pass_rt.color[0]->backend, path);
         vk_debug_save_layer = 0;
+        }
     }
 }
 
@@ -1581,7 +1590,6 @@ static int content_extent(int e, bool scalable, float sc, float al) {
 }
 
 static bool heap_whole_userptr(void);
-static __typeof__(st.rt) pass_rt;  // (VR pass diet, merge: the open pass's attachments as bound)
 static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
     if (in_pass && vr_diet(DIET_MERGE) && !memcmp(&pass_rt, &st.rt, sizeof pass_rt)) {
