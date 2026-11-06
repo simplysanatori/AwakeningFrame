@@ -137,3 +137,39 @@ __attribute__((constructor)) static void scan_init(void) {
     pthread_create(&th, NULL, scan_thread, NULL);
     pthread_detach(th);
 }
+
+// LARECOMP_STREAM_PEEK=<hex addr>,<bytes>: log the u16 words of that guest range whenever they change (polled by a host
+// thread every millisecond; research: the layout around a LARECOMP_STREAM_SCAN survivor).
+static void *peek_thread(void *arg) {
+    (void)arg;
+    const char *e = getenv("LARECOMP_STREAM_PEEK");
+    uint64_t a = strtoull(e, (char **)&e, 16);
+    size_t n = *e == ',' ? strtoul(e + 1, NULL, 0) : 32;
+    if (n > 256) n = 256;
+    n &= ~(size_t)1;
+    uint16_t last[128] = {0};
+    int first = 1;
+    extern uint64_t renderer_present_count(void);
+    for (;;) {
+        usleep(1000);
+        unsigned char vec;
+        if (mincore((void *)(uintptr_t)(a & ~4095ull), 4096, &vec) != 0) continue;  // (not mapped yet)
+        uint16_t cur[128];
+        memcpy(cur, (const void *)(uintptr_t)a, n);
+        if (!first && !memcmp(cur, last, n)) continue;
+        char line[1200];
+        int k = snprintf(line, sizeof line, "[stream] peek f%llu %#llx:", (unsigned long long)renderer_present_count(), (unsigned long long)a);
+        for (size_t i = 0; i < n / 2 && k < (int)sizeof line - 8; i++) k += snprintf(line + k, sizeof line - k, " %d", (int16_t)cur[i]);
+        LOG("%s\n", line);
+        memcpy(last, cur, n);
+        first = 0;
+    }
+    return NULL;
+}
+
+__attribute__((constructor)) static void peek_init(void) {
+    if (!getenv("LARECOMP_STREAM_PEEK")) return;
+    pthread_t th;
+    pthread_create(&th, NULL, peek_thread, NULL);
+    pthread_detach(th);
+}
