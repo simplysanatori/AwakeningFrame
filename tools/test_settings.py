@@ -65,6 +65,29 @@ with tempfile.TemporaryDirectory() as directory:
         subprocess.run([str(exe), mode], env=env, check=True, capture_output=True)
         assert f'resolution = {saved}\n' in ini.read_text(), (lines, ini.read_text())
         count += 1
+    # VR tab's Refresh Rate: vr_refresh (what the wrapper reads) + vr_fps; no keys = 90 Hz (30 FPS); the third choice
+    # (90 Hz, 60 FPS, Test) puts LARECOMP_XR_FPS=60, unless the environment has it; either order of the two keys
+    for lines, index, fps, saved in [([], 1, '-', ['vr_refresh = 90', 'vr_fps = 30']),
+                                     (['vr_refresh = 120'], 0, '-', ['vr_refresh = 120', 'vr_fps = 60']),
+                                     (['vr_refresh = 90', 'vr_fps = 60'], 2, '60', ['vr_refresh = 90', 'vr_fps = 60']),
+                                     (['vr_fps = 60', 'vr_refresh = 90'], 2, '60', ['vr_refresh = 90', 'vr_fps = 60']),
+                                     (['vr_refresh = 90', 'vr_fps = 30'], 1, '-', ['vr_refresh = 90', 'vr_fps = 30']),
+                                     (['vr_refresh = 120', 'vr_fps = 60'], 0, '-', ['vr_refresh = 120', 'vr_fps = 60'])]:
+        ini = directory / 'test.ini'
+        ini.write_text('\n'.join(lines + ['volume = 1']) + '\n')
+        env = {k: v for k, v in os.environ.items() if k not in ('LARECOMP_XR_FPS', 'LARECOMP_XR_HZ')}
+        env['LARECOMP_SETTINGS'] = str(ini)
+        subprocess.run([str(exe), 'vr-refresh', str(index), fps], env=env, check=True, capture_output=True)
+        for line in saved:
+            assert line + '\n' in ini.read_text(), (lines, ini.read_text())
+        count += 1
+    # (the environment's LARECOMP_XR_FPS wins over the ini's vr_fps)
+    ini = directory / 'test.ini'
+    ini.write_text('vr_refresh = 90\nvr_fps = 60\n')
+    env = {k: v for k, v in os.environ.items() if k != 'LARECOMP_XR_HZ'}
+    env.update(LARECOMP_SETTINGS=str(ini), LARECOMP_XR_FPS='30')
+    subprocess.run([str(exe), 'vr-refresh', '2', '30'], env=env, check=True, capture_output=True)
+    count += 1
     # Cosmetics colour rows (shared palette): older names map onto it, Custom is a hex value, unknown -> Default
     ini = directory / 'test.ini'
     ini.write_text('tunic = Yellow\nhearts = Pink\nhair = #12ab34\nshield = Sparkly\nskin = Random\n')

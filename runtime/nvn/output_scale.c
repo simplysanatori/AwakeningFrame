@@ -484,7 +484,7 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
 // VR mode's eye resolution (AwakeningFrame; LARECOMP_VR_DYNRES=1, off by default). The eye images keep their size; the
 // eyes are drawn into the top-left part of their targets at the factor and the eye present scales that part up to the
 // whole eye image (the same plumbing as Dynamic above: allocation scale = the eye's, render scale = the factor times it).
-// Width in pixels between LARECOMP_VR_DYNRES_MIN (1400) and LARECOMP_VR_DYNRES_MAX (the eye width) in 32-pixel steps.
+// Width in pixels between LARECOMP_VR_DYNRES_MIN (1536) and LARECOMP_VR_DYNRES_MAX (the eye width) in 32-pixel steps.
 // The budget is the game's GPU time per game frame (device.c: LARECOMP_VR_DYNRES_MS, 14.5, at 60 fps / 120 Hz; 87% of
 // 33.3 ms at 30 fps / 90 Hz: fill it). Decisions every half second on the median frame in it (spikes left out):
 //   down  2 of the last 3 halves over budget: straight to where the median is predicted to fit with 8% room
@@ -510,7 +510,7 @@ double output_scale_vr_factor(double now, double game_ms, double budget_ms, unsi
         inited = 1;
         const char *e = getenv("LARECOMP_VR_DYNRES");
         vrd_on = set >= 0 ? set : e && atoi(e) != 0;
-        pmin = getenv("LARECOMP_VR_DYNRES_MIN") ? atof(getenv("LARECOMP_VR_DYNRES_MIN")) : 1400;
+        pmin = getenv("LARECOMP_VR_DYNRES_MIN") ? atof(getenv("LARECOMP_VR_DYNRES_MIN")) : 1536;
         pmax = getenv("LARECOMP_VR_DYNRES_MAX") ? atof(getenv("LARECOMP_VR_DYNRES_MAX")) : eye_w;
         if (pmax > eye_w) pmax = eye_w;
         if (pmin > pmax) pmin = pmax;

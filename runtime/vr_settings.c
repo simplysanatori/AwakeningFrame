@@ -11,7 +11,7 @@
 
 #define VR g_settings.vr
 
-const char *const g_vr_refresh_names[VRS_N_REFRESH] = {"120 Hz (60 FPS)", "90 Hz (30 FPS)"};
+const char *const g_vr_refresh_names[VRS_N_REFRESH] = {"120 Hz (60 FPS)", "90 Hz (30 FPS)", "90 Hz (60 FPS, Test)"};
 const char *const g_vr_layout_names[VRS_N_LAYOUT] = {"Switch", "Comfort"};
 const char *const g_vr_follow_names[VRS_N_FOLLOW] = {"Smooth", "Room", "Fixed"};
 const char *const g_vr_edge_names[VRS_N_EDGE] = {"Off", "Haze", "Sky Only", "Passthrough"};
@@ -61,7 +61,13 @@ static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ?
 bool vr_settings_parse(const char *key, const char *val) {
     if (strncmp(key, "vr_", 3)) return false;
     key += 3;
-    if (!strcmp(key, "refresh")) VR.refresh = atoi(val) == 90 ? VRS_REFRESH_90 : VRS_REFRESH_120;
+    // vr_refresh and vr_fps together make the Refresh Rate choice (in either order): 120 Hz, 90 Hz at 30, 90 Hz at 60
+    static int ini_hz = 90, ini_fps = 30;
+    if (!strcmp(key, "refresh") || !strcmp(key, "fps")) {
+        if (key[0] == 'r') ini_hz = atoi(val) == 90 ? 90 : 120;
+        else ini_fps = atoi(val) == 60 ? 60 : 30;
+        VR.refresh = ini_hz == 120 ? VRS_REFRESH_120 : ini_fps == 60 ? VRS_REFRESH_90_60 : VRS_REFRESH_90;
+    }
     else if (!strcmp(key, "layout")) VR.layout = pick(k_layout, VRS_N_LAYOUT, val, VRS_LAYOUT_SWITCH);
     else if (!strcmp(key, "follow")) VR.follow = pick(k_follow, VRS_N_FOLLOW, val, VRS_FOLLOW_SMOOTH);
     else if (!strcmp(key, "table_height") || !strcmp(key, "table_size") || !strcmp(key, "table_tilt"))
@@ -77,7 +83,8 @@ bool vr_settings_parse(const char *key, const char *val) {
 }
 
 void vr_settings_save(FILE *f) {
-    fprintf(f, "vr_refresh = %d\n", VR.refresh == VRS_REFRESH_90 ? 90 : 120);
+    // (the wrapper, steam-frame/awakeningframe.sh, reads the digits of these two lines)
+    fprintf(f, "vr_refresh = %d\nvr_fps = %d\n", VR.refresh == VRS_REFRESH_120 ? 120 : 90, VR.refresh == VRS_REFRESH_90 ? 30 : 60);
     fprintf(f, "vr_layout = %s\n", k_layout[VR.layout]);
     fprintf(f, "vr_follow = %s\n", k_follow[VR.follow]);
     fprintf(f, "vr_edge_mode = %s\n", k_edge[VR.edge]);
@@ -124,7 +131,10 @@ void vr_settings_apply_env(void) {
     for (int i = 0; i < VRO_COUNT; i++) g_given[i] = k_env[i][0] && getenv(k_env[i]);
     // (only values that are not the default: the default is whatever the code behind the variable does without it)
     char b[64];
-    if (!g_given[VRO_REFRESH] && VR.refresh == VRS_REFRESH_90) put("LARECOMP_XR_HZ", "90");
+    // (120 Hz is what the code behind LARECOMP_XR_HZ does without it; 90 Hz is the tab's default, so it is passed on)
+    if (!g_given[VRO_REFRESH] && VR.refresh != VRS_REFRESH_120) put("LARECOMP_XR_HZ", "90");
+    // (the test: 60 fps at 90 Hz; the environment's LARECOMP_XR_FPS, or session.env's AF_FPS through the wrapper, wins)
+    if (!getenv("LARECOMP_XR_FPS") && VR.refresh == VRS_REFRESH_90_60) put("LARECOMP_XR_FPS", "60");
     if (!g_given[VRO_LAYOUT] && VR.layout != VRS_LAYOUT_SWITCH) put("LARECOMP_XR_LAYOUT", k_layout[VR.layout]);
     if (!g_given[VRO_FOLLOW] && VR.follow != VRS_FOLLOW_SMOOTH) put("LARECOMP_VR_FOLLOW", k_follow[VR.follow]);
     if (!g_given[VRO_EDGE] && VR.edge != VRS_EDGE_OFF) put("LARECOMP_VR_EDGE", k_edge[VR.edge]);

@@ -252,13 +252,17 @@ static void *xr_thread(void *arg) {
         }
         int64_t period = fs.predictedDisplayPeriod > 0 ? fs.predictedDisplayPeriod : 8333333;
         if (!g_xr.display_hz || g_xr.display_hz * period < 0.99e9 || g_xr.display_hz * period > 1.01e9) g_xr.display_hz = 1e9f / (float)period;
-        {   // below 100 Hz (90): the game held in its 30 fps mode (pace.c pace_xr_lock); 120 Hz: 60 as the pacer decides
+        {   // below 100 Hz (90): the game held in its 30 fps mode (pace.c pace_xr_lock); 120 Hz: 60 as the pacer decides.
+            // LARECOMP_XR_FPS=60 (a test): below 100 Hz the pacer decides too, with a 16.67 ms game frame
             static int locked = -1;
-            int want = g_xr.display_hz < 100 ? 30 : 0;
+            static int test60 = -1;
+            if (test60 < 0) test60 = getenv("LARECOMP_XR_FPS") && atoi(getenv("LARECOMP_XR_FPS")) == 60;
+            int want = g_xr.display_hz < 100 ? (test60 ? 60 : 30) : 0;
             if (want != locked) {
-                pace_xr_lock(want);
-                pace_xr_frame_ms(want ? 0 : 2e3 / g_xr.display_hz);
-                LOG("[xr] display at %.0f Hz: the game %s\n", g_xr.display_hz, want ? "held at 30 fps (3 refreshes a frame)" : "at 60 fps (2 refreshes a frame)");
+                pace_xr_lock(want == 30 ? 30 : 0);
+                pace_xr_frame_ms(want == 30 ? 0 : want == 60 ? 1e3 / 60 : 2e3 / g_xr.display_hz);
+                if (want == 60) LOG("[xr] test: 60 fps at %.0f Hz (uneven cadence)\n", g_xr.display_hz);
+                LOG("[xr] display at %.0f Hz: the game %s\n", g_xr.display_hz, want == 30 ? "held at 30 fps (3 refreshes a frame)" : want == 60 ? "at 60 fps (1 or 2 refreshes a frame)" : "at 60 fps (2 refreshes a frame)");
                 locked = want;
             }
         }

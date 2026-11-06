@@ -18,15 +18,24 @@ mapping, the hooks), `runtime/ui/vr_tab.mm` (the page), `runtime/xr/vrui_hook.c`
    `AF_REFRESH_FROM=env|ini`).
 
 The refresh rate is the one option the game cannot apply itself: SteamVR's per-app rate is set by the launch wrapper
-(`steam-frame/awakeningframe.sh`) before the game starts. The wrapper now reads `vr_refresh` from `larecomp.ini` when
-`AF_REFRESH_HZ` is not set, so the choice takes effect on the next launch. At 90 Hz the game runs at 30 FPS
-(`pace_xr_lock`), at 120 Hz at 60 FPS.
+(`steam-frame/awakeningframe.sh`) before the game starts. The wrapper reads `vr_refresh` from the ini the game uses
+(`LARECOMP_SETTINGS`, else `larecomp.ini` in the data root, `~/.local/share/lasrecomp` by default, else the program folder's)
+when `AF_REFRESH_HZ` is not set, so the choice takes effect on the next launch; with no `vr_refresh` line the rate is 90 Hz.
+At 90 Hz the game runs at 30 FPS (`pace_xr_lock`), at 120 Hz at 60 FPS.
+
+The third choice, 90 Hz (60 FPS, Test), is for feeling 60 FPS on a display that is not a multiple of it. It saves
+`vr_refresh = 90` and `vr_fps = 60`, and at startup sets `LARECOMP_XR_FPS=60` unless the environment already has it
+(`AF_FPS=60` in `session.env` does the same without the menu: the wrapper exports `LARECOMP_XR_FPS`). The 30 FPS lock is
+then left off and the pacer chooses 60 or 30 as at 120 Hz, with a 16.67 ms game frame (`pace_xr_frame_ms`, the VR GPU
+limits of `PACE_VR_GPU`). The XR thread already gives the game its vsync on two of every three refreshes, so each game
+frame is shown for one refresh or two, alternating: motion is less even than at 120 Hz. One pose per game frame, the
+carried render poses and the table moving only on new game frames are unchanged.
 
 ## Options
 
 | Row | Choices (default first) | `larecomp.ini` | Variable | Applied |
 |---|---|---|---|---|
-| Refresh Rate | 120 Hz (60 FPS), 90 Hz (30 FPS) | `vr_refresh = 120 \| 90` | wrapper: `AF_REFRESH_HZ`; `LARECOMP_XR_HZ` | relaunch |
+| Refresh Rate | 90 Hz (30 FPS), 120 Hz (60 FPS), 90 Hz (60 FPS, Test) | `vr_refresh = 120 \| 90`, `vr_fps = 30 \| 60` | wrapper: `AF_REFRESH_HZ`, `AF_FPS`; `LARECOMP_XR_HZ`, `LARECOMP_XR_FPS` | relaunch |
 | Controller Layout | Switch, Comfort | `vr_layout = switch \| comfort` | `LARECOMP_XR_LAYOUT` | hook `xr_input_set_layout` (stub) |
 | Buttons Match Labels | Off, On | `face_buttons_by_label = 0 \| 1` (the Controls tab's setting) | none (`g_settings.face_by_label`, read live by `xr_input.c`) | live |
 | Follow Mode | Smooth, Room, Fixed | `vr_follow = smooth \| room \| fixed` | `LARECOMP_VR_FOLLOW` | hook `stereo_set_follow` (stub) |
@@ -71,7 +80,7 @@ was: the variable, or the existing menu text. Style as Moonlight / Apollo: Title
 
 | Original | Proposed row | Proposed values | Description |
 |---|---|---|---|
-| `AF_REFRESH_HZ=90` / `120` | Refresh Rate | 120 Hz (60 FPS), 90 Hz (30 FPS) | The headset's refresh rate, and with it the game's frame rate: 90 Hz plays at 30 FPS and asks less of the GPU. Applies After Relaunch. |
+| `AF_REFRESH_HZ=90` / `120`, `AF_FPS=60` | Refresh Rate | 120 Hz (60 FPS), 90 Hz (30 FPS), 90 Hz (60 FPS, Test) | The headset's refresh rate, and with it the game's frame rate: 90 Hz plays at 30 FPS and asks less of the GPU. Applies After Relaunch. For 90 Hz (60 FPS, Test): Plays at 60 FPS on a 90 Hz display. Motion is less even because frames alternate between one and two refreshes. For testing. |
 | `LARECOMP_XR_LAYOUT=switch` / `comfort` | Controller Layout | Switch, Comfort | Switch puts every button where a Switch Pro Controller has it. Comfort puts the sword on the right trigger and the shield on the left. |
 | Buttons match labels (Controls tab) | Buttons Match Labels | Off, On | The Frame controllers' A, B, X and Y work as printed on them. Off matches the Switch's button positions. |
 | `LARECOMP_VR_FOLLOW=smooth` / `room` / `fixed` | Follow Mode | Smooth, Room, Fixed | How the table follows the game's camera. Smooth glides after it, Room holds still until the camera changes room, Fixed never moves. |

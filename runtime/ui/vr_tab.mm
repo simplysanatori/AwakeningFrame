@@ -53,9 +53,12 @@ extern "C" void vr_tab_draw(float scale) {
 
     opt_section("Display");
     grey(VRO_REFRESH);
-    if (opt_choice("Refresh Rate", &v.refresh, g_vr_refresh_names, VRS_N_REFRESH, VRS_REFRESH_120,
-                   desc(VRO_REFRESH, "The headset's refresh rate, and with it the game's frame rate: 90 Hz plays at 30 FPS "
-                                     "and asks less of the GPU.")))
+    if (opt_choice("Refresh Rate", &v.refresh, g_vr_refresh_names, VRS_N_REFRESH, VRS_REFRESH_90,
+                   desc(VRO_REFRESH, v.refresh == VRS_REFRESH_90_60
+                                         ? "Plays at 60 FPS on a 90 Hz display. Motion is less even because frames alternate "
+                                           "between one and two refreshes. For testing."
+                                         : "The headset's refresh rate, and with it the game's frame rate: 90 Hz plays at 30 FPS "
+                                           "and asks less of the GPU.")))
         changed(VRO_REFRESH);
 
     opt_section("Controls");

@@ -35,7 +35,7 @@ screen) when the game code and files are there, `LARECOMP_DATA_ROOT` set, `~/.ca
 runs and removed on exit or when Steam stops it.
 
 Options: `awakeningframe.sh --flat` (no VR, no SteamVR keys, no marker: debugging), `--launcher` (start screen).
-Settings in `session.env`: `AF_REFRESH_HZ` (72, 90, 120), `AF_VRTIMING=0`, `AF_KEEP`, and any `LARECOMP_*` variable
+Settings in `session.env`: `AF_REFRESH_HZ` (72, 90, 120; default 90, or the VR tab's choice), `AF_FPS=60` (a test: 60 fps at 90 Hz), `AF_VRTIMING=0`, `AF_KEEP`, and any `LARECOMP_*` variable
 (`LARECOMP_XR_EYE_SCALE`, `LARECOMP_XR_QUAD`).
 
 ## Uninstall

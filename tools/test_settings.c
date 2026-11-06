@@ -1,6 +1,7 @@
 // Exercise the actual parser/resolver/save path with isolated configuration files.
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "settings.h"
 
@@ -57,6 +58,15 @@ int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "rando-options")) {  // the New seed options (an opaque seed ID), kept as saved
         settings_load();
         assert(!strcmp(g_settings.rando_options, argv[2]));
+        settings_save();
+        return 0;
+    }
+    if (argc == 4 && !strcmp(argv[1], "vr-refresh")) {  // Refresh Rate: vr_refresh + vr_fps, and the variables it sets
+        settings_load();
+        assert(g_settings.vr.refresh == atoi(argv[2]));
+        const char *fps = getenv("LARECOMP_XR_FPS"), *hz = getenv("LARECOMP_XR_HZ");
+        assert(!strcmp(argv[3], "-") ? !fps : fps && !strcmp(fps, argv[3]));
+        assert(g_settings.vr.refresh == VRS_REFRESH_120 ? !hz : hz && !strcmp(hz, "90"));
         settings_save();
         return 0;
     }

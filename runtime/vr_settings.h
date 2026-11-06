@@ -14,10 +14,11 @@ enum { VRS_EDGE_OFF, VRS_EDGE_HAZE, VRS_EDGE_SKY, VRS_EDGE_PASSTHROUGH, VRS_N_ED
 // LARECOMP_VR_FOVEATION: eye-tracked only (no fixed mode); without gaze the foveation lane renders full density
 enum { VRS_FOV_OFF, VRS_FOV_LOW, VRS_FOV_MEDIUM, VRS_FOV_HIGH, VRS_N_FOV };
 enum { VRS_CULL_FIT, VRS_CULL_WIDE, VRS_CULL_STOCK, VRS_N_CULL };            // LARECOMP_VR_CULL
-enum { VRS_REFRESH_120, VRS_REFRESH_90, VRS_N_REFRESH };                    // AF_REFRESH_HZ / LARECOMP_XR_HZ (60 / 30 FPS)
+// AF_REFRESH_HZ / LARECOMP_XR_HZ / LARECOMP_XR_FPS: 120 Hz at 60 FPS, 90 Hz at 30 FPS (the default), 90 Hz at 60 FPS (a test)
+enum { VRS_REFRESH_120, VRS_REFRESH_90, VRS_REFRESH_90_60, VRS_N_REFRESH };
 
 typedef struct {
-    int refresh;       // VRS_REFRESH_*: the headset's refresh and the game's rate (120 Hz: 60 FPS, 90 Hz: 30 FPS); a relaunch
+    int refresh;       // VRS_REFRESH_*: the headset's refresh and the game's rate (120 Hz: 60 FPS, 90 Hz: 30 FPS or, as a test, 60); a relaunch
     int layout;        // VRS_LAYOUT_*
     int follow;        // VRS_FOLLOW_*
     int height_cm;     // the table's height, cm from the default (the rig's: not saved here, read back by vr_settings_sync_rig)
@@ -31,7 +32,7 @@ typedef struct {
     float hud_width;   // and its width in metres (LARECOMP_XR_QUAD=dist,width)
 } VrSettings;
 
-#define VR_DEFAULTS {.refresh = VRS_REFRESH_120, .layout = VRS_LAYOUT_SWITCH, .follow = VRS_FOLLOW_SMOOTH, .height_cm = 0, \
+#define VR_DEFAULTS {.refresh = VRS_REFRESH_90, .layout = VRS_LAYOUT_SWITCH, .follow = VRS_FOLLOW_SMOOTH, .height_cm = 0, \
                      .size_pct = 100, .tilt_deg = 0, .edge = VRS_EDGE_OFF, .foveation = VRS_FOV_MEDIUM, .dynres = false, \
                      .cull = VRS_CULL_FIT, .hud_dist = 2.0f, .hud_width = 2.2f}
 

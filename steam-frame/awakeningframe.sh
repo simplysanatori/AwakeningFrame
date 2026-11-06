@@ -12,7 +12,8 @@
 #               session xr_timing-<time>.log, lasrecomp-<time>.log, vrtiming-<time>.log (SteamVR's compositor)
 # Settings for one launch from the Steam library, which passes no environment of its own: VAR=value lines
 # in <program folder>/../session.env (e.g. AF_REFRESH_HZ=90, LARECOMP_XR_EYE_SCALE=0.8).
-# Variables: AF_REFRESH_HZ (72, 90 or 120; default: the VR tab's Refresh Rate, else 120), AF_VRTIMING=0 (no compositor log), AF_VRCMD,
+# Variables: AF_REFRESH_HZ (72, 90 or 120; default: the VR tab's Refresh Rate, else 90), AF_FPS=60 (a test: 60 fps at
+# 90 Hz, frames alternating one and two refreshes; the VR tab's third Refresh Rate choice does the same), AF_VRTIMING=0 (no compositor log), AF_VRCMD,
 # AF_HEADSET_FLAG, AF_LOGS, AF_KEEP (sessions of logs kept, default 12), LARECOMP_DATA_ROOT.
 HERE=$(dirname "$(readlink -f "$0")")
 ROOT=$(dirname "$HERE")
@@ -58,18 +59,31 @@ fi
 [ "$LAUNCHER" = 1 ] || ARGS=(--play "${ARGS[@]}")
 
 # ---- VR or flat
-# The refresh rate: AF_REFRESH_HZ (session.env) wins; else the VR tab's Refresh Rate (vr_refresh in larecomp.ini, the file
-# the game reads: LARECOMP_SETTINGS or larecomp.ini in this folder); else 120. AF_REFRESH_FROM tells the game which, so its
-# VR tab greys the row out when session.env sets it.
+# The refresh rate: AF_REFRESH_HZ (session.env) wins; else the VR tab's Refresh Rate (vr_refresh in larecomp.ini); else 90.
+# The ini is the file the game reads: LARECOMP_SETTINGS, else larecomp.ini in the data root (where the game keeps it:
+# LARECOMP_DATA_ROOT, set above), else the program folder's. AF_REFRESH_FROM tells the game which, so its VR tab greys
+# the row out when session.env sets it. AF_FPS=60 (session.env) is the 60 fps test at 90 Hz; without it the ini's vr_fps
+# (written by the tab's third choice) reaches the game itself, which sets LARECOMP_XR_FPS.
+INI=${LARECOMP_SETTINGS:-}
+if [ -z "$INI" ]; then
+    for f in "$DATA/larecomp.ini" "$HERE/larecomp.ini"; do
+        [ -f "$f" ] && { INI=$f; break; }
+    done
+fi
 if [ -n "${AF_REFRESH_HZ:-}" ]; then
     export AF_REFRESH_FROM=env
 else
-    INI_HZ=$(sed -n 's/^vr_refresh[[:space:]]*=[[:space:]]*\([0-9]*\).*/\1/p' "${LARECOMP_SETTINGS:-$HERE/larecomp.ini}" 2> /dev/null | tail -n 1)
-    [ -n "$INI_HZ" ] && log "refresh rate $INI_HZ Hz from larecomp.ini (the VR tab's Refresh Rate)"
+    INI_HZ=
+    [ -n "$INI" ] && INI_HZ=$(sed -n 's/^vr_refresh[[:space:]]*=[[:space:]]*\([0-9]*\).*/\1/p' "$INI" 2> /dev/null | tail -n 1)
+    [ -n "$INI_HZ" ] && log "refresh rate $INI_HZ Hz from $INI (the VR tab's Refresh Rate)"
     export AF_REFRESH_FROM=ini
 fi
-HZ=${AF_REFRESH_HZ:-${INI_HZ:-120}}
-case "$HZ" in 72 | 90 | 120) ;; *) log "AF_REFRESH_HZ=$HZ is not 72, 90 or 120, using 120"; HZ=120 ;; esac
+HZ=${AF_REFRESH_HZ:-${INI_HZ:-90}}
+case "$HZ" in 72 | 90 | 120) ;; *) log "AF_REFRESH_HZ=$HZ is not 72, 90 or 120, using 90"; HZ=90 ;; esac
+if [ -n "${AF_FPS:-}" ]; then
+    export LARECOMP_XR_FPS=$AF_FPS
+    log "AF_FPS=$AF_FPS: LARECOMP_XR_FPS=$AF_FPS"
+fi
 if [ "$FLAT" = 1 ]; then
     unset LARECOMP_XR
     log "flat mode: no VR"
