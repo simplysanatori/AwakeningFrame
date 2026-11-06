@@ -2,8 +2,8 @@
 // vr_settings_parse / vr_settings_save). Each option maps onto the variable the VR code already reads from the
 // environment: at startup vr_settings_apply_env sets that variable from the saved value (only when the value is not the
 // default and the variable is not already set: an environment variable always wins, and the tab shows the row greyed
-// out). A change made in the menu reaches the running VR code through the hooks in vr_settings.c (weak symbols: a lane
-// that is absent leaves its row at "Applies After Restart"; Height, Size and Tilt are the rig's, vr_rig.ini). docs/af/VR_SETTINGS.md.
+// out). A change made in the menu reaches the running VR code through the hooks in vr_settings.c (weak symbols: an absent
+// one, as in a flat build, leaves its row at "Applies After Restart"; Height, Size and Tilt are the rig's, vr_rig.ini). docs/af/VR_SETTINGS.md.
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
@@ -12,7 +12,7 @@
 enum { VRS_LAYOUT_SWITCH, VRS_LAYOUT_COMFORT, VRS_N_LAYOUT };               // LARECOMP_XR_LAYOUT
 enum { VRS_FOLLOW_SMOOTH, VRS_FOLLOW_ROOM, VRS_FOLLOW_FIXED, VRS_N_FOLLOW };  // LARECOMP_VR_FOLLOW
 enum { VRS_EDGE_OFF, VRS_EDGE_FADE, VRS_EDGE_PASSTHROUGH, VRS_N_EDGE };       // LARECOMP_VR_EDGE = black, fade, passthrough
-// LARECOMP_VR_FOVEATION: eye-tracked only (no fixed mode); without gaze the foveation lane renders full density
+// LARECOMP_VR_FOVEATION: eye-tracked only (no fixed mode); without gaze foveation.c renders full density
 enum { VRS_FOV_OFF, VRS_FOV_LOW, VRS_FOV_MEDIUM, VRS_FOV_HIGH, VRS_N_FOV };
 enum { VRS_TURN_SMOOTH, VRS_TURN_SNAP, VRS_N_TURN };                         // LARECOMP_VR_TURN (the rig's right stick)
 // AF_REFRESH_HZ / LARECOMP_XR_HZ / LARECOMP_XR_FPS: 120 Hz at 60 FPS (the default), 90 Hz at 30 FPS, 90 Hz at 60 FPS (a test)
@@ -29,7 +29,7 @@ typedef struct {
     int turn;          // VRS_TURN_*
     int edge;          // VRS_EDGE_*
     int foveation;     // VRS_FOV_*
-    bool dynres;       // dynamic resolution of the eye images (diet lane)
+    bool dynres;       // dynamic resolution of the eye images (output_scale.c)
     float hud_dist;    // the HUD / menu panel: metres from the head
     float hud_width;   // and its width in metres (LARECOMP_XR_QUAD=dist,width)
     int pointer_hand;  // VRS_HAND_*: the controller whose laser points at the menu (xr_input.c reads it live)

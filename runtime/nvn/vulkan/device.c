@@ -1381,7 +1381,7 @@ void vk_frame_end(const char *shot_path) {
     uint64_t seq;
 #ifdef LARECOMP_HAVE_XR
     if (xr_mode()) {
-        // VR mode: the stereo executor's eye outputs into the eye images (exec.c vk_stereo_eyes; lane 4); the eyes
+        // VR mode: the stereo executor's eye outputs into the eye images (exec.c vk_stereo_eyes); the eyes
         // nobody drew this set get the stub's clear colour; the HUD image stays in
         // COLOR_ATTACHMENT_OPTIMAL (the runtime's layout for a released image); no present: the XR thread releases the
         // set once this submission is done
@@ -1801,7 +1801,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         extern void widescreen_present_crop(uint64_t, double, float *, double *, double *, double *, double *);
         float crop[4];  // uv origin and size
         widescreen_present_crop(frame, shape, crop, &vx, &vy, &vw, &vh);
-        {   // (VR mode, stereo executor: lane 4) the scalable targets at the eye's size (each eye renders the scene
+        {   // (VR mode, stereo executor) the scalable targets at the eye's size (each eye renders the scene
             // into its twins: anisotropic scale for a square eye); the window image keeps the HUD, drawn by the game in
             // a centred 16:9 box (exec.c, the uniform part of the scale): that box fills the HUD image
             extern bool stereo_eye_size(uint32_t *w, uint32_t *h);

@@ -1,12 +1,12 @@
-// Stereo executor (AwakeningFrame lane 4; design: ~/.claude/plans/awakeningframe-vr-design.md sections 2-4, 6).
+// Stereo executor (docs/af/STEREO.md).
 // VR mode (LARECOMP_XR=1): each game frame's command lists run once per eye (exec.c backend_execute), with the
 // camera substituted per eye in the host-side copies of the constant blocks (runtime/nvn/cam_override.c), the 16:9
 // render targets twinned per eye (textures.c vk_stereo_swap), passes into other targets (shadow maps, cube maps,
 // small offscreen targets) run once and shared, the scene's composite drawn into a per-eye output, and the window
 // image (now transparent) keeping only the HUD / layout / menus for the quad layer. Docs: docs/af/STEREO.md.
 //
-// This file: the switches, and the eye cameras of the v1 diorama (a fixed world-to-table transform; lane 6 replaces
-// it with the rig). The executor itself is in exec.c (it needs the translation's state).
+// This file: the switches, and the eye cameras of the v1 diorama (a fixed world-to-table transform; the rig,
+// runtime/xr/xr_rig.c, replaces it). The executor itself is in exec.c (it needs the translation's state).
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
@@ -36,7 +36,7 @@ bool stereo_eye_matrices(int eye, float V[16], float P[16]);
 // was known). false: no latch with eye cameras yet. (The edge pass's round fade centres on the anchor.)
 bool stereo_table(float anchor[3], bool *room, bool *zone, float lo[3], float hi[3]);
 
-// ---- the eye post hook (the "edge" lane's fog / backdrop pass)
+// ---- the eye post hook (the table edge's fog / backdrop pass)
 // exec.c vk_stereo_eyes calls stereo_eye_post once per NEW eye output (a composite that was not shown before), before
 // it is drawn into the XR eye image, outside any rendering, on the render thread. The default is an empty weak
 // definition in exec.c: define a strong one elsewhere to use it. It may record commands into e->cb that change

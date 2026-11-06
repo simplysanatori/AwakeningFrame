@@ -1,4 +1,4 @@
-# Overworld streaming and the diorama's black voids (AwakeningFrame lane "stream")
+# Overworld streaming and the diorama's black voids
 
 In VR you look around the table and see black where the game shows nothing. This page says what limits the visible world
 on the overworld, how to measure it and which levers exist. Addresses are for v1.0.0 (build AE16F71E) only.
@@ -76,7 +76,7 @@ passes needs either a second cull in that pass (one list for the shadow and dept
 position test in the executor, and a depth prepass that misses draws breaks the colour pass's depth test. Neither is
 done here.
 
-## Ring draws: the world past the table at a lower cost (lane ring)
+## Ring draws: the world past the table at a lower cost
 
 `LARECOMP_VR_RING=4` with `LARECOMP_VR_CULL_EXTENT` draws the extra rooms in the eyes' colour passes only. The executor
 (`exec.c` `ring_route`, before `begin_pass`) sorts each draw into core or ring:
@@ -129,7 +129,7 @@ The shared and pre-pass rows get none, and the pre-pass is back to 139 draws, 1.
   pass 15.6 -> 17.3 (ring draws are shaded in draw order, without the pre-pass's EQUAL: overdraw). `LOWRES 0` also
   keeps them out of the 704 x 396 pass (1.7 ms an eye): no visible difference in the dumps, but what that pass feeds
   is not known, so it is opt-in.
-- The 704 x 396 row of the stream lane's breakdown is not the casters: with fs d3e83e0301de7e42 skipped (the casters
+- The 704 x 396 row of the breakdown above is not the casters: with fs d3e83e0301de7e42 skipped (the casters
   went from 565 to 147 draws) it stayed at 11 ms. It is the last row before a submission boundary in eye 0 only, so it
   holds the GPU's idle time while the render thread records (render CPU went 12.7 -> 28.4 ms with EXTENT). That fs is
   also the depth-only shader of 422 of the 600 eye pre-pass draws, so skipping it by hash leaves holes (63 % void).

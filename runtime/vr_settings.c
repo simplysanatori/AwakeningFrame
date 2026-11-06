@@ -30,10 +30,9 @@ static const char *const k_fov[] = {"off", "low", "medium", "high"};
 static const char *const k_hand[] = {"right", "left"};
 
 // ---------------------------------------------------------------------------------------------------------------------
-// TODO(overseer): the hooks. Each is the function a lane provides to change its option while the game runs (weak: an
-// absent one leaves the row at "Applies After Restart", and nothing breaks). Names are this tab's proposal; connect them
-// to what the lanes ended up calling theirs (rig: runtime/xr/xr_rig.h, edge: edge.c, fov, diet, vr_cull.c, xr_input.c,
-// stereo.c) - either by providing these names or by changing the calls in vr_settings_changed below.
+// The hooks. Each is the function that changes one option while the game runs (weak: an absent one, as in a flat
+// build, leaves the row at "Applies After Restart", and nothing breaks). Where they live: the rig (runtime/xr/xr_rig.h),
+// edge.c, foveation.c, output_scale.c, xr_input.c and stereo.c.
 // Height, size and tilt belong to the rig (runtime/xr/xr_rig.h, vr_rig.ini): the three xr_rig_set_* hooks are provided by
 // runtime/xr/xr_rig_settings.c (XR builds only), the tab reads the live values back through xr_rig_get_user, and
 // larecomp.ini no longer keeps them (the old vr_table_* keys are read and ignored).
@@ -47,8 +46,8 @@ extern void xr_rig_set_tilt_deg(float deg) WEAK;          // table tilt: degrees
 extern void xr_rig_recentre(void) WEAK;                   // put the table in front of the player again (xr_rig.c)
 extern void xr_rig_set_turn_mode(int snap) WEAK;          // VRS_TURN_SNAP: 1, VRS_TURN_SMOOTH: 0 (xr_rig_settings.c)
 extern void edge_set_mode(int mode) WEAK;                 // VRS_EDGE_*: edge.c (the mode, read per eye)
-extern void fov_set_level(int level) WEAK;                // VRS_FOV_*: the foveation lane
-extern void diet_set_dynres(int on) WEAK;                 // the diet lane's dynamic eye resolution
+extern void fov_set_level(int level) WEAK;                // VRS_FOV_*: foveation.c
+extern void diet_set_dynres(int on) WEAK;                 // the dynamic eye resolution (output_scale.c)
 extern void xr_input_set_layout(int comfort) WEAK;        // xr_input.c S.comfort (VRS_LAYOUT_COMFORT: 1)
 extern void xr_set_game_fps(int fps) WEAK;                // the game's rate at the display's: 60 (the 90 Hz test) or 0 (xr_loop.c)
 extern float xr_display_hz(void) WEAK;                    // the display's rate now (0: no session yet)

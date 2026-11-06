@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mv_check.py: the comparator of tools/mv_check.sh (promoted from the mv lane's mvcmp.py).
+"""mv_check.py: the comparator of tools/mv_check.sh (promoted from an earlier comparison script).
 
 mv_check.py OUT [--limit PCT] [--thr N] [--mode LABEL]
 

@@ -38,14 +38,14 @@ static void init(void) {
     if ((e = getenv("LARECOMP_VR_CULL_HEIGHT"))) sscanf(e, "%f,%f", &C.hlo, &C.hhi);
     if ((e = getenv("LARECOMP_VR_CULL_MARGIN"))) C.margin = (float)atof(e);
     if ((e = getenv("LARECOMP_VR_CULL_EYES"))) C.eyes = atoi(e) != 0;
-    // (lane stream) LARECOMP_VR_CULL_EXTENT=<x>,<z>: the culled-to rectangle is the world-axis box of these half-extents about
+    // (streaming) LARECOMP_VR_CULL_EXTENT=<x>,<z>: the culled-to rectangle is the world-axis box of these half-extents about
     // the table centre instead of the scaled stock footprint, e.g. 52,42 for the overworld's resident 7x7 rooms around Link
     // (rooms are 15 x 12; docs/af/STREAM.md). LARECOMP_VR_CULL_TMAX=<tan>: the widest half-angle tangent (default 4, 76 deg).
     C.ex = C.ez = 0, C.tmax = 4.0f;
     if ((e = getenv("LARECOMP_VR_CULL_EXTENT"))) sscanf(e, "%f,%f", &C.ex, &C.ez);
     if ((e = getenv("LARECOMP_VR_CULL_TMAX"))) C.tmax = (float)atof(e);
     if (!(C.tmax > 0.5f)) C.tmax = 4.0f;
-    // (lane ring) LARECOMP_VR_RING=<margin>: draws whose position is outside the table fit's footprint grown by this are
+    // (ring draws) LARECOMP_VR_RING=<margin>: draws whose position is outside the table fit's footprint grown by this are
     // "ring" draws (exec.c: colour passes only, no shadow casters, no depth pre-pass). LARECOMP_VR_RING_CAST=<margin>:
     // ring draws within this of the footprint still cast shadows.
     C.ring = C.ring_cast = 0;
@@ -200,7 +200,7 @@ void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3],
         rx *= C.kx, rz *= C.kz;
         corner[c][0] = anchor[0] + rx * hr[0] + rz * hf[0], corner[c][1] = anchor[1], corner[c][2] = anchor[2] + rx * hr[2] + rz * hf[2];
     }
-    core_set(corner, true);  // (lane ring: the table fit's footprint, before the EXTENT box replaces it)
+    core_set(corner, true);  // (ring draws: the table fit's footprint, before the EXTENT box replaces it)
     for (int c = 0; c < 4 && C.ex > 0 && C.ez > 0; c++)  // (the world box)
         corner[c][0] = anchor[0] + (c & 1 ? 1.0f : -1.0f) * C.ex, corner[c][2] = anchor[2] + (c & 2 ? 1.0f : -1.0f) * C.ez;
     {   // the floor quadrilateral, counter-clockwise seen from above in (x, z) (the edge pass fades to it)

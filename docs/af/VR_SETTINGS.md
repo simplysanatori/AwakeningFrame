@@ -1,4 +1,4 @@
-# VR tab (AwakeningFrame "vrui" lane)
+# VR tab
 
 The settings menu has a VR tab (second, after Controls; shown in VR mode, or with `LARECOMP_SHOW_VR_TAB=1` in a flat run).
 Its options are the ones that were environment variables. They are kept in `larecomp.ini`; each one maps onto the variable
@@ -10,11 +10,11 @@ mapping, the hooks), `runtime/ui/vr_tab.mm` (the page), `runtime/xr/vrui_hook.c`
 1. At startup (`settings_load`, before anything reads the environment) `vr_settings_apply_env` sets each variable from
    the saved value, when the variable is not already set. A value is left out when it is what the code behind the variable
    does without it (refresh 120, layout switch, turning smooth, follow smooth, edge off), so an untouched ini changes nothing
-   there; Foveation and Dynamic Resolution are always passed on, because the tab's defaults (High, On) are not the lanes' own
+   there; Foveation and Dynamic Resolution are always passed on, because the tab's defaults (High, On) are not the code's own
    (medium, off).
-2. A change made in the menu calls the option's hook in `vr_settings_changed`. The hooks are weak symbols: where a lane
-   has not provided one yet the row's description says "Applies After Restart" (a relaunch, for the refresh rate), and the
-   saved value takes effect through step 1 at the next start.
+2. A change made in the menu calls the option's hook in `vr_settings_changed`. The hooks are weak symbols, and VR builds provide them all, so every row but Refresh Rate applies at once. A flat build
+   has no rig, input or HUD hooks: its rows say "Applies After Restart", and the saved value takes effect through step 1
+   at the next start.
 3. A variable already in the environment when the program started greys its row out ("Set by LARECOMP_VR_EDGE in the launch
    environment."). The Refresh Rate row follows `AF_REFRESH_HZ` in `session.env` the same way (the wrapper exports
    `AF_REFRESH_FROM=env|ini`).
@@ -54,8 +54,8 @@ carried render poses and the table moving only on new game frames are unchanged.
 | Tilt | 0, -20 to +50 degrees in steps of 5 | none (the rig's, `vr_rig.ini`) | none | live (`xr_rig_set_tilt_deg`) |
 | Recentre Table | button | none | none | live (`xr_rig_recentre`; greyed out in a flat build) |
 | Table Edge | Off, Fade, Passthrough (default Off) | `vr_edge_style = black \| fade \| passthrough` | `LARECOMP_VR_EDGE` (`black`, `fade`, `passthrough`; the variable still takes `fog` and `gradient`) | live (`edge_set_mode`, edge.c: the next eye is drawn in the new mode; each XR set carries its mode, so the projection layer's alpha flag and the blend mode follow the images; Passthrough needs the runtime's `ALPHA_BLEND`, else the void shows black) |
-| Foveation | Off, Low, Medium, High (eye-tracked only; default High) | `vr_foveation = off \| low \| medium \| high` | `LARECOMP_VR_FOVEATION` (always set from the tab: the lane's own default is medium) | live (`fov_set_level`; the level is in the shading-rate map's key, so the next pass redraws it). Off at start still enables the extension, so it can be turned on; only `LARECOMP_VR_FOVEATION=off` from the launch environment leaves it out |
-| Dynamic Resolution | Off, On (default On; floor 1536 px) | `vr_dynamic_resolution = 1 \| 0` | `LARECOMP_VR_DYNRES` (always set from the tab: the lane's own default is off) | live (`diet_set_dynres`) |
+| Foveation | Off, Low, Medium, High (eye-tracked only; default High) | `vr_foveation = off \| low \| medium \| high` | `LARECOMP_VR_FOVEATION` (always set from the tab: the code's own default is medium) | live (`fov_set_level`; the level is in the shading-rate map's key, so the next pass redraws it). Off at start still enables the extension, so it can be turned on; only `LARECOMP_VR_FOVEATION=off` from the launch environment leaves it out |
+| Dynamic Resolution | Off, On (default On; floor 1536 px) | `vr_dynamic_resolution = 1 \| 0` | `LARECOMP_VR_DYNRES` (always set from the tab: the code's own default is off) | live (`diet_set_dynres`) |
 | Panel Distance | 2.0 m, 0.8 to 4.0 m | `vr_panel_distance = <metres>` | `LARECOMP_XR_QUAD=<dist>,<width>` | live (`vrui_set_hud_quad`) |
 | Panel Width | 2.2 m, 0.6 to 4.0 m | `vr_panel_width = <metres>` | the same | live |
 
@@ -70,38 +70,27 @@ next save drops them).
 
 ## Defaults and the saved file
 
-New defaults, after the first headset session (2026-11-06): Refresh Rate 120 Hz (60 FPS), Foveation High, Dynamic Resolution
-On (floor 1536 px), Table Edge Off, Turning Smooth. An `larecomp.ini` that already holds a value keeps it (the tab writes every
-row each time it saves, so a file saved before has `vr_refresh = 90`, `vr_foveation = medium`, `vr_dynamic_resolution = 0`
-until they are changed in the tab). The edge is the exception: it has a new key, `vr_edge_style`, and the older `vr_edge_mode`
-(and `vr_edge`) are read and dropped, so Haze and Sky Only choices do not carry over; `vr_culling` is dropped too. The Culling
-row is gone from the menu; `LARECOMP_VR_CULL` still works from the environment (default `fit`).
+Defaults: Refresh Rate 120 Hz (60 FPS), Foveation High, Dynamic Resolution On (floor 1536 px), Table Edge Off, Turning
+Smooth. An `larecomp.ini` that already holds a value keeps it (the tab writes every row each time it saves, so a file
+saved by an older build can still have `vr_refresh = 90`, `vr_foveation = medium` or `vr_dynamic_resolution = 0` until
+they are changed in the tab). The edge key is `vr_edge_style`; the older `vr_edge_mode`, `vr_edge` and `vr_culling` are
+read and dropped. Culling has no row: `LARECOMP_VR_CULL` works from the environment only (default `fit`).
 
-All the hooks are weak symbols (`vr_opt_live`). Live now (VR builds): every row but Refresh Rate, which says "Applies After
-Relaunch" unless the change is between its two 90 Hz choices at 90 Hz. A flat build has no rig, input or HUD hooks: those rows
-say "Applies After Restart". To connect a lane: provide the hook's name (declared at the top of `vr_settings.c`), or change the one call in
-`vr_settings_changed`.
+All the hooks are weak symbols (`vr_opt_live`). Live (VR builds): every row but Refresh Rate, which says "Applies After
+Relaunch" unless the change is between its two 90 Hz choices at 90 Hz. A flat build has no rig, input or HUD hooks: those
+rows say "Applies After Restart". To add a row, provide its hook (declared at the top of `vr_settings.c`) and add the one
+call in `vr_settings_changed`.
 
-## Labels changed after the first headset session (original -> proposed)
+## Row text
 
-| Row | Original | Proposed |
-|---|---|---|
-| Refresh Rate | default 90 Hz (30 FPS); "...90 Hz plays at 30 FPS and asks less of the GPU." | default 120 Hz (60 FPS); "...120 Hz plays at 60 FPS. 90 Hz plays at 30 FPS and asks less of the GPU." |
-| Turning | (new; right stick sideways was a fixed 45° snap) | Smooth, Snap (default Smooth): "Smooth turns the table as you push the right stick sideways. Snap turns it in 45° steps behind a blink. Click both sticks to reset the view." |
-| Table Edge | Off, Haze, Sky Only, Passthrough: "What fills the empty space past the world outdoors. Haze fades it into the sky, Sky Only fills the space without touching the world, Passthrough shows the room." | Off, Fade, Passthrough (default Off): "What fills the space past the world. Fade softens the world into darkness around Link, Passthrough shows your room." |
-| Foveation | default Medium | default High (values and text as before) |
-| Dynamic Resolution | default Off | default On (text as before) |
-| Culling | Fit, Wide, Stock | removed from the menu |
+The menu's rows, values and descriptions, with what set each option before the tab existed. The wording follows
+Moonlight and Apollo: Title Case, no filler.
 
-## Labels for review (original -> proposed)
-
-The rows show in capitals; the case below is what the source and translation tables carry. "Original" is what each option
-was: the variable, or the existing menu text. Style as Moonlight / Apollo: Title Case, no filler.
-
-| Original | Proposed row | Proposed values | Description |
+| Set before by | Row | Values | Description |
 |---|---|---|---|
 | `AF_REFRESH_HZ=90` / `120`, `AF_FPS=60` | Refresh Rate (default 120 Hz) | 120 Hz (60 FPS), 90 Hz (30 FPS), 90 Hz (60 FPS, Test) | The headset's refresh rate, and with it the game's frame rate: 120 Hz plays at 60 FPS. 90 Hz plays at 30 FPS and asks less of the GPU. Applies After Relaunch. For 90 Hz (60 FPS, Test): Plays at 60 FPS on a 90 Hz display. Motion is less even because frames alternate between one and two refreshes. For testing. |
 | `LARECOMP_XR_LAYOUT=switch` / `comfort` | Controller Layout | Switch, Comfort | Switch puts every button where a Switch Pro Controller has it. Comfort puts the sword on the right trigger and the shield on the left. |
+| `LARECOMP_VR_POINTER_HAND=right` / `left` | Pointer Hand | Right, Left | The controller that points at this menu. Pull its trigger to click, push the right stick to scroll. |
 | Buttons match labels (Controls tab) | Buttons Match Labels | Off, On | The Frame controllers' A, B, X and Y work as printed on them. Off matches the Switch's button positions. |
 | right stick left / right, `LARECOMP_VR_TURN=smooth` / `snap` | Turning | Smooth, Snap | Smooth turns the table as you push the right stick sideways. Snap turns it in 45° steps behind a blink. Click both sticks to reset the view. |
 | `LARECOMP_VR_FOLLOW=smooth` / `room` / `fixed` | Follow Mode | Smooth, Room, Fixed | How the table follows the game's camera. Smooth glides after it, Room holds still until the camera changes room, Fixed never moves. |
@@ -116,7 +105,7 @@ was: the variable, or the existing menu text. Style as Moonlight / Apollo: Title
 | `LARECOMP_XR_QUAD` (width) | Panel Width | 0.6 m to 4.0 m | How wide the HUD and menus are. |
 | (new) | tab: VR; sections Display, Controls, Table, Edge, Performance, Menu Panel | | |
 
-Notes added to a description by the tab itself: "Applies After Restart." (the option's lane has no live hook),
+Notes added to a description by the tab itself: "Applies After Restart." (a flat build: the option has no live hook),
 "Applies After Relaunch." (Refresh Rate), "Set by <VARIABLE> in the launch environment." (the row is greyed out).
 
 ## Controller navigation

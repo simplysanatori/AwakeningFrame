@@ -1,4 +1,4 @@
-// Eye-tracked foveated rendering of the VR eye passes (AwakeningFrame "fov" lane). Docs: docs/af/STEREO.md "Foveation".
+// Eye-tracked foveated rendering of the VR eye passes. Docs: docs/af/STEREO.md "Foveation".
 //
 // VR mode only. Each eye-sized pass into twinned (per-eye) scalable targets gets a shading-rate attachment
 // (VK_KHR_fragment_shading_rate; LARECOMP_VR_FOVEATION_MODE=fdm: a fragment density map instead): pixels away from the

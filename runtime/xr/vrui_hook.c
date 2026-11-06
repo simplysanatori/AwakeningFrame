@@ -1,5 +1,5 @@
 // The VR tab's hook into the HUD / menu quad (runtime/vr_settings.c): xr_loop.c reads g_xr.quad_dist / quad_width for
-// every frame it ends, so a change made in the menu shows at once. A separate file: the XR lanes' own files stay theirs.
+// every frame it ends, so a change made in the menu shows at once. A separate file, so the XR files stay as they are.
 #include "xr_internal.h"
 #include "../rt.h"
 

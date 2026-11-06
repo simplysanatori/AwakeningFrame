@@ -1,11 +1,11 @@
-# VR render passes and the pass diet (AwakeningFrame diet lane)
+# VR render passes and the pass diet
 
 Where a VR game frame's GPU time goes, both eyes, and what VR mode leaves out (`runtime/nvn/vulkan/vr_diet.c`).
 
 ## How it was measured
 
-`LARECOMP_GPUPROF_AT=<frame>` under xrmock (1728² eyes, 90 Hz, game at 30 fps), `tools-local/dietbench.sh` (a copy of
-the perf lane's `vrbench.sh`). Each `[gpuprof]` row is the GPU time from one mark (a pass, copy or dispatch) to the next.
+`LARECOMP_GPUPROF_AT=<frame>` under xrmock (1728² eyes, 90 Hz, game at 30 fps), a local bench script around it
+(not in this repository). Each `[gpuprof]` row is the GPU time from one mark (a pass, copy or dispatch) to the next.
 VR rows carry `e0` / `e1` and the first draw's fragment shader address, target and textures.
 `tools/gpuprof_groups.py run.log [n]` sums them into the groups below by fragment shader hash. Eye 0 also holds the
 shared work (shadow map, compute, the HUD) and the GPU idle between submission chunks.
@@ -163,7 +163,7 @@ Without dynres outdoors still doesn't fit 60 (GPU 16-17 ms) and is held at 30 at
 ~11-12 ms of translation is what the game thread still waits for (queue wait ~4.5 ms at Mabe): the next serial part.
 `LARECOMP_VR_DYNRES_MS=13.5` changed nothing: outdoors the eye width is at the 1400 floor either way.
 
-Far drawing (lane/ring, `LARECOMP_VR_CULL_EXTENT=52,42 LARECOMP_VR_RING=4`) at 90 Hz, overlap off -> on:
+Far drawing (ring draws, `LARECOMP_VR_CULL_EXTENT=52,42 LARECOMP_VR_RING=4`) at 90 Hz, overlap off -> on:
 
 | spot | ring | fps | gpu ms | rcpu ms | busy ms |
 |---|---|---|---|---|---|

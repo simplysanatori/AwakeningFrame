@@ -33,7 +33,7 @@ TREE=$(cd "$SELF/.." && pwd)
 SAVE=${VR_TOUR_SAVE:-$HOME/.local/share/lasrecomp-smoketest/save}
 HEADSET=${AF_HEADSET_FLAG:-$HOME/.cache/headset-in-use}
 LOCK=${AF_BENCH_LOCK:-$HOME/.cache/af-bench-lock}
-PRIORITY=${AF_BENCH_PRIORITY:-$HOME/.cache/af-bench-priority}   # a lane with priority on the lock: don't take it while this exists
+PRIORITY=${AF_BENCH_PRIORITY:-$HOME/.cache/af-bench-priority}   # a run with priority on the lock: don't take the lock while this exists
 BIN= MODE=mv TAG= ONLY= LIMIT=1.5 NOISE=1 DWELL=420 EYE=1680x1760 POSE=static:0,1.6,0,0,-45 VVL=0 WAIT_HEADSET=0 WAIT_MAX=3600 PLAN=0 GTREE=
 fail() { echo "mv_check: $*" >&2; exit 2; }
 while [ $# -gt 0 ]; do
@@ -161,7 +161,7 @@ other_game() { pgrep -x lasrecomp >/dev/null 2>&1; }
 take_lock() {
     busy_wait "the headset (~/.cache/headset-in-use)" headset_on
     busy_wait "the bench priority flag ($PRIORITY)" test -e "$PRIORITY"
-    local said=0   # (polls fast: other lanes' batch scripts retake the lock within a second of its release)
+    local said=0   # (polls fast: other batch scripts retake the lock within a second of its release)
     until ( set -o noclobber; echo "mvtools $$" > "$LOCK" ) 2>/dev/null; do
         [ $said = 0 ] && echo "mv_check: waiting for the bench lock ($LOCK: $(cut -d' ' -f1 "$LOCK" 2>/dev/null))"; said=1
         [ -e "$PRIORITY" ] && busy_wait "the bench priority flag ($PRIORITY)" test -e "$PRIORITY"

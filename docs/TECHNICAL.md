@@ -35,11 +35,13 @@ Technical notes for people working on the port. For playing, see the
   layer straight ahead at eye height, 2 m away and 2.2 m wide by default.
   The game's 16:9 UI box is cropped to fill it. The game's own fades to black
   are on the panel too.
-- **Table edge** (overworld only, off by default): past the loaded zone the
-  world ends in a void. *Fade* softens the world into it, found per pixel from
-  the scene depth so the silhouette stays sharp; *Passthrough* writes the
-  void and the fade as alpha and asks SteamVR to blend the eye images over
-  your room.
+- **Table edge** (off by default): past the loaded zone the world ends in a
+  void. *Fade* ends it in a round fade to black around the table's centre, in
+  every room: each pixel's distance from the table's anchor is taken from the
+  scene depth, or from where its ray meets the floor. *Passthrough* (overworld
+  only) writes the void and the fade as alpha and asks SteamVR to blend the eye
+  images over your room. The mode can change while the game runs: the next eye
+  is drawn in the new one.
 
 ## How it works
 
@@ -48,8 +50,9 @@ Technical notes for people working on the port. For playing, see the
 | Game | `generated/` (made by `make gen` from your `exefs`) | LAS Recomp's static recompilation, built into `lasgame.so` on your machine. None of it is in this repository |
 | Renderer | `runtime/nvn/vulkan/` | LAS Recomp's NVN-on-Vulkan renderer: the game's command lists translated to Vulkan, its Maxwell shaders translated to GLSL and compiled to SPIR-V |
 | OpenXR | `runtime/xr/` | Session, swapchains and frame loop (`xr_session.c`, `xr_loop.c`, `xr_vk.c`), controllers (`xr_input.c`), the diorama rig (`xr_rig.c`) |
-| Stereo | `runtime/nvn/vulkan/stereo.c`, `exec.c`, `runtime/nvn/cam_override.c` | Runs each list once per eye with that eye's camera |
+| Stereo | `runtime/nvn/vulkan/stereo.c`, `exec.c`, `textures.c`, `runtime/nvn/cam_override.c` | Draws both eyes in one multiview pass, each with its own camera |
 | Foveation | `runtime/nvn/vulkan/foveation.c` | Eye-tracked shading rate per eye pass |
+| Menu laser | `runtime/xr/xr_pointer.c`, `xr_input.c` | The beam and dot layers, and the pointing hand's click and scroll |
 | Edge | `runtime/nvn/vulkan/edge.c` | The table edge |
 | VR passes, dynamic resolution | `runtime/nvn/vulkan/vr_diet.c`, `runtime/nvn/output_scale.c` | What the VR mode leaves out, and the eye resolution |
 | VR tab | `runtime/vr_settings.c`, `runtime/ui/vr_tab.mm` | The settings, saved in `larecomp.ini` |
@@ -61,39 +64,38 @@ run time. The game creates its Vulkan instance and device through
 
 ### Stereo
 
-VR mode draws the real game into both eye swapchains, with a camera per eye.
+VR mode draws the real game into both eye swapchains in one pass, with a camera per eye.
 
-- Each of the game's command lists runs once per eye. Before the second eye
-  the bound state is restored, and the game's memory writes from the first
-  eye (uniform updates, buffer copies) are undone and redone.
-- The second eye only runs a draw, clear or copy when its target is
-  **twinned**: the 16:9 render targets that scale with the resolution, and
-  the ambient occlusion targets. Shadow maps, cube maps and small offscreen
-  targets are drawn once and shared. Compute, counters and read-backs run
-  once. A copy from a twinned texture into a shared one twins the
-  destination from then on.
-- **Camera.** The game's main camera is the first perspective 320-byte
-  uniform buffer of a frame. Per eye, the view, projection and
-  view-projection, the rotation block and the eye position are replaced in a
-  host copy of it, and every other bound block that holds the same matrices
-  or eye position is rewritten too. Guest memory is never written. Culling is
-  widened so the table's sides are drawn.
-- **Fences** of a list are signalled only after both eyes have run, so the
-  game never sees a frame as done while the second eye still reads its
-  data.
-- **HUD.** The window image has no alpha, so after the scene's composite the
-  game's UI draws go into a separate RGBA16F image cleared to transparent,
-  with blended draws accumulating coverage. That image goes to the quad layer
+- Each of the game's command lists runs once. A render pass whose attachments are all **twinned** draws both eyes with
+  `VK_KHR_multiview` (view mask 3). Twinned targets are the 16:9 render targets that scale with the resolution, and the
+  ambient occlusion targets; each is one image with two array layers, eye 1 in layer 1. Shadow maps, cube maps and
+  small offscreen targets are drawn once and shared. Compute, counters and read-backs run once. A copy from a twinned
+  texture into a shared one twins the destination from then on.
+- A pass that mixes layered and shared attachments falls back to running the list a second time for eye 1, with the
+  bound state restored and the game's memory writes from the first run undone and redone. Such lists are counted in
+  the log. Presented images, such as the HUD, are drawn for eye 0 alone.
+- **Camera.** The game's main camera is the first perspective 320-byte uniform buffer of a frame. It is found before
+  the list runs, so every draw of the frame sees the same camera. Per eye, the view, projection and view-projection,
+  the rotation block and the eye position are replaced in a host copy of it, and every other bound block that holds the
+  same matrices or eye position is rewritten too. Guest memory is never written. Culling is widened so the table's
+  sides are drawn.
+- **Per-eye blocks.** A draw whose vertex or fragment constant buffers hold the camera, or that samples a layered
+  texture, uses a shader variant that reads eye 0's or eye 1's copy by `gl_ViewIndex`. Both indices stay constant, so
+  the driver keeps the block in constant registers. Other draws use the plain program. The variants are prepared with
+  the rest of the shaders before the game starts.
+- **Fences** of a list are signalled only after it has run for both eyes, so the game never sees a frame as done while
+  the second eye still reads its data.
+- **HUD.** The window image has no alpha, so after the scene's composite the game's UI draws go into a separate
+  RGBA16F image cleared to transparent, with blended draws accumulating coverage. That image goes to the quad layer
   with source alpha.
-- **Pose.** The head is located once per game frame, at the frame's first
-  camera draw, for the time that frame is expected on the display (the
-  measured time from that point to its first refresh). Each eye output keeps
-  the pose it was rendered with, and the projection layer is submitted with
-  those poses, so a refresh that repeats an older frame carries the older
-  poses.
-- The table moves only on new game frames, so it is never shown at two
-  places within one game frame. Smooth turning is integrated per game frame
-  for the same reason.
+- **Pose.** The head is located once per game frame, at the frame's first camera draw, for the time that frame is
+  expected on the display (the measured time from that point to its first refresh). Each eye output keeps the pose it
+  was rendered with, and the projection layer is submitted with those poses, so a refresh that repeats an older frame
+  carries the older poses.
+- The table moves only on new game frames, so it is never shown at two places within one game frame. Smooth turning is
+  integrated per game frame for the same reason.
+- `LARECOMP_MV=0` switches multiview off: every list then runs once per eye, as in earlier builds. A driver without
+  multiview falls back the same way, which the game notes in its log at start.
 
 ### Pacing
 
@@ -102,9 +104,11 @@ VR mode draws the real game into both eye swapchains, with a camera per eye.
   each.
 - In VR mode the game thread no longer waits for its own frame's GPU work:
   the game's frame fence is waited on one frame late, so the CPU and the GPU
-  run side by side. On the Frame's driver the game's memory reaches shaders
-  as copies, made at translation, so the GPU never sees the next frame's
-  data.
+  run side by side. By default the game's memory reaches shaders as copies,
+  made at translation, so the GPU never sees the next frame's data.
+- The game's memory can instead be mapped as the driver's own (`LARECOMP_VK_HEAP_DMABUF=1`,
+  as on RADV and PanVK), which saves those copies. On the Frame it commits the
+  whole heap up front, so it is optional for now and being reworked.
 - When the GPU falls behind at 120 Hz, the pacer holds the game at 30 frames
   a second and returns to 60 once the GPU fits 90% of a two-refresh frame.
 - The launch wrapper sets SteamVR's per-app keys at every start
@@ -115,10 +119,14 @@ VR mode draws the real game into both eye swapchains, with a camera per eye.
 ### Foveation
 
 - Eye-tracked only. Each eye pass whose attachments are twinned and at
-  least three quarters of the eye size gets a per-eye shading-rate attachment
+  least three quarters of the eye size gets a shading-rate attachment
   (`VK_KHR_fragment_shading_rate`, 8-pixel texels). Away from the focus,
   pixels are shaded at a coarser rate, up to 4x4 at High. Rasterisation,
-  depth and geometry edges stay at full resolution.
+  depth and geometry edges stay at full resolution. Turnip has no layered
+  shading-rate attachments, so a multiview pass gets one map, each texel at
+  the finer rate of the two eyes' foci.
+- The level can change while the game runs, including from Off. Only
+  `LARECOMP_VR_FOVEATION=off` in the launch environment leaves the extension out.
 - The focus is the eye gaze (`XR_EXT_eye_gaze_interaction`), located for the
   frame's display time, projected through each eye and smoothed.
 - With no gaze for 200 ms, no map is attached and everything renders at full
@@ -162,9 +170,14 @@ start.
 The VR tab's rows map onto environment variables the VR code reads, and are
 saved in `larecomp.ini`. A variable set in the launch environment
 (`~/Games/AwakeningFrame/session.env`, `NAME=value` lines) wins and greys
-its row out. The refresh rate is applied by the launch wrapper before the
-game starts, so it takes a relaunch. Height, size and tilt belong to the rig
-and are saved in `vr_rig.ini`. The full list is in
+its row out. A change in the menu goes straight to the running code through a
+hook for each row, so every row applies at once: Turning, Controller Layout,
+Buttons Match Labels, Pointer Hand, Follow Mode, Height, Size, Tilt, Table
+Edge, Foveation, Dynamic Resolution and the panel's place. The exception is
+the refresh rate, which SteamVR's runtime won't let the game change. The launch
+wrapper applies it before the game starts, so it takes a relaunch; only the
+switch between the two 90 Hz choices is live. Height, size and tilt belong to
+the rig and are saved in `vr_rig.ini`. The full list is in
 [af/VR_SETTINGS.md](af/VR_SETTINGS.md).
 
 ## Development tools
@@ -172,6 +185,9 @@ and are saved in `vr_rig.ini`. The full list is in
 - `tools/xrmock/`: a mock OpenXR runtime for running the VR mode without a
   headset, with scripted head poses and controllers and eye-image captures.
 - `tools/warm_shaders.sh`: the shader tour above.
+- `tools/vr_tour.sh` and `tools/mv_check.sh`: a tour of the game's spots under the
+  mock runtime with a report of timing and eye images, and a check that the eye
+  images of multiview and of per-eye runs agree.
 - The free-camera probe (`runtime/nvn/cam_override.c`, the
   `LARECOMP_FREECAM_*` variables): replaces the game's camera on the flat
   window, to see how the world holds up from other angles.
