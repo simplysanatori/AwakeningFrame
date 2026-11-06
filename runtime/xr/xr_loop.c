@@ -108,7 +108,7 @@ void xr_note_eye_gpu(float ms0, float ms1) {
 }
 
 // xr_timing.log in the data folder (the previous session's as xr_timing.log.prev): one line per refresh, ms since
-// xrBeginSession on plat_now_ns's clock (docs/af/TOOLING.md; tools/session-report.py reads it). GPU times per eye are
+// xrBeginSession on plat_now_ns's clock (docs/af/TOOLING.md; tools/session-report.py reads it).
 // GPU ms per eye come from the stereo executor (xr_note_eye_gpu; -1 while unknown).
 static FILE *tlog;
 static void timing_open(void) {

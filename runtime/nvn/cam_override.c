@@ -170,7 +170,7 @@ static void parse_schedule(const char *s) {
 }
 
 static const char *kind_name(CamKind k) {
-    static const char *n[] = {"off", "identity", "passthrough", "orbit", "spin"};
+    static const char *n[] = {"off", "identity", "passthrough", "orbit", "spin", "stereo"};
     return n[k];
 }
 
@@ -283,6 +283,18 @@ void cam_latch_from(CamLatch *l, const float *u, uint64_t addr, uint64_t frame) 
     l->fovy_game = 2 * atanf(1.0f / p[5]);
     for (int b = 0; b < 2; b++) l->blk[b] = (uint8_t)classify_block(u + 48 + 16 * b, &l->ref);
     for (int g = 0; g < 8; g++) l->grp[g] = l->blk[g / 4] ? G_NONE : (uint8_t)classify_group(u + 48 + 4 * g, &l->ref);
+    for (int g = 0; g < 8; g++) {  // (stereo) signed axes and the eye position, group by group
+        const float *v = u + 48 + 4 * g;
+        const float *ax[3] = {l->ref.right, l->ref.up, l->ref.fwd};
+        int8_t code = 0;
+        for (int k = 0; k < 3 && !code; k++) {
+            float sgn = k == 2 ? -1.0f : 1.0f;  // (+3: back = -forward)
+            if (ne(v[0], sgn * ax[k][0]) && ne(v[1], sgn * ax[k][1]) && ne(v[2], sgn * ax[k][2])) code = (int8_t)(k + 1);
+            else if (ne(v[0], -sgn * ax[k][0]) && ne(v[1], -sgn * ax[k][1]) && ne(v[2], -sgn * ax[k][2])) code = (int8_t)-(k + 1);
+        }
+        if (!code && ne(v[0], l->ref.eye[0]) && ne(v[1], l->ref.eye[1]) && ne(v[2], l->ref.eye[2])) code = 4;
+        l->axis[g] = code;
+    }
     l->valid = l->ref.ok;
 }
 
@@ -401,9 +413,73 @@ void cam_override_latch(const float *u, uint64_t addr, uint64_t size, uint64_t f
     }
 }
 
+// ---------------------------------------------------------------- stereo: per-eye cameras
+static CamEyeFn g_eye_fn;
+static bool g_eye_identity;
+static int g_eye_cur;
+static uint64_t g_eye_frame = ~0ull;   // the latch frame the eye cameras are for
+static bool g_eye_ok;
+static float g_eye_V[2][16], g_eye_P[2][16];
+static CamRef g_eye_ref[2];
+
+void cam_override_stereo(CamEyeFn fn, bool identity) {
+    g_eye_fn = fn, g_eye_identity = identity;
+    CamCfg c = *cfg_now();
+    c.kind = CAM_STEREO;
+    if (!getenv("LARECOMP_FREECAM_CULL") && !identity) c.cull_aspect = 3.2f, c.cull_fovy = 1.5f;
+    g_base = c;
+    cfg_set(&c);
+    g_cam_on = 1;
+    LOG("[stereo] per-eye cameras on (%s); culling %g:%g\n", identity ? "identity test: the game's camera in both eyes" : "diorama",
+        c.cull_aspect, c.cull_fovy);
+}
+void cam_override_set_eye(int eye) { g_eye_cur = eye == 1; }
+
+static bool eye_cams(void) {  // the latched frame's eye cameras (made once per latch)
+    if (!g_latch.valid || !g_eye_fn) return false;
+    if (g_eye_frame != g_latch.frame) {
+        g_eye_frame = g_latch.frame;
+        if (g_eye_identity) { g_eye_ok = true; return true; }
+        float pv[3];
+        cam_pivot(&g_latch.ref, g_link, g_link_ok, g_zone_ok, g_zlo, g_zhi, false, pv);
+        g_eye_ok = g_eye_fn(&g_latch, pv, g_eye_V, g_eye_P);
+        for (int e = 0; g_eye_ok && e < 2; e++) {
+            float vp[16];
+            cam_mat_mul(vp, g_eye_P[e], g_eye_V[e], g_latch.vp_fused == 1);
+            cam_derive(&g_eye_ref[e], g_eye_V[e], g_eye_P[e], vp);
+            g_eye_ok = g_eye_ref[e].ok;
+        }
+    }
+    return g_eye_ok;
+}
+bool cam_override_eye_ready(void) { return cfg_now()->kind == CAM_STEREO && eye_cams(); }
+
+static void stereo_build(const float *guest, float *out) {
+    memcpy(out, guest, 80 * sizeof *out);
+    if (g_eye_identity) { memcpy(out + 32, g_latch.id_vp, 64); return; }  // (V and P are the game's bytes already)
+    const CamRef *n = &g_eye_ref[g_eye_cur];
+    memcpy(out, n->V, 64), memcpy(out + 16, n->P, 64), memcpy(out + 32, n->VP, 64);
+    float back[3] = {-n->fwd[0], -n->fwd[1], -n->fwd[2]};
+    const float *ax[4] = {n->right, n->up, back, n->eye};
+    for (int g = 0; g < 8; g++) {
+        int a = g_latch.axis[g];
+        if (!a) continue;
+        int k = (a < 0 ? -a : a) - 1;
+        float s = a < 0 ? -1.0f : 1.0f;
+        for (int i = 0; i < 3; i++) out[48 + 4 * g + i] = s * ax[k][i];
+    }
+}
+
 bool cam_override_ubo(int stage, uint64_t addr, uint64_t size, void *out320) {
     (void)stage;
     const CamCfg *c = cfg_now();
+    if (c->kind == CAM_STEREO) {
+        if (!eye_cams() || addr != g_latch.addr || size != 320) return false;
+        const float *g = (const float *)(uintptr_t)addr;
+        if (memcmp(g, g_latch.orig, 128)) return false;
+        stereo_build(g, (float *)out320);
+        return true;
+    }
     if (c->kind == CAM_OFF || !g_latch.valid || addr != g_latch.addr || size != 320) return false;
     const float *g = (const float *)(uintptr_t)addr;
     if (memcmp(g, g_latch.orig, 128)) return false;  // (not this frame's camera: the address was rewritten with another one)
@@ -427,7 +503,11 @@ bool cam_override_patch(const void *guest, uint64_t size, void *out) {
     static const CamCfg *sub_cfg;
     static CamRef sub;  // the substitute camera's matrices (per frame and configuration)
     float pv[3];
-    if (sub_for != &g_latch || sub_frame != g_latch.frame || sub_cfg != c) {
+    if (c->kind == CAM_STEREO) {
+        if (g_eye_identity || !eye_cams()) return false;
+        sub = g_eye_ref[g_eye_cur];
+        sub_for = NULL;  // (the orbit's cache is not this)
+    } else if (sub_for != &g_latch || sub_frame != g_latch.frame || sub_cfg != c) {
         float built[80];
         cam_pivot(&g_latch.ref, g_link, g_link_ok, g_zone_ok, g_zlo, g_zhi, c->pivot_link, pv);
         cam_build(&g_latch, c, g_latch.orig, g_latch.frame, pv, built);

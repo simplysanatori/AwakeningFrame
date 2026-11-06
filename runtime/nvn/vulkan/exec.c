@@ -29,6 +29,16 @@
 #include "../../settings.h"
 #include "../weather.h"
 #include "../cam_override.h"
+#include "stereo.h"
+
+// ---- stereo executor (VR mode, stereo.h; docs/af/STEREO.md): the eye being executed (-1: not in stereo). In eye 1 a
+// draw, clear or copy runs only when a target is twinned (vk_tex_twinned); compute, counters and read-backs run in
+// eye 0 only; the game's memory writes of eye 0 are undone before eye 1 and redone by it.
+static int g_eye = -1;
+static uint64_t st_skipped[2], st_ran1;  // (stats) eye 1: skipped / run draws+clears+copies
+static bool st_mixed_logged;
+static bool eye1_skip_rt(void);           // (below the state) eye 1 and no twinned attachment
+static void gw_save(uint64_t addr, uint64_t size);  // eye 0: the old bytes of a guest write
 
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 // (the guest heap for shaders in chunks: with the heap import below)
@@ -1018,6 +1028,20 @@ static struct {
     uint32_t restart_index;
     uint64_t copy_row_stride, copy_image_stride;
 } st;
+
+static bool eye1_skip_rt(void) {
+    if (g_eye != 1) return false;
+    bool tw = false, shared = false;
+    for (int i = 0; i < st.rt.ncolor; i++)
+        if (st.rt.color[i]) { if (vk_tex_twinned(st.rt.color[i])) tw = true; else shared = true; }
+    if (st.rt.depth) { if (vk_tex_twinned(st.rt.depth)) tw = true; else shared = true; }
+    if (tw && shared && !st_mixed_logged) {
+        st_mixed_logged = true;
+        LOG("[stereo] a pass with twinned and shared targets (the shared one is drawn by both eyes; logged once)\n");
+    }
+    if (!tw) st_skipped[0]++; else st_ran1++;
+    return !tw;
+}
 
 uint32_t nvn_window_origin(void);
 uint32_t nvn_depth_mode(void);
@@ -2723,6 +2747,7 @@ static uint64_t stat_alias_made, stat_alias_renamed, stat_alias_partial, stat_al
 static int copy_opt(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("LARECOMP_VK_COPY_OPT"); on = e && *e ? atoi(e) : 1; }
+    if (on && stereo_wanted()) on = 0;  // (copy aliases hand images over between textures: not with eye twins)
     return on;
 }
 
@@ -6586,11 +6611,48 @@ static void snow_cover_check(CmdRec *r, bool indexed, Prog *pr) {
 }
 
 static void draw_(CmdRec *r, bool indexed);
+// (stereo) the scene's composite into the window image goes to the eye output instead (per eye: it is twinned); the
+// window image keeps the HUD, cleared transparent at the composite (eye 0). st.rt is restored after the draw.
+static NvnTexture g_eye_out;
+static bool g_eye_out_ok, st_redirected;
+static RtState st_rt_saved;
+static uint64_t g_eye_out_frame[2];  // renderer_exec_frame() of each eye's latest composite (+1; 0 none)
+static void stereo_composite(void) {
+    NvnTexture *win = st.rt.color[0];
+    if (!g_eye_out_ok || g_eye_out.width != win->width || g_eye_out.height != win->height || g_eye_out.format != win->format) {
+        if (g_eye_out_ok && g_eye_out.backend) backend_texture_destroyed(&g_eye_out);
+        g_eye_out = *win;
+        g_eye_out.backend = NULL, g_eye_out.addr = 0, g_eye_out.pool = NULL, g_eye_out.pool_offset = 0, g_eye_out.pool_refs = 0;
+        snprintf(g_eye_out.label, sizeof g_eye_out.label, "stereo eye output");
+        g_eye_out_ok = true;
+        LOG("[stereo] eye output %ux%u fmt %#x (the window image's)\n", win->width, win->height, win->format);
+    }
+    if (g_eye == 0) {  // the window image: transparent under the HUD
+        vk_end_pass();
+        TexBackend *wb = vk_tex(win, true);
+        VkCommandBuffer cb = vk_cmd();
+        vk_full_barrier(cb);
+        VkClearColorValue z = {{0, 0, 0, 0}};
+        VkImageSubresourceRange rg = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        rec_CmdClearColorImage(cb, wb->image, VK_IMAGE_LAYOUT_GENERAL, &z, 1, &rg);
+        vk_full_barrier(cb);
+    }
+    st_rt_saved = st.rt;
+    st_redirected = true;
+    st.rt.color[0] = &g_eye_out;
+    st.rt.has_cview[0] = 0;
+    memset(&st.rt.cview[0], 0, sizeof st.rt.cview[0]);
+    st.rt_dirty = true;
+    g_eye_out_frame[g_eye] = renderer_exec_frame() + 1;
+    static uint64_t n[2];
+    if (n[g_eye]++ % 600 == 0) LOG("[stereo] eye %d composite #%llu (frame %llu)\n", g_eye, (unsigned long long)n[g_eye], (unsigned long long)renderer_exec_frame());
+}
 static void draw(CmdRec *r, bool indexed) {
     PROF_T0();
     wx_composite = wx_mirror = false;
     draw_(r, indexed);
-    if (wx_composite) weather_encode();
+    if (st_redirected) { st_redirected = false; vk_end_pass(); st.rt = st_rt_saved; st.rt_dirty = true; }
+    if (wx_composite && g_eye <= 0) weather_encode();
     PROF_ADD(prof_draw);
 }
 static uint64_t prof_tp_;
@@ -6627,6 +6689,10 @@ static void draw_(CmdRec *r, bool indexed) {
             if (!pr || atomic_load(&pr->state) != 1) { SKIP(!pr ? SK_NO_STAGES : atomic_load(&pr->state) == 2 ? SK_PROG_FAILED : SK_PROG_BUILDING); return; }
             g_mirror_w = (float)st.rt.color[0]->width;
         }
+    }
+    if (g_eye >= 0) {  // (stereo executor)
+        if (wx_composite && !wx_mirror) stereo_composite();
+        if (eye1_skip_rt()) return;
     }
     if (g_interp_log) {  // (frame interpolation, runtime/nvn/interp.c: the draw's identity across frames - renderer.m's key)
         static int kmask = -1;  // LARECOMP_INTERP_KEY=<mask> (renderer.m)
@@ -8311,6 +8377,7 @@ static void exec_list(uint64_t handle, int depth) {
             if (ct_on() && index < st.rt.ncolor && st.rt.color[index])
                 LOG("[ct] clear-color %p mask %#x sc %d %d %d %d\n", (void *)st.rt.color[index], (uint32_t)r->x[2], st.scissor[0][0], st.scissor[0][1],
                     st.scissor[0][2], st.scissor[0][3]);
+            if (eye1_skip_rt()) break;
             if (index < st.rt.ncolor && st.rt.color[index]) alias_before_write(st.rt.color[index], 0, "clear");
             if (index < st.rt.ncolor && st.rt.color[index]) clear(index, (int)r->x[5], x, (uint32_t)r->x[2], false, 0, false, 0, 0);
             break;
@@ -8319,7 +8386,7 @@ static void exec_list(uint64_t handle, int depth) {
             // ClearTexture(cmd, texture, view, region, color, mask): a render-target clear of the texture alone (renderer.m)
             const struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; float color[4]; } *ct = x;
             NvnTexture *t = (NvnTexture *)(uintptr_t)ct->tex;
-            if (!t) break;
+            if (!t || (g_eye == 1 && !vk_tex_twinned(t))) break;
             snap_reason = "clear-texture"; snapshots_invalidate(NULL);
             alias_before_write(t, 0, "clear");
             RtState saved = st.rt;
@@ -8342,6 +8409,7 @@ static void exec_list(uint64_t handle, int depth) {
             break;
         }
         case CMD_CLEAR_DEPTH_STENCIL:
+            if (eye1_skip_rt()) break;
             snap_reason = "clear-depth"; snapshots_invalidate(NULL);
             if (ct_on() && st.rt.depth)
                 LOG("[ct] clear-depth %p d%d s%d sc %d %d %d %d\n", (void *)st.rt.depth, r->x[0] != 0, r->x[2] != 0, st.scissor[0][0],
@@ -8370,13 +8438,14 @@ static void exec_list(uint64_t handle, int depth) {
             }
             break;
         case CMD_DISPATCH:
-            if (g_interp_replaying) break;  // (a replayed frame: the frame's compute results are already there)
+            if (g_interp_replaying || g_eye == 1) break;  // (stereo: compute runs once, eye 0's results are shared)  // (a replayed frame: the frame's compute results are already there)
             dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]);
             break;
         case CMD_DRAW_ARRAYS: draw(r, false); break;
         case CMD_DRAW_ELEMENTS: draw(r, true); break;
         case CMD_UPDATE_UNIFORM_BUFFER:
             if (g_interp_replaying) break;  // (replay: the draws read their logged uniform copies)
+            if (g_eye == 0) gw_save(r->x[0] + r->x[2], r->x[3]);  // (stereo: undone before eye 1, which redoes it)
             memcpy((void *)(uintptr_t)(r->x[0] + r->x[2]), x, r->x[3]);
             guest_copy_flush();  // (cbuf copies shared within the submission are stale now)
             break;
@@ -8390,7 +8459,7 @@ static void exec_list(uint64_t handle, int depth) {
             break;
         }
         case CMD_REPORT_COUNTER: {
-            if (g_interp_replaying) break;
+            if (g_interp_replaying || g_eye == 1) break;
             // The game times its GPU work with these (two per frame) and drops to 30 fps when that looks slow: the
             // host clock now, replaced by the GPU's time at this point once the submission is done (cq_resolve).
             uint64_t *out = (uint64_t *)(uintptr_t)r->x[1];
@@ -8431,14 +8500,28 @@ static void exec_list(uint64_t handle, int depth) {
             }
             break;
         }
-        case CMD_COPY_TEXTURE_TO_TEXTURE: { const TexRefRec *t = x; copy_texture(&t[0], &t[1], r->x[6]); break; }
-        case CMD_DOWNSAMPLE: { const TexRefRec *t = x; copy_texture(&t[0], &t[1], 1); break; }
-        case CMD_COPY_BUFFER_TO_TEXTURE: copy_buffer_to_texture(r->x[0], x); break;
-        case CMD_COPY_TEXTURE_TO_BUFFER: if (!g_interp_replaying) copy_texture_to_buffer(x, r->x[3]); break;
+        case CMD_COPY_TEXTURE_TO_TEXTURE: case CMD_DOWNSAMPLE: case CMD_COPY_BUFFER_TO_TEXTURE: {
+            const TexRefRec *t = x;
+            const TexRefRec *dst = r->op == CMD_COPY_BUFFER_TO_TEXTURE ? &t[0] : &t[1];
+            if (g_eye == 1 && !vk_tex_twinned((NvnTexture *)(uintptr_t)dst->tex)) { st_skipped[1]++; break; }  // (stereo: shared)
+            if (g_eye == 0 && r->op != CMD_COPY_BUFFER_TO_TEXTURE && !vk_tex_twinned((NvnTexture *)(uintptr_t)dst->tex) &&
+                vk_tex_twinned((NvnTexture *)(uintptr_t)t[0].tex)) {
+                static int n;  // (a shared target made from a twin: eye 1 sees eye 0's)
+                if (n++ < 8) LOG("[stereo] copy from a twinned %ux%u into a shared %ux%u (eye 1 gets eye 0's)\n",
+                                 ((NvnTexture *)(uintptr_t)t[0].tex)->width, ((NvnTexture *)(uintptr_t)t[0].tex)->height,
+                                 ((NvnTexture *)(uintptr_t)dst->tex)->width, ((NvnTexture *)(uintptr_t)dst->tex)->height);
+            }
+            if (r->op == CMD_COPY_TEXTURE_TO_TEXTURE) copy_texture(&t[0], &t[1], r->x[6]);
+            else if (r->op == CMD_DOWNSAMPLE) copy_texture(&t[0], &t[1], 1);
+            else copy_buffer_to_texture(r->x[0], x);
+            break;
+        }
+        case CMD_COPY_TEXTURE_TO_BUFFER: if (!g_interp_replaying && g_eye != 1) copy_texture_to_buffer(x, r->x[3]); break;
         case CMD_COPY_BUFFER_TO_BUFFER:
             if (g_interp_replaying) break;
             wait_why = "buffer -> buffer copy";
             renderer_flush();
+            if (g_eye == 0) gw_save(r->x[1], r->x[2]);
             memmove((void *)(uintptr_t)r->x[1], (void *)(uintptr_t)r->x[0], r->x[2]);
             break;
         default: break;
@@ -8475,10 +8558,168 @@ void renderer_interp_replay(void) {
     st = st_end;
 }
 
+// ---- stereo executor (stereo.h): each list once per eye
+// The game's memory writes of eye 0 (uniform updates, buffer-to-buffer copies) are logged with their old bytes, undone
+// in reverse order before eye 1, and redone by eye 1: both eyes see the memory as the list's start did.
+static struct { uint64_t addr, size, off; } *gw_rec;
+static int gw_n, gw_cap;
+static uint8_t *gw_buf;
+static uint64_t gw_used, gw_bcap;
+static void gw_save(uint64_t addr, uint64_t size) {
+    if (!addr || !size) return;
+    if (gw_n == gw_cap) { gw_cap = gw_cap ? gw_cap * 2 : 256; gw_rec = realloc(gw_rec, gw_cap * sizeof *gw_rec); }
+    if (gw_used + size > gw_bcap) { while (gw_used + size > gw_bcap) gw_bcap = gw_bcap ? gw_bcap * 2 : 65536; gw_buf = realloc(gw_buf, gw_bcap); }
+    memcpy(gw_buf + gw_used, (const void *)(uintptr_t)addr, size);
+    gw_rec[gw_n].addr = addr, gw_rec[gw_n].size = size, gw_rec[gw_n].off = gw_used;
+    gw_n++, gw_used += size;
+}
+static void gw_restore(void) {
+    for (int i = gw_n - 1; i >= 0; i--) memcpy((void *)(uintptr_t)gw_rec[i].addr, gw_buf + gw_rec[i].off, gw_rec[i].size);
+    if (gw_n) guest_copy_flush();  // (cbuf copies made from the later bytes are stale)
+    gw_n = 0, gw_used = 0;
+}
+
+// Per-eye GPU time: a timestamp before and after each eye's run of a list (ALL_COMMANDS: after the work before it),
+// summed per game frame and resolved once the submissions are done (at the present).
+#define STQ 4096
+static VkQueryPool st_qp;
+typedef struct { uint64_t frame, seq; uint32_t q; uint8_t eye; } StTs;
+static StTs st_ts[STQ / 2];
+static uint32_t st_ts_head, st_ts_tail;  // ring of pairs (st_ts[i] uses queries 2i, 2i+1 % STQ)
+static uint32_t st_ts_begin(void) {
+    if (!st_qp) {
+        if (!g_vk.props.limits.timestampComputeAndGraphics) return ~0u;
+        VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = STQ};
+        if (vkCreateQueryPool(g_vk.dev, &qi, NULL, &st_qp) != VK_SUCCESS) { st_qp = VK_NULL_HANDLE; return ~0u; }
+    }
+    if (st_ts_head - st_ts_tail >= STQ / 2) return ~0u;  // (ring full: not timed)
+    uint32_t q = (st_ts_head % (STQ / 2)) * 2;
+    VkCommandBuffer cb = vk_cmd();
+    rec_CmdResetQueryPool(cb, st_qp, q, 2);
+    rec_CmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, st_qp, q);
+    return q;
+}
+static void st_ts_end(uint32_t q, int eye) {
+    if (q == ~0u) return;
+    rec_CmdWriteTimestamp2(vk_cmd(), VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, st_qp, q + 1);
+    StTs *t = &st_ts[st_ts_head % (STQ / 2)];
+    t->frame = renderer_exec_frame(), t->seq = vk_pending_seq(), t->q = q, t->eye = (uint8_t)eye;
+    st_ts_head++;
+}
+static void st_ts_resolve(void) {  // (the present) finished frames' sums
+    static uint64_t cur_frame = ~0ull;
+    static double ms[2];
+    static int lists;
+    uint64_t done = vk_completed_seq();
+    double per = g_vk.props.limits.timestampPeriod;
+    while (st_ts_tail != st_ts_head) {
+        StTs *t = &st_ts[st_ts_tail % (STQ / 2)];
+        if (t->seq > done) break;
+        if (t->frame != cur_frame) {
+            if (cur_frame != ~0ull) stereo_note_gpu(cur_frame, ms[0], ms[1], lists);
+            cur_frame = t->frame, ms[0] = ms[1] = 0, lists = 0;
+        }
+        uint64_t v[2];
+        if (vkGetQueryPoolResults(g_vk.dev, st_qp, t->q, 2, sizeof v, v, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && v[1] >= v[0])
+            ms[t->eye] += (double)(v[1] - v[0]) * per / 1e6;
+        if (t->eye == 0) lists++;
+        st_ts_tail++;
+    }
+}
+
+static void stereo_execute(uint64_t handle) {
+    static bool cams;
+    if (!cams) { cams = true; stereo_cameras_init(); }
+    __typeof__(st) start = st;
+    vk_end_pass();
+    gw_n = 0, gw_used = 0;
+    g_eye = 0;
+    cam_override_set_eye(0);
+    uint32_t q = st_ts_begin();
+    exec_list(handle, 0);
+    vk_end_pass();
+    st_ts_end(q, 0);
+    gw_restore();
+    st = start;
+    st.rt_dirty = true;
+    g_eye = 1;
+    cam_override_set_eye(1);
+    vk_stereo_swap(true);
+    q = st_ts_begin();
+    exec_list(handle, 0);
+    vk_end_pass();
+    st_ts_end(q, 1);
+    vk_stereo_swap(false);
+    g_eye = -1;
+    cam_override_set_eye(0);
+    st.rt_dirty = true;
+    gw_n = 0, gw_used = 0;
+}
+
+// (device.c vk_frame_end, VR mode, between xr_set_begin and xr_set_submit, outside any rendering) each eye's output
+// into its eye swapchain image (the present shader: any size, the bytes as they are, the flat present's orientation).
+// The eyes this frame drew no composite into keep the last one. Returns the eyes drawn (bit mask).
+int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImageView *, VkFormat *, VkExtent2D *)) {
+    st_ts_resolve();
+    if (!g_eye_out_ok || !g_eye_out.backend) return 0;
+    int drawn = 0;
+    for (int eye = 0; eye < 2; eye++) {
+        TexBackend *b = g_eye_out.backend;
+        if (eye == 1) b = b->twin;
+        if (!b || !b->image || !g_eye_out_frame[eye]) continue;
+        VkImage img;
+        VkImageView view;
+        VkFormat fmt;
+        VkExtent2D ext;
+        if (!eye_target(eye, &img, &view, &fmt, &ext)) continue;
+        vk_full_barrier(cb);
+        VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = view,
+                                        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                        .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+        VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, ext}, .layerCount = 1,
+                              .colorAttachmentCount = 1, .pColorAttachments = &ca};
+        rec_CmdBeginRendering(cb, &ri);
+        VkRect2D sc = {{0, 0}, ext};
+        rec_CmdSetScissor(cb, 0, 1, &sc);
+        float fx = b->scalable && b->ax > 0 ? b->sx / b->ax : 1, fy = b->scalable && b->ay > 0 ? b->sy / b->ay : 1;
+        VkPipeline p = present_pipeline_ex(fmt, false);
+        VkDescriptorSet ds = vk_alloc_set(present_set_layout);
+        VkDescriptorImageInfo ii = {vk_default_sampler(true), raw_view(b), VK_IMAGE_LAYOUT_GENERAL};
+        VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,
+                                  .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
+        rec_UpdateDescriptorSets(1, &w);
+        rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+        rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, present_layout, 0, 1, &ds, 0, NULL);
+        VkViewport vp = {0, 0, (float)ext.width, (float)ext.height, 0, 1};
+        rec_CmdSetViewport(cb, 0, 1, &vp);
+        float pc[12] = {renderer_origin_lower_left() ? 1.0f : 0.0f, 0, 0, 0, 0, 0, fx, fy};
+        screen_filter_params(pc + 8);
+        rec_CmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, pc);
+        fullscreen_vertex_bind(cb);
+        rec_CmdDraw(cb, 3, 1, 0, 0);
+        rec_CmdEndRendering(cb);
+        drawn |= 1 << eye;
+    }
+    return drawn;
+}
+
+// (device.c, LARECOMP_STEREO_DUMP_AT=<frame>,...: the eye outputs as PNGs, <dir>/stereo_<frame>_eye<n>.png)
+void vk_stereo_dump(const char *dir, uint64_t frame) {
+    if (!g_eye_out_ok || !g_eye_out.backend) return;
+    char p[512];
+    for (int e = 0; e < 2; e++) {
+        TexBackend *b = e ? ((TexBackend *)g_eye_out.backend)->twin : g_eye_out.backend;
+        if (!b) continue;
+        snprintf(p, sizeof p, "%s/stereo_%05llu_eye%d.png", dir, (unsigned long long)frame, e);
+        renderer_save_texture_tex(b, p);
+    }
+}
+
 void backend_execute(uint64_t handle) {
     PROF_T0();
     if (interp_list_submitted(handle)) st_frame_begin = st;  // (frame interpolation: the frame's first list)
-    exec_list(handle, 0);
+    if (stereo_active()) stereo_execute(handle);
+    else exec_list(handle, 0);
     PROF_ADD(prof_exec);
     if (prof) cum_exec += SDL_GetTicksNS() - prof_t0_;
     static int sync_submit = -1;
