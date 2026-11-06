@@ -79,6 +79,10 @@ At 90 Hz the game is held at 30 fps (pace_xr_lock), so only the GPU time moves. 
 30 fps mode: 20.7 ms of GPU is over a 60 fps frame, and the render thread's CPU time (12.7 ms per game frame at Mabe,
 ~12 of them translating eye 0 while the GPU waits: the idle gap) is close to it too.
 
+Open: with the diet on and `LARECOMP_GPUPROF_AT` profiling a frame in Tail Cave after the field (the four-spot bench),
+the eyes 50 frames later showed the room with most of its geometry missing, twice; the same run without the profile, the
+diet parts alone, and Tail Cave reached from the house were all clean. A profiling-only interaction, not found yet.
+
 Not done: AO / bloom at half size (they already are, see above); the idle gap - `LARECOMP_CHUNK_PASSES=4` made it longer
 (eye 0 16.2 vs 15.0 ms at Mabe), it is the render thread translating eye 0, not the chunking.
 Left for later: the scene -> RGBA16F copy (0.45 ms per eye) and the full-size depth copy (0.15) whose readers are not in
