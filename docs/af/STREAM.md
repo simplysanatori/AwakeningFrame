@@ -89,7 +89,7 @@ done here.
 - Ring: the box misses the table fit's footprint (`vr_cull_fit`'s rectangle before the EXTENT box replaces it, as a
   world-axis box, taken once per frame) grown by the margin. Instanced draws, blended draws in colour passes and
   anything without one of those blocks (HUD, post, effects) stay core.
-- Routing: in a shared pass (no twinned attachment: the shadow casters), a ring draw is skipped (`LARECOMP_LOG_SKIPS`
+- Routing: in a shared depth-only pass (no twinned attachment: the shadow casters), a ring draw is skipped (`LARECOMP_LOG_SKIPS`
   reason "ring draw"), unless it is within `LARECOMP_VR_RING_CAST` of the footprint. In an eye's depth-only pass (the
   pre-pass and the 704 x 396 pass's own) it is skipped. In an eye's colour pass its EQUAL test becomes LESS_OR_EQUAL
   with depth write: right in any order, since the core draws were in the pre-pass and a ring draw nearer the eye wins
@@ -134,11 +134,17 @@ The shared and pre-pass rows get none, and the pre-pass is back to 139 draws, 1.
   holds the GPU's idle time while the render thread records (render CPU went 12.7 -> 28.4 ms with EXTENT). That fs is
   also the depth-only shader of 422 of the 600 eye pre-pass draws, so skipping it by hash leaves holes (63 % void).
 - Render CPU (Mabe): the executor runs 1593 draws a game frame with the table fit, 3702 with EXTENT (about 7.4 us of
-  render CPU per extra draw) and 2084 with ring. The classification itself (`ring_route`, timed by
-  `LARECOMP_VR_RING_LOG`) is 0.7 - 0.9 ms a game frame (eye 1 mostly hits eye 0's memo; about 26 vertex boxes are made
-  again each frame). The rest of the gap to the draw count's prediction (about 4 ms) is `draw_`'s work before the
-  route on the ~1700 draws it then skips (program lookup, shader hash, camera / weather / snow bookkeeping): routing
-  earlier in `draw_` is the next lever.
+  render CPU per extra draw) and 2084 with ring. The classification itself (`ring_route` / `ring_early`, timed by
+  `LARECOMP_VR_RING_LOG`) is about 1.2 ms a game frame (eye 0 0.75, eye 1 0.45; about 30 vertex boxes are made again each
+  frame), 1.5 - 2 ms in the forest. Ring draws in depth-only passes are skipped at the top of `draw_` (`ring_early`,
+  about 1950 draws a frame at Mabe, 2400 in the forest), before the program lookup and the bookkeeping; what they must
+  still leave behind (the frame's first scene camera for the stereo patch, widescreen and the weather, the weather's
+  and the composite's depth, the backdrop check, eye 1's counters, the snow's pre-pass signatures) is kept there. That
+  changed nothing measurable (21.4 ms at Mabe, 27.4 in the forest, as with the route after the bookkeeping): `draw_`'s
+  work before the route is cheap. The rest of the gap to the draw count's prediction (about 4 ms at Mabe) is outside
+  `draw_`, presumably the command list's state commands around the skipped draws (binds, the camera-patched uniform
+  copies), which run in both eyes either way; not measured.
+- With snow (`LARECOMP_WEATHER=snow`) the ring rooms get their cover as with EXTENT only (the signatures are kept).
 - Neither spot reaches 30 fps with EXTENT. The game holds 30 only with both the GPU and the render thread well under
   33 ms; Mabe with ring alternates (19 fps).
 

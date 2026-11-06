@@ -6779,7 +6779,8 @@ static void draw(CmdRec *r, bool indexed) {
 // LARECOMP_VR_RING_LOG=1: per pass kind, the draws of each class every 300 frames ("[ring]");
 // LARECOMP_VR_RING_DUMP=<frame>: eye 0's draws of that frame with their blocks, class and boxes.
 static bool g_ring_leq;  // this draw: a ring draw in an eye's colour pass (draw_'s depth state)
-static uint64_t ring_ns[2], ring_boxes;  // (LARECOMP_VR_RING_LOG) this frame: ring_route's time per eye, vertex boxes made
+static uint64_t ring_ns[2], ring_boxes, ring_early_n;  // (LARECOMP_VR_RING_LOG) this frame: the routes' time per eye,
+                                                       // vertex boxes made, draws skipped by the early route
 static bool ring_matrix_at(const float *m, float pos[3], float *scale) {  // 3x4 rows: a rotation-scale and a translation
     float n[3];
     for (int i = 0; i < 3; i++) n[i] = sqrtf(m[i * 4] * m[i * 4] + m[i * 4 + 1] * m[i * 4 + 1] + m[i * 4 + 2] * m[i * 4 + 2]);
@@ -6932,7 +6933,7 @@ static bool ring_route_(CmdRec *r, bool indexed, int log) {
     if (st.rt.depth) tw |= vk_tex_twinned(st.rt.depth);
     int kind = !tw ? 0 : !nc ? 1 : 2;  // shared / an eye's depth-only pass / an eye's colour pass
     int c = ring_class(r, indexed, kind);
-    bool skip = (kind == 0 && c == 1) || (kind == 1 && c >= 1);
+    bool skip = (kind == 0 && !nc && c == 1) || (kind == 1 && c >= 1);  // (shared: depth-only ones, the casters)
     static int lowres = -1;  // LARECOMP_VR_RING_LOWRES=0: ring draws stay out of the eyes' smaller colour passes too
     if (lowres < 0) lowres = !getenv("LARECOMP_VR_RING_LOWRES") || atoi(getenv("LARECOMP_VR_RING_LOWRES")) != 0;
     if (!lowres && kind == 2 && c >= 1 && wx_scene_w && st.rt.color[0] && st.rt.color[0]->width * 4 < wx_scene_w * 3) skip = true;
@@ -6943,8 +6944,9 @@ static bool ring_route_(CmdRec *r, bool indexed, int log) {
         uint64_t f = renderer_exec_frame();
         if (f != hframe) {
             if (hframe % 300 == 0) {
-                LOG("[ring] frame %llu: classification %.3f + %.3f ms (eye 0 + 1), %llu vertex boxes made; (kind: class core/ring/cast, "
-                    "drawn+skipped):", (unsigned long long)hframe, ring_ns[0] / 1e6, ring_ns[1] / 1e6, (unsigned long long)ring_boxes);
+                LOG("[ring] frame %llu: classification %.3f + %.3f ms (eye 0 + 1), %llu vertex boxes made, %llu skipped early "
+                    "(not in the counts below); (kind: class core/ring/cast, drawn+skipped):", (unsigned long long)hframe,
+                    ring_ns[0] / 1e6, ring_ns[1] / 1e6, (unsigned long long)ring_boxes, (unsigned long long)ring_early_n);
                 static const char *kn[3] = {"shared", "eye depth-only", "eye colour"};
                 for (int e = 0; e < 2; e++)
                     for (int kk = 0; kk < 3; kk++)
@@ -6953,7 +6955,7 @@ static bool ring_route_(CmdRec *r, bool indexed, int log) {
                             (unsigned long long)hist[e][kk][2][0], (unsigned long long)hist[e][kk][2][1]);
                 LOG("\n");
             }
-            memset(hist, 0, sizeof hist), hframe = f, ring_ns[0] = ring_ns[1] = ring_boxes = 0;
+            memset(hist, 0, sizeof hist), hframe = f, ring_ns[0] = ring_ns[1] = ring_boxes = ring_early_n = 0;
         }
         hist[g_eye][kind][c][skip]++;
     }
@@ -6993,9 +6995,54 @@ static bool diet_draw(Prog *pr, uint64_t last_hash) {
     }
     return false;
 }
+// (lane ring) the early route: a ring draw in a depth-only pass (the shared casters, an eye's pre-pass) is skipped at the
+// top of draw_, before the program lookup and the per-draw bookkeeping, which matter only for passes with colour
+// targets. What a skipped draw must still leave behind is done here: the frame's first scene camera (cam_override's
+// latch, whose address the stereo patch matches, widescreen's and the weather's), the weather's scene depth, the
+// latest twinned depth (stereo_composite), the interior backdrop seen, eye 1's counters and, while there is snow, the
+// pre-pass signatures (snow_cover_check: the colour pass gives ring level draws their snow by them). Frame
+// interpolation (logging or replay) takes the full path.
+static bool ring_early(CmdRec *r, bool indexed) {
+    extern bool vr_ring_on(void);
+    static int on = -1, log = 0;
+    if (on < 0) on = vr_ring_on(), log = getenv("LARECOMP_VR_RING_LOG") != NULL;
+    if (!on || g_eye < 0 || g_interp_log || g_interp_replaying || !st.rt.depth) return false;
+    for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) return false;
+    uint64_t t0 = log ? SDL_GetTicksNS() : 0;
+    bool tw = vk_tex_twinned(st.rt.depth);
+    int c = ring_class(r, indexed, tw ? 1 : 0);
+    bool skip = tw ? c >= 1 : c == 1;
+    if (skip) {
+        if (tw) st_last_depth = st.rt.depth, memcpy(st_last_zr, st.depth_range[0], sizeof st_last_zr);
+        if (g_eye == 1) eye1_skip_rt();  // (its counters)
+        Range s5 = st.ubuf[0][5];
+        if (s5.addr && s5.size == 320) {
+            extern void widescreen_scene_ubo(const float *u, uint64_t size);
+            uint64_t f = renderer_exec_frame();
+            widescreen_scene_ubo((const float *)(uintptr_t)s5.addr, s5.size);
+            if (cam_override_active()) cam_override_latch((const float *)(uintptr_t)s5.addr, s5.addr, s5.size, f);
+            weather_scene_camera((const float *)(uintptr_t)s5.addr, s5.size, f);
+            if (st.rt.depth->width >= 640 && renderer_format_is_depth(st.rt.depth->format))
+                wx_depth = st.rt.depth, wx_depth_frame = f, wx_zn = st.depth_range[0][0], wx_zf = st.depth_range[0][1],
+                wx_dm1 = nvn_depth_mode() == 0;
+        }
+        static uint64_t last_fs, last_hash;  // (draw_'s fragment-shader hash, for the backdrop check)
+        uint64_t fs = st.program->stages[1].code_addr;
+        if (fs != last_fs) last_fs = fs, last_hash = fs ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(fs + 0x30), 0x200) : 0;
+        extern void widescreen_backdrop_seen(uint64_t hash);
+        if (last_hash) widescreen_backdrop_seen(last_hash);
+        if (weather_snow_on() || sc_frame == renderer_exec_frame()) snow_cover_check(r, indexed, NULL);  // (no colour: no program use)
+    }
+    if (log) {
+        ring_ns[g_eye] += SDL_GetTicksNS() - t0;
+        if (skip) ring_early_n++;
+    }
+    return skip;
+}
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
     if (!st.program) { SKIP(SK_NO_PROGRAM); return; }
+    if (ring_early(r, indexed)) { SKIP(SK_RING); return; }  // (lane ring: a ring draw in a depth-only pass)
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
