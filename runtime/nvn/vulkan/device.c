@@ -1987,10 +1987,11 @@ void ui_window_init(void) {
         g_vk.sc_count = hud.count;
         memcpy(g_vk.sc_images, hud.images, sizeof g_vk.sc_images);
         memcpy(g_vk.sc_views, hud.views, sizeof g_vk.sc_views);
-        // the OpenXR loader and runtime were opened after quick_exit_handler was registered, so their destructors run
-        // before it at exit(): XR teardown from there called into an unloaded runtime. This handler, registered after
-        // them, runs before them.
-        atexit(backend_quit);
+        // the OpenXR loader and runtime (and a validation layer the runtime loaded) were opened after
+        // quick_exit_handler was registered, so their destructors run before it at exit(): XR teardown and
+        // validation_exit from there called into unloaded libraries. Registered again now, it runs before them (and
+        // the first registration finds backend_quit done).
+        atexit(quick_exit_handler);
     } else
 #endif
     create_swapchain();

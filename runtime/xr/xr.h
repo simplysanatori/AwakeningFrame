@@ -22,7 +22,9 @@
 //   - both eyes of a set come from one xrLocateViews (xr_latch_views), and those poses go into the projection layer
 //     for every refresh the set is shown;
 //   - swapchains have one mip level; images are in COLOR_ATTACHMENT_OPTIMAL when acquired and when released;
-//   - the GPU is drained before the session goes (exit faults otherwise).
+//   - the GPU is drained before the session goes (exit faults otherwise);
+//   - no layer names a swapchain that has an image acquired at xrEndFrame: every swapchain exists twice (a pair of
+//     HUD + two eyes), alternate sets use alternate pairs, and the layers name the pair of the set shown.
 //
 // Image formats: the swapchains are sRGB (the compositor decodes them) made with MUTABLE_FORMAT, and the views handed
 // out are the UNORM twin: LAS writes sRGB-encoded bytes into UNORM targets (the window's swapchain was UNORM), so the
@@ -47,10 +49,10 @@ bool xr_active(void);
 VkResult xr_vk_create_instance(const VkInstanceCreateInfo *ci, VkInstance *out);
 VkPhysicalDevice xr_vk_physical_device(VkInstance inst);  // xrGetVulkanGraphicsDevice2KHR (NULL: failed, logged)
 VkResult xr_vk_create_device(VkPhysicalDevice phys, const VkDeviceCreateInfo *ci, VkDevice *out);
-// After the device and its queue (queue family qfam, index 0; before the recorder thread starts): the session, the HUD
-// swapchain of hud_w x hud_h,
-// the eye swapchains (the runtime's recommended size x LARECOMP_XR_EYE_SCALE), and the XR thread. hud: filled with the
-// HUD swapchain's images and UNORM views (device.c puts them where the window's swapchain images were).
+// After the device and its queue (queue family qfam, index 0; before the recorder thread starts): the session, the two
+// HUD swapchains of hud_w x hud_h, the eye swapchains (the runtime's recommended size x LARECOMP_XR_EYE_SCALE), and the
+// XR thread. hud: both HUD swapchains' images and UNORM views, the first pair's then the second's (device.c puts them
+// where the window's swapchain images were).
 typedef struct {
     VkFormat format;      // the views' format (UNORM)
     VkExtent2D extent;
@@ -65,7 +67,7 @@ void xr_shutdown(void);
 
 // ---- the presenting thread: one set per presented frame (device.c vk_frame_begin / vk_frame_end)
 // Waits until the previous set was released (at most timeout_ns: false then, nothing acquired - skip the frame), then
-// acquires and waits the HUD image. *hud_index: its index in XrChainInfo.images.
+// acquires and waits the HUD image of the pair not shown. *hud_index: its index in XrChainInfo.images.
 bool xr_set_begin(uint64_t timeout_ns, uint32_t *hud_index);
 // The submission with timeline value seq holds all of this set's GPU work (queued: the recorder may not have made it
 // yet). Latches the views if nobody did (xr_latch_views), and hands the set to the XR thread.
