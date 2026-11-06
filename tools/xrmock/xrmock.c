@@ -21,6 +21,7 @@
 //   MOCK_XR_SECONDS=<s>      session length before STOPPING is sent (20; 0 = until the app quits)
 //   MOCK_XR_FRAMES=<n>       or stop after n frames (0 = off)
 //   MOCK_XR_HZ=<hz>          display refresh, 120 default (90, 72 ...); xrEnumerateDisplayRefreshRatesFB offers 72/90/120
+//   MOCK_XR_PERIOD_BLIP=n:ms every nth xrWaitFrame reports predictedDisplayPeriod = ms (one-frame blips, as SteamVR at 120 Hz)
 //   MOCK_XR_PIPELINE=<n>     refreshes from xrWaitFrame's return to the predicted display time (2)
 //   MOCK_XR_DEADLINE_MS=<ms> an xrEndFrame later than this before the display time counts as late (period / 2)
 //   MOCK_XR_SKIP=0           a frame loop that falls behind loses refreshes (the wait grid jumps), as on a headset; 0 makes it catch up instead (on by default)
@@ -790,6 +791,16 @@ static XrResult XRAPI_CALL mWaitFrame(XrSession s, const XrFrameWaitInfo* wi, Xr
     int64_t ret = nowNs();
     fs->predictedDisplayTime = wake + (int64_t)gPipeline * gPeriod;
     fs->predictedDisplayPeriod = gPeriod;
+    static int blipEvery = -1;
+    static int64_t blipPeriod;
+    if (blipEvery < 0) {
+        const char* b = getenv("MOCK_XR_PERIOD_BLIP");
+        int n = 0;
+        double ms = 0;
+        blipEvery = b && sscanf(b, "%d:%lf", &n, &ms) == 2 && n > 0 ? n : 0;
+        blipPeriod = (int64_t)(ms * 1e6);
+    }
+    if (blipEvery && (gFrame + 1) % blipEvery == 0) fs->predictedDisplayPeriod = blipPeriod;
     fs->shouldRender = XR_TRUE;
     gWaits++;
     gFrame++;

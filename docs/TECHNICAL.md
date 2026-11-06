@@ -172,11 +172,11 @@ saved in `larecomp.ini`. A variable set in the launch environment
 (`~/Games/AwakeningFrame/session.env`, `NAME=value` lines) wins and greys
 its row out. A change in the menu goes straight to the running code through a
 hook for each row, so every row applies at once: Turning, Controller Layout,
-Buttons Match Labels, Pointer Hand, Follow Mode, Height, Size, Tilt, Table
+Buttons Match Labels, Pointer Hand, Follow Mode, Height, Distance, Size, Tilt, Table
 Edge, Foveation, Dynamic Resolution and the panel's place. The exception is
 the refresh rate, which SteamVR's runtime won't let the game change. The launch
 wrapper applies it before the game starts, so it takes a relaunch; only the
-switch between the two 90 Hz choices is live. Height, size and tilt belong to
+switch between the two 90 Hz choices is live. Height, distance, size and tilt belong to
 the rig and are saved in `vr_rig.ini`. The full list is in
 [af/VR_SETTINGS.md](af/VR_SETTINGS.md).
 

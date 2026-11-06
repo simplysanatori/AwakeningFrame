@@ -48,7 +48,7 @@ static void changed(VrOpt o) {
 
 extern "C" void vr_tab_draw(float scale) {
     VrSettings &v = g_settings.vr;
-    vr_settings_sync_rig();  // Height, Size and Tilt are the rig's: a controller change shows here
+    vr_settings_sync_rig();  // Height, Distance, Size and Tilt are the rig's: a controller change shows here
     opt_begin("##vr", scale);
 
     opt_section("Display");
@@ -70,7 +70,7 @@ extern "C" void vr_tab_draw(float scale) {
     grey(VRO_TURN);
     if (opt_choice("Turning", &v.turn, g_vr_turn_names, VRS_N_TURN, VRS_TURN_SMOOTH,
                    desc(VRO_TURN, "Smooth turns the table as you push the right stick sideways. Snap turns it in 45\xC2\xB0 steps "
-                                  "behind a blink. Click both sticks to reset the view.")))
+                                  "behind a blink. Click both sticks to reset the view. Hold them for 2 seconds to reset the table too.")))
         changed(VRO_TURN);
     // (the Controls tab's setting: xr_input.c reads it live)
     opt_toggle("Buttons Match Labels", &g_settings.face_by_label, false,
@@ -90,11 +90,14 @@ extern "C" void vr_tab_draw(float scale) {
     grey(VRO_HEIGHT);
     if (opt_int("Height", &v.height_cm, -50, 40, 5, 0, "%+d cm", desc(VRO_HEIGHT, "How high the table stands.")))
         changed(VRO_HEIGHT);
+    grey(VRO_DIST);
+    if (opt_int("Distance", &v.dist_cm, 60, 300, 10, 120, "%d cm", desc(VRO_DIST, "How far away the table stands.")))
+        changed(VRO_DIST);
     grey(VRO_SIZE);
     if (opt_int("Size", &v.size_pct, 40, 300, 10, 100, "%d%%", desc(VRO_SIZE, "How big the table is.")))
         changed(VRO_SIZE);
     grey(VRO_TILT);
-    if (opt_int("Tilt", &v.tilt_deg, -20, 50, 5, 0, "%+d\xC2\xB0", desc(VRO_TILT, "How far the table leans toward you.")))
+    if (opt_int("Tilt", &v.tilt_deg, 0, 50, 5, 30, "%+d\xC2\xB0", desc(VRO_TILT, "How far the table leans toward you.")))
         changed(VRO_TILT);
     if (!vr_opt_live(VRO_RECENTRE)) opt_disable_next();
     if (opt_button("Recentre Table", "Puts the table in front of you again.")) vr_settings_recentre();

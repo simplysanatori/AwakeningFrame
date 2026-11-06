@@ -50,8 +50,9 @@ carried render poses and the table moving only on new game frames are unchanged.
 | Turning | Smooth, Snap | `vr_turn = smooth \| snap` | `LARECOMP_VR_TURN` | live (`xr_rig_set_turn_mode`, the rig's) |
 | Follow Mode | Smooth, Room, Fixed | `vr_follow = smooth \| room \| fixed` | `LARECOMP_VR_FOLLOW` | live (`stereo_set_follow`, stereo.c: Smooth goes back to the rig's area anchoring, as at a start without the variable; Room and Fixed start from the table's current anchor, so it doesn't jump) |
 | Height | 0, -50 to +40 cm in steps of 5 | none (the rig's, `vr_rig.ini`) | none | live (`xr_rig_set_height_cm`, `runtime/xr/xr_rig_settings.c`) |
+| Distance | 120 cm, 60 to 300 cm in steps of 10 | none (the rig's, `vr_rig.ini`) | `LARECOMP_VR_DIST` (the default, not greyed) | live (`xr_rig_set_dist_cm`) |
 | Size | 100%, 40 to 300% in steps of 10 | none (the rig's, `vr_rig.ini`) | none | live (`xr_rig_set_size_pct`) |
-| Tilt | 0, -20 to +50 degrees in steps of 5 | none (the rig's, `vr_rig.ini`) | none | live (`xr_rig_set_tilt_deg`) |
+| Tilt | 30, 0 to +50 degrees in steps of 5 | none (the rig's, `vr_rig.ini`) | none | live (`xr_rig_set_tilt_deg`) |
 | Recentre Table | button | none | none | live (`xr_rig_recentre`; greyed out in a flat build) |
 | Table Edge | Off, Fade, Passthrough (default Off) | `vr_edge_style = black \| fade \| passthrough` | `LARECOMP_VR_EDGE` (`black`, `fade`, `passthrough`; the variable still takes `fog` and `gradient`) | live (`edge_set_mode`, edge.c: the next eye is drawn in the new mode; each XR set carries its mode, so the projection layer's alpha flag and the blend mode follow the images; Passthrough needs the runtime's `ALPHA_BLEND`, else the void shows black) |
 | Foveation | Off, Low, Medium, High (eye-tracked only; default High) | `vr_foveation = off \| low \| medium \| high` | `LARECOMP_VR_FOVEATION` (always set from the tab: the code's own default is medium) | live (`fov_set_level`; the level is in the shading-rate map's key, so the next pass redraws it). Off at start still enables the extension, so it can be turned on; only `LARECOMP_VR_FOVEATION=off` from the launch environment leaves it out |
@@ -59,10 +60,10 @@ carried render poses and the table moving only on new game frames are unchanged.
 | Panel Distance | 2.0 m, 0.8 to 4.0 m | `vr_panel_distance = <metres>` | `LARECOMP_XR_QUAD=<dist>,<width>` | live (`vrui_set_hud_quad`) |
 | Panel Width | 2.2 m, 0.6 to 4.0 m | `vr_panel_width = <metres>` | the same | live |
 
-Height, size and tilt belong to the rig (`docs/af/RIG.md`), which keeps them in `vr_rig.ini`; the tab neither saves them in
+Height, distance, size and tilt belong to the rig (`docs/af/RIG.md`), which keeps them in `vr_rig.ini`; the tab neither saves them in
 `larecomp.ini` nor sets `LARECOMP_VR_SCALE` from them. Each time the tab is drawn it reads the rig's live values
 (`xr_rig_get_user`, weak), so a change made with the controller combos shows, and a change in the tab goes through the
-rig's `xr_rig_set_user`, which clamps to the rig's ranges (height -0.50 to +0.40 m, size 40 to 300%, tilt -20 to +50
+rig's `xr_rig_set_user`, which clamps to the rig's ranges (height -0.50 to +0.40 m, distance 0.6 to 3 m, size 40 to 300%, tilt 0 to +50
 degrees). The rig applies them on top of `LARECOMP_VR_TABLE` / `_PITCH` / `_SCALE`, so those variables do not grey the
 rows. The hooks exist in VR builds only; in a flat build the rows keep their defaults and say "Applies After Restart."
 `larecomp.ini` files from before may still hold `vr_table_height` / `_size` / `_tilt`: they are read and ignored (the
@@ -92,11 +93,12 @@ Moonlight and Apollo: Title Case, no filler.
 | `LARECOMP_XR_LAYOUT=switch` / `comfort` | Controller Layout | Switch, Comfort | Switch puts every button where a Switch Pro Controller has it. Comfort puts the sword on the right trigger and the shield on the left. |
 | `LARECOMP_VR_POINTER_HAND=right` / `left` | Pointer Hand | Right, Left | The controller that points at this menu. Pull its trigger to click, push the right stick to scroll. |
 | Buttons match labels (Controls tab) | Buttons Match Labels | Off, On | The Frame controllers' A, B, X and Y work as printed on them. Off matches the Switch's button positions. |
-| right stick left / right, `LARECOMP_VR_TURN=smooth` / `snap` | Turning | Smooth, Snap | Smooth turns the table as you push the right stick sideways. Snap turns it in 45° steps behind a blink. Click both sticks to reset the view. |
+| right stick left / right, `LARECOMP_VR_TURN=smooth` / `snap` | Turning | Smooth, Snap | Smooth turns the table as you push the right stick sideways. Snap turns it in 45° steps behind a blink. Click both sticks to reset the view. Hold them for 2 seconds to reset the table too. |
 | `LARECOMP_VR_FOLLOW=smooth` / `room` / `fixed` | Follow Mode | Smooth, Room, Fixed | How the table follows the game's camera. Smooth glides after it, Room holds still until the camera changes room, Fixed never moves. |
 | `LARECOMP_VR_TABLE` (y) | Height | -50 cm to +40 cm | How high the table stands. |
 | `LARECOMP_VR_SCALE` | Size | 40% to 300% | How big the table is. |
-| `LARECOMP_VR_PITCH` | Tilt | -20 to +50 degrees | How far the table leans toward you. |
+| `LARECOMP_VR_DIST` | Distance (new) | 60 to 300 cm | How far away the table stands. |
+| `LARECOMP_VR_PITCH` | Tilt | 0 to +50 degrees (default 30) | How far the table leans toward you. |
 | right stick click with left grip held (now the view reset's alias) | Recentre Table | (button) | Puts the table in front of you again. |
 | `LARECOMP_VR_EDGE=black` / `fade` / `passthrough` | Table Edge | Off, Fade, Passthrough | What fills the space past the world. Fade softens the world into darkness around Link, Passthrough shows your room. |
 | `LARECOMP_VR_FOVEATION=off` / `low` / `medium` / `high` | Foveation (default High) | Off, Low, Medium, High | Follows your eyes and draws what you aren't looking at in less detail. Higher levels save more GPU time. Without eye tracking it draws everything in full detail. |
