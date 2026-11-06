@@ -9728,6 +9728,8 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
                                 .zn = g_eye_zr[eye][0], .zf = g_eye_zr[eye][1]};
             ep.have_matrices = stereo_eye_matrices(eye, ep.V, ep.P);
             if (!ep.have_matrices) for (int i = 0; i < 16; i++) ep.V[i] = ep.P[i] = i % 5 == 0;
+            extern void scene_eye_post(const StereoEyePost *e);  // (scene.c: the Surroundings row's Backdrop, into the output)
+            scene_eye_post(&ep);
             stereo_eye_post(&ep);
         }
         VkImage img;
