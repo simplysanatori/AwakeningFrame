@@ -175,6 +175,18 @@ static const char *pred(Ctx *c, int p, bool neg, char *buf) {
 }
 #define P(p, n) pred(c, (p), (n), alloca(16))
 
+// (multiview, ShaderKey.mv / tex_amask) the key makes a multiview shader (GL_EXT_multiview): per-eye constant buffers or
+// array twins, vertex and fragment shaders only
+static bool key_mv(const Ctx *c) {
+    return c->glsl && c->key && (c->stage == STAGE_VERTEX || c->stage == STAGE_FRAGMENT) &&
+           (c->key->mv || c->key->tex_amask[0] || c->key->tex_amask[1] || c->key->tex_amask[2]);
+}
+// constant buffer k is per eye (ShaderKey.mv bit k - 3, k 3..10): eye 1's copy cbuf_mv_rows[k] rows after eye 0's
+static bool cbuf_mv(const Ctx *c, int k) {
+    return c->glsl && c->key && (c->stage == STAGE_VERTEX || c->stage == STAGE_FRAGMENT) && k >= 3 && k <= 10 &&
+           ((c->key->mv >> (k - 3)) & 1);
+}
+
 static const char *cbuf_ref(Ctx *c, int idx, int64_t off, const char *dyn, char *buf) {
     // c1, statically indexed (GLSL, LARECOMP_VK_INLINE_C1=1): the shader's own compiler constants never change, so the
     // value itself instead of a uniform buffer load - which on Mesa's PanVK is a memory load every time (it keeps no
@@ -196,9 +208,11 @@ static const char *cbuf_ref(Ctx *c, int idx, int64_t off, const char *dyn, char 
     if (off + 16 > (int64_t)c->info->cbuf_size[idx]) c->info->cbuf_size[idx] = (uint32_t)((off + 16 + 255) & ~255);
     if (dyn) c->info->cbuf_dynamic |= 1u << idx;
     if (!dyn && idx < 18 && off >= 0 && (uint32_t)(off >> 4) + 1 > c->cbuf_need[idx]) c->cbuf_need[idx] = (uint32_t)(off >> 4) + 1;
-    if (c->glsl && c->key && c->key->mv && idx >= 3 && (c->stage == STAGE_VERTEX || c->stage == STAGE_FRAGMENT)) {  // (multiview: eye 1's copy VO<k> rows on, when bit k is set; glsl_finish defines VO / VB for these stages)
-        if (dyn) sprintf(buf, "cbr(cb%d, (%s) + %lldu + VB%d)", idx, dyn, (long long)off, idx);
-        else sprintf(buf, "cb%d[%lldu + VO%d][%lld]", idx, (long long)(off >> 4), idx, (long long)((off >> 2) & 3));
+    if (cbuf_mv(c, idx)) {  // (multiview: eye 1 reads its copy, MVR<k> rows on - glsl_finish's constant; both indices
+        // stay constants, so the driver can keep the rows read in its constant registers as for any other block)
+        if (dyn) sprintf(buf, "cbr(cb%d, (%s) + %lldu + (gl_ViewIndex == 0 ? 0u : MVB%d))", idx, dyn, (long long)off, idx);
+        else sprintf(buf, "(gl_ViewIndex == 0 ? cb%d[%lld][%lld] : cb%d[%lldu + MVR%d][%lld])", idx, (long long)(off >> 4),
+                     (long long)((off >> 2) & 3), idx, (long long)(off >> 4), idx, (long long)((off >> 2) & 3));
         return buf;
     }
     if (dyn) sprintf(buf, "cbr(cb%d, (%s) + %lldu)", idx, dyn, (long long)off);
@@ -636,7 +650,7 @@ static const char *uv2(Ctx *c, int slot, const char *x, const char *y, char *buf
 
 // (multiview) fragment texture slot `slot` is a twin sampled as a 2D array at layer gl_ViewIndex (ShaderKey.tex_amask)
 static bool mv_tex_array(const Ctx *c, int slot) {
-    return c->glsl && c->key && c->key->mv && c->stage == STAGE_FRAGMENT && slot >= 0 && slot < 24 &&
+    return c->glsl && c->key && c->stage == STAGE_FRAGMENT && slot >= 0 && slot < 24 &&
            ((c->key->tex_amask[slot >> 3] >> (slot & 7)) & 1);
 }
 // texelFetch(t<slot>, ivec2(...), lod) -> texelFetch(t<slot>, ivec3(ivec2(...), gl_ViewIndex), lod) for such a slot
@@ -2036,7 +2050,7 @@ static void push_promote(Ctx *c, Str *body) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("LARECOMP_VK_PUSH_CB"); on = e ? atoi(e) != 0 : maxwell_glsl_push; }
     if (!on || (c->stage != STAGE_FRAGMENT && c->stage != STAGE_VERTEX) || !body->buf ||
-        (maxwell_gmem_lazy && c->info->uses_gmem) || (c->key && c->key->mv)) return;  // (multiview: the push words are mvm)
+        (maxwell_gmem_lazy && c->info->uses_gmem)) return;
     // LARECOMP_VK_PUSH_VS=0: none in vertex shaders (an A/B of the vertex words: the fragment budget stays 48 words)
     static int vs_on = -1;
     if (vs_on < 0) { const char *e = getenv("LARECOMP_VK_PUSH_VS"); vs_on = !e || atoi(e); }
@@ -2071,7 +2085,8 @@ static void push_promote(Ctx *c, Str *body) {
         }
         int cb, row, col, len = 0;
         if (p[0] == 'c' && p[1] == 'b' && (p == b || !((p[-1] >= 'a' && p[-1] <= 'z') || (p[-1] >= '0' && p[-1] <= '9') || p[-1] == '_')) &&
-            sscanf(p, "cb%d[%d][%d]%n", &cb, &row, &col, &len) == 3 && len && cb >= 3 && cb < 18 && col < 4 && row < 4096) {
+            sscanf(p, "cb%d[%d][%d]%n", &cb, &row, &col, &len) == 3 && len && cb >= 3 && cb < 18 && col < 4 && row < 4096 &&
+            !cbuf_mv(c, cb)) {  // (multiview: a per-eye block's words stay in it)
             uint16_t off = (uint16_t)(row * 16 + col * 4);
             double w = 1;
             for (int d = 0; d < loops && d < 6; d++) w *= 8;
@@ -2120,9 +2135,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     Str s = {0};
     sp(&s, "#version 460\n");  // (the prelude's first line; an extension directive has to follow it)
     if (info->uses_gmem && maxwell_gmem_chunk_shift && maxwell_gmem_lazy) sp(&s, "#extension GL_EXT_buffer_reference : require\n");
-    bool mv = key && key->mv && (stage == STAGE_VERTEX || stage == STAGE_FRAGMENT);
-    if (mv && info->uses_gmem && maxwell_gmem_chunk_shift && maxwell_gmem_lazy) fail(c, "multiview with lazy heap chunks");
-    if (mv) sp(&s, "#extension GL_EXT_multiview : require\n");
+    if (key_mv(c)) sp(&s, "#extension GL_EXT_multiview : require\n");
     sp(&s, "%s", glsl_prelude + sizeof "#version 460\n" - 1);
     if (stage == STAGE_FRAGMENT && !maxwell_frag_subgroups)  // the quad's lanes through fine derivatives (SHFL above)
         sp(&s, "uint quad_lane() { ivec2 p = ivec2(gl_FragCoord.xy); return uint(p.x & 1) | (uint(p.y & 1) << 1); }\n"
@@ -2142,14 +2155,12 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         if (!n) n = 1;
         uint32_t rows = (info->cbuf_dynamic & (1u << i)) ? 256 : n;  // (multiview: also told by programs without mv)
         if (i >= 3) info->cbuf_mv_rows[i] = (uint16_t)(rows < 0xFFFF ? rows : 0);
-        if (mv && i >= 3) {  // (multiview) eye 1's copy follows eye 0's: rows apart (dynamic: 256, the camera patch's 4 KB)
+        if (cbuf_mv(c, i)) {  // (multiview) eye 1's copy follows eye 0's: rows apart (dynamic: 256, the camera patch's 4 KB)
             if (!(info->cbuf_dynamic & (1u << i))) n *= 2;
-            sp(&s, "#define VO%d (uint(gl_ViewIndex) * ((mvm[%d] >> %du) & 1u) * %uu)\n#define VB%d (VO%d * 16u)\n", i,
-               stage == STAGE_FRAGMENT ? 1 : 0, i, rows, i, i);
+            sp(&s, "#define MVR%d %uu\n#define MVB%d %uu\n", i, rows, i, rows * 16);
         }
         sp(&s, "layout(std140, set = %d, binding = %d) uniform CB%d { uvec4 cb%d[%u]; };\n", set, i, i, i, n);
     }
-    if (mv) sp(&s, "layout(push_constant) uniform PC { uint mvm[2]; };\n");  // (MV_PUSH_BYTES; no promoted words)
     if (info->npush) sp(&s, "layout(push_constant) uniform PC { layout(offset = %u) uint pcw[%d]; };\n", info->push_base, info->npush);  // (push_promote)
     if (info->uses_gmem && !maxwell_gmem_chunk_shift) {
         sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem { uint w[]; } gmem_;\n", set, GMEM_BUFFER_INDEX,

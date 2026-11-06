@@ -1,7 +1,7 @@
 // (tools/mvshader) The array-twin texture forms the recorded corpus doesn't reach (no fragment shader there fetches a
 // 2D texel, none samples with a register offset or a bias on a twin): every TEXS / TLDS 2D form and the full TEX form's
 // lod / bias / offset / depth compare combinations, translated by the translator's own functions on a fragment Ctx
-// with every slot an array twin (ShaderKey.mv, tex_amask), finished by glsl_finish, then compiled and validated as
+// with every slot an array twin (ShaderKey.tex_amask), finished by glsl_finish, then compiled and validated as
 // the harness does. Also the same forms without mv, for the control. Usage: unit (run.sh builds and runs it).
 #include "../../runtime/nvn/maxwell/translate.c"
 
@@ -45,7 +45,7 @@ static void check(const char *name, ShaderInfo *si, bool mv) {
 int main(void) {
     for (int mv = 0; mv < 2; mv++) {
         ShaderKey k = {0};
-        k.glsl = 1, k.mv = (uint8_t)mv, k.vs_out_mask = 0xFFFFFFFF;
+        k.glsl = 1, k.vs_out_mask = 0xFFFFFFFF;  // (array twins alone make it a multiview shader)
         if (mv) k.tex_amask[0] = k.tex_amask[1] = k.tex_amask[2] = 0xFF;
         // TEXS 2D (info 1-6: implicit, lz, ll, depth compare, compare + ll, compare + lz) and TLDS 2D (2, 4, 5, 12:
         // lz, offset, level, offset + level); one texture index (slot) each
