@@ -10,13 +10,15 @@
 // on the GPU (no read-back).
 //
 // Modes (LARECOMP_VR_EDGE): fog, gradient, black (the default: off; edge_eye returns false and the caller's present runs
-// as before), passthrough. Overworld only: in an interior or a dungeon edge_eye returns false too (LARECOMP_VR_EDGE_INDOORS=1 lifts it). Everything else is in docs/af/EDGE.md.
+// as before), passthrough, fade. fog / gradient / passthrough run on the overworld only: in an interior or a dungeon
+// edge_eye returns false too (LARECOMP_VR_EDGE_INDOORS=1 lifts it). fade (the round fade to black around the table's
+// centre, LARECOMP_VR_EDGE_RADIUS / _WIDTH) runs everywhere in play: one pass, no mask. Everything else is in docs/af/EDGE.md.
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
 #include <vulkan/vulkan.h>
 
-typedef enum { EDGE_BLACK = 0, EDGE_FOG, EDGE_GRADIENT, EDGE_PASSTHROUGH } EdgeMode;
+typedef enum { EDGE_BLACK = 0, EDGE_FOG, EDGE_GRADIENT, EDGE_PASSTHROUGH, EDGE_FADE } EdgeMode;
 
 // The mode (LARECOMP_VR_EDGE, read once).
 EdgeMode edge_mode(void);
