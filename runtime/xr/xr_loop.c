@@ -10,6 +10,7 @@
 #include "../rt.h"
 #include "../nvn/pace.h"
 #include "xr_input.h"
+#include "xr_pointer.h"
 #include "xr_internal.h"
 #include "../nvn/vulkan/edge.h"
 
@@ -146,7 +147,8 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
     XrCompositionLayerProjectionView pv[2];
     XrCompositionLayerProjection proj = {.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     XrCompositionLayerQuad quad = {.type = XR_TYPE_COMPOSITION_LAYER_QUAD};
-    const XrCompositionLayerBaseHeader *layers[2];
+    XrCompositionLayerQuad laser[2];
+    const XrCompositionLayerBaseHeader *layers[4];
     uint32_t n = 0;
     if (fs->shouldRender && g_xr.shown_any) {
         const XrSet *s = &g_xr.shown;
@@ -186,6 +188,8 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
         quad.pose = (XrPosef){.orientation = {0, 0, 0, 1}, .position = {0, 0, -g_xr.quad_dist}};
         quad.size = (XrExtent2Df){w, h};
         layers[n++] = (const XrCompositionLayerBaseHeader *)&quad;
+        // the menu laser over it (its own layers: drawn under the panel they hid behind it, GalaxyFrame's first bug)
+        for (uint32_t i = 0, k = xr_pointer_layers(laser); i < k; i++) layers[n++] = (const XrCompositionLayerBaseHeader *)&laser[i];
         if (!new_set) st.reshown++;
     } else {
         st.no_render++;
@@ -289,6 +293,7 @@ static void *xr_thread(void *arg) {
         vk_queue_unlock();
         if (XR_FAILED(r)) { xr_ok_(r, "xrBeginFrame"); continue; }
         xr_update_app_space(fs.predictedDisplayTime);
+        xr_input_pointer(fs.predictedDisplayTime);  // the menu laser at this refresh's display time, in the app space now
         uint64_t before = st.released, late_before = st.gpu_late;
         xr_release_completed();
         uint64_t t_end = plat_now_ns();

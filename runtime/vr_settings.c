@@ -17,6 +17,7 @@ const char *const g_vr_follow_names[VRS_N_FOLLOW] = {"Smooth", "Room", "Fixed"};
 const char *const g_vr_edge_names[VRS_N_EDGE] = {"Off", "Fade", "Passthrough"};
 const char *const g_vr_fov_names[VRS_N_FOV] = {"Off", "Low", "Medium", "High"};
 const char *const g_vr_turn_names[VRS_N_TURN] = {"Smooth", "Snap"};
+const char *const g_vr_hand_names[VRS_N_HAND] = {"Right", "Left"};
 
 // larecomp.ini words; the environment variables take the same ones (LARECOMP_VR_EDGE=fade, ...). The edge's words are the
 // variable's: off is "black"; the variable's older "fog" and "gradient" stay usable from the environment but are not in the menu.
@@ -25,6 +26,7 @@ static const char *const k_turn[] = {"smooth", "snap"};
 static const char *const k_follow[] = {"smooth", "room", "fixed"};
 static const char *const k_edge[] = {"black", "fade", "passthrough"};
 static const char *const k_fov[] = {"off", "low", "medium", "high"};
+static const char *const k_hand[] = {"right", "left"};
 
 // ---------------------------------------------------------------------------------------------------------------------
 // TODO(overseer): the hooks. Each is the function a lane provides to change its option while the game runs (weak: an
@@ -81,6 +83,7 @@ bool vr_settings_parse(const char *key, const char *val) {
     else if (!strcmp(key, "dynamic_resolution")) VR.dynres = atoi(val) != 0;
     else if (!strcmp(key, "panel_distance")) VR.hud_dist = clampf((float)atof(val), 0.8f, 4.0f);
     else if (!strcmp(key, "panel_width")) VR.hud_width = clampf((float)atof(val), 0.6f, 4.0f);
+    else if (!strcmp(key, "pointer_hand")) VR.pointer_hand = pick(k_hand, VRS_N_HAND, val, VRS_HAND_RIGHT);
     else return false;
     return true;
 }
@@ -94,6 +97,7 @@ void vr_settings_save(FILE *f) {
     fprintf(f, "vr_foveation = %s\n", k_fov[VR.foveation]);
     fprintf(f, "vr_dynamic_resolution = %d\n", VR.dynres);
     fprintf(f, "vr_panel_distance = %.2f\nvr_panel_width = %.2f\n", VR.hud_dist, VR.hud_width);
+    fprintf(f, "vr_pointer_hand = %s\n", k_hand[VR.pointer_hand]);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -105,7 +109,7 @@ static const char *const k_env[VRO_COUNT] = {
     [VRO_HEIGHT] = "", [VRO_SIZE] = "", [VRO_TILT] = "",
     [VRO_RECENTRE] = "", [VRO_EDGE] = "LARECOMP_VR_EDGE", [VRO_FOVEATION] = "LARECOMP_VR_FOVEATION",
     [VRO_DYNRES] = "LARECOMP_VR_DYNRES", [VRO_HUD_DIST] = "LARECOMP_XR_QUAD",
-    [VRO_HUD_WIDTH] = "LARECOMP_XR_QUAD"};
+    [VRO_HUD_WIDTH] = "LARECOMP_XR_QUAD", [VRO_POINTER_HAND] = "LARECOMP_VR_POINTER_HAND"};
 
 const char *vr_opt_env(VrOpt o) {
     // (the refresh rate is taken by the launch wrapper from AF_REFRESH_HZ before larecomp.ini)
@@ -177,6 +181,7 @@ bool vr_opt_live(VrOpt o) {
     case VRO_FOVEATION: return fov_set_level != NULL;
     case VRO_DYNRES: return diet_set_dynres != NULL;
     case VRO_HUD_DIST: case VRO_HUD_WIDTH: return vrui_set_hud_quad != NULL;
+    case VRO_POINTER_HAND: return true;  // (xr_input.c reads g_settings.vr.pointer_hand each refresh)
     default: return false;
     }
 }

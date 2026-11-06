@@ -6,6 +6,7 @@
 #include "../rt.h"
 #include "xr_internal.h"
 #include "xr_input.h"
+#include "xr_pointer.h"
 
 // The Vulkan entry points the runtime gets (pfnGetInstanceProcAddr): its queue calls take the queue lock. SteamVR
 // submits to the app's queue from inside xrWaitFrame too (validation: THREADING ERROR with the recorder's
@@ -130,7 +131,7 @@ static bool pick_format(void) {
     return bgra || rgba;
 }
 
-static bool chain_create(XrChain *c, const char *what, uint32_t w, uint32_t h) {
+bool xr_chain_create(XrChain *c, const char *what, uint32_t w, uint32_t h) {
     VkFormat vf[2] = {(VkFormat)chain_fmt, chain_view_fmt};
     XrVulkanSwapchainFormatListCreateInfoKHR fl = {.type = XR_TYPE_VULKAN_SWAPCHAIN_FORMAT_LIST_CREATE_INFO_KHR,
                                                    .viewFormatCount = 2, .viewFormats = vf};
@@ -179,14 +180,16 @@ bool xr_chains_create(uint32_t hud_w, uint32_t hud_h) {
         if (i == 0) LOG("[xr] eyes: recommended %ux%u (max %ux%u), x%.2f\n", g_xr.vcv[i].recommendedImageRectWidth,
                         g_xr.vcv[i].recommendedImageRectHeight, g_xr.vcv[i].maxImageRectWidth, g_xr.vcv[i].maxImageRectHeight, scale);
         for (int p = 0; p < 2; p++)
-            if (!chain_create(&g_xr.eyes[p][i], i ? "right eye" : "left eye", w, h)) return false;
+            if (!xr_chain_create(&g_xr.eyes[p][i], i ? "right eye" : "left eye", w, h)) return false;
     }
-    for (int p = 0; p < 2; p++) if (!chain_create(&g_xr.hud[p], "HUD", hud_w, hud_h)) return false;
+    for (int p = 0; p < 2; p++) if (!xr_chain_create(&g_xr.hud[p], "HUD", hud_w, hud_h)) return false;
     if (g_xr.hud[0].count + g_xr.hud[1].count > 8) { LOG("[xr] HUD swapchains with more than 4 images each\n"); return false; }
+    xr_pointer_create();  // (the menu laser's two images; without them the controller still clicks)
     return true;
 }
 
 void xr_chains_destroy(void) {
+    xr_pointer_destroy();
     XrChain *cs[] = {&g_xr.hud[0], &g_xr.hud[1], &g_xr.eyes[0][0], &g_xr.eyes[0][1], &g_xr.eyes[1][0], &g_xr.eyes[1][1]};
     for (int k = 0; k < 6; k++) {
         XrChain *c = cs[k];

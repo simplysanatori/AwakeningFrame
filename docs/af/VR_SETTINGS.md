@@ -40,6 +40,7 @@ carried render poses and the table moving only on new game frames are unchanged.
 | Refresh Rate | 120 Hz (60 FPS), 90 Hz (30 FPS), 90 Hz (60 FPS, Test) | `vr_refresh = 120 \| 90`, `vr_fps = 30 \| 60` | wrapper: `AF_REFRESH_HZ`, `AF_FPS`; `LARECOMP_XR_HZ`, `LARECOMP_XR_FPS` | relaunch |
 | Controller Layout | Switch, Comfort | `vr_layout = switch \| comfort` | `LARECOMP_XR_LAYOUT` | hook `xr_input_set_layout` (stub) |
 | Buttons Match Labels | Off, On | `face_buttons_by_label = 0 \| 1` (the Controls tab's setting) | none (`g_settings.face_by_label`, read live by `xr_input.c`) | live |
+| Pointer Hand | Right, Left | `vr_pointer_hand = right \| left` | `LARECOMP_VR_POINTER_HAND` | live (`xr_input.c` reads it each refresh) |
 | Turning | Smooth, Snap | `vr_turn = smooth \| snap` | `LARECOMP_VR_TURN` | live (`xr_rig_set_turn_mode`, the rig's) |
 | Follow Mode | Smooth, Room, Fixed | `vr_follow = smooth \| room \| fixed` | `LARECOMP_VR_FOLLOW` | hook `stereo_set_follow` (stub) |
 | Height | 0, -50 to +40 cm in steps of 5 | none (the rig's, `vr_rig.ini`) | none | live (`xr_rig_set_height_cm`, `runtime/xr/xr_rig_settings.c`) |

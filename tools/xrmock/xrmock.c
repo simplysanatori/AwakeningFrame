@@ -33,10 +33,14 @@
 //   MOCK_XR_SHOT=<spec>      write the submitted images to PNG for these frames (1-based, as in the trace):
 //                            "30", "10,20", "5-8", "every:60", "all"
 //                            (a dumped frame stalls the loop for ~0.5 s per image: copy and PNG on the CPU)
+//   MOCK_XR_SHOT_VIEW=1      with MOCK_XR_SHOT: also f<frame>_view.png, what the left eye sees (half size): its projection
+//                            image with the quad layers over it in order, each where its pose puts it (nearest sample)
 //   MOCK_XR_SHOT_DIR=<dir>   where (default .): f<frame>_proj<layer>_eye<0|1>.png, f<frame>_quad<layer>.png
 //   MOCK_XR_VK_MAX=1.3       highest Vulkan version offered (1.2 is what SteamVR offers; the instance is refused above it)
 //   MOCK_XR_BUSY_MS=<ms>     at each release wait for the app's queue to go idle; longer than this is an error
 //                            (the app released an image whose GPU work was unfinished).  Off unless set.
+//   MOCK_XR_AIM=<spec>       point a controller: "t0-t1:right|left:x,y,z;..." from t0 to t1 s after xrBeginSession that hand's
+//                            action spaces (aim, grip) turn so their -z points at STAGE point x,y,z (else straight ahead)
 //   MOCK_XR_EXTENSIONS=a,b   replace the extension list offered
 //   MOCK_XR_NO_LOCAL_FLOOR=1 refuse LOCAL_FLOOR spaces
 //
@@ -59,6 +63,7 @@
 #include <openxr/openxr_loader_negotiation.h>
 
 #include "xrmock_vk.h"
+#include "xrmock_png.h"
 
 static FILE *gTrace, *gTiming;
 static int gFrame = 0;  // xrWaitFrame calls so far (the frame number in the trace)
@@ -301,6 +306,29 @@ typedef struct { int used, kind; Pose offset; int hand; } Space;  // kind: refer
 static Space gSpaces[256];
 static int gSpaceCount = 0;
 static Pose gLocalOrigin, gLocalFloorOrigin;
+typedef struct { double t0, t1; int hand; XrVector3f at; } AimKey;  // MOCK_XR_AIM
+static AimKey gAim[32];
+static int gAimCount = -1;
+static Q aimAt(int hand, XrVector3f from, double t) {
+    if (gAimCount < 0) {
+        gAimCount = 0;
+        const char* e = getenv("MOCK_XR_AIM");
+        for (const char* p = e; p && *p && gAimCount < 32; p = strchr(p, ';') ? strchr(p, ';') + 1 : NULL) {
+            AimKey k;
+            char h[8] = "";
+            if (sscanf(p, "%lf-%lf:%7[a-z]:%f,%f,%f", &k.t0, &k.t1, h, &k.at.x, &k.at.y, &k.at.z) == 6) {
+                k.hand = strcmp(h, "left") != 0;
+                gAim[gAimCount++] = k;
+            } else fprintf(stderr, "xrmock: MOCK_XR_AIM: cannot read '%s'\n", p);
+        }
+    }
+    for (int i = 0; i < gAimCount; i++)
+        if (gAim[i].hand == hand && t >= gAim[i].t0 && t < gAim[i].t1) {
+            float dx = gAim[i].at.x - from.x, dy = gAim[i].at.y - from.y, dz = gAim[i].at.z - from.z;
+            return qeuler(atan2f(-dx, -dz), atan2f(dy, sqrtf(dx * dx + dz * dz)), 0);
+        }
+    return (Q){0, 0, 0, 1};
+}
 
 static XrResult XRAPI_CALL mEnumRefSpaces(XrSession s, uint32_t cap, uint32_t* count, XrReferenceSpaceType* t) {
     (void)s;
@@ -351,7 +379,11 @@ static Pose spaceInStage(const Space* s, double t) {
     case XR_REFERENCE_SPACE_TYPE_VIEW: base = headPoseAt(t); break;
     case XR_REFERENCE_SPACE_TYPE_LOCAL: base = gLocalOrigin; break;
     case XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR: base = gLocalFloorOrigin; break;
-    case -1: base = (Pose){{0, 0, 0, 1}, {s->hand ? 0.25f : -0.25f, 1.15f, -0.35f}}; break;
+    case -1: {
+        XrVector3f at = {s->hand ? 0.25f : -0.25f, 1.15f, -0.35f};
+        base = (Pose){aimAt(s->hand, at, t), at};
+        break;
+    }
     default: base = (Pose){{0, 0, 0, 1}, {0, 0, 0}}; break;
     }
     return pcompose(base, s->offset);
@@ -860,6 +892,76 @@ static int fovOk(const XrFovf* f) {
     return f->angleLeft < f->angleRight && f->angleDown < f->angleUp && f->angleLeft > -1.5707f && f->angleRight < 1.5707f && f->angleDown > -1.5707f && f->angleUp < 1.5707f;
 }
 
+// MOCK_XR_SHOT_VIEW: the left eye's view of the layers (a check of where quad layers land: menus, lasers)
+static float srgbToLin(uint8_t v) {
+    float s = v / 255.0f;
+    return s <= 0.04045f ? s / 12.92f : powf((s + 0.055f) / 1.055f, 2.4f);
+}
+static void compositeView(int frame, const XrFrameEndInfo* ei) {
+    const XrCompositionLayerProjection* proj = NULL;
+    for (uint32_t i = 0; i < ei->layerCount && !proj; i++)
+        if (ei->layers[i]->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) proj = (const XrCompositionLayerProjection*)ei->layers[i];
+    if (!proj || !proj->viewCount || !spaceOf(proj->space)) return;
+    const XrCompositionLayerProjectionView* pv = &proj->views[0];
+    Chain* pc = chainOf(pv->subImage.swapchain);
+    if (!pc || pc->lastReleased < 0) return;
+    int W = pv->subImage.imageRect.extent.width, H = pv->subImage.imageRect.extent.height, OW = W / 2, OH = H / 2;
+    uint8_t* eye = mockvk_read_rgba(pc->images, pc->lastReleased, pv->subImage.imageArrayIndex, W, H);
+    if (!eye) return;
+    double ts = (double)(ei->displayTime - gT0) / 1e9;
+    Pose cam = pcompose(spaceInStage(spaceOf(proj->space), ts), fromXr(pv->pose));
+    float* acc = malloc(sizeof(float) * 3 * (size_t)OW * OH);
+    for (int y = 0; y < OH; y++)
+        for (int x = 0; x < OW; x++)
+            for (int c = 0; c < 3; c++) acc[3 * (y * OW + x) + c] = srgbToLin(eye[4 * ((2 * y) * W + 2 * x) + c]);
+    free(eye);
+    float tl = tanf(pv->fov.angleLeft), tr = tanf(pv->fov.angleRight), tu = tanf(pv->fov.angleUp), td = tanf(pv->fov.angleDown);
+    for (uint32_t i = 0; i < ei->layerCount; i++) {
+        if (ei->layers[i]->type != XR_TYPE_COMPOSITION_LAYER_QUAD) continue;
+        const XrCompositionLayerQuad* q = (const XrCompositionLayerQuad*)ei->layers[i];
+        Chain* c = chainOf(q->subImage.swapchain);
+        if (!c || c->lastReleased < 0 || !spaceOf(q->space)) continue;
+        int iw = q->subImage.imageRect.extent.width, ih = q->subImage.imageRect.extent.height;
+        uint8_t* img = mockvk_read_rgba(c->images, c->lastReleased, q->subImage.imageArrayIndex, iw, ih);
+        if (!img) continue;
+        Pose qp = pcompose(spaceInStage(spaceOf(q->space), ts), fromXr(q->pose));
+        Q qi = qconj(qp.q);
+        XrVector3f o0 = {cam.p.x - qp.p.x, cam.p.y - qp.p.y, cam.p.z - qp.p.z};
+        XrVector3f o = qrot(qi, o0);
+        int blend = (q->layerFlags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT) != 0;
+        for (int y = 0; y < OH; y++)
+            for (int x = 0; x < OW; x++) {
+                XrVector3f dc = {tl + (tr - tl) * (x + 0.5f) / OW, tu + (td - tu) * (y + 0.5f) / OH, -1};
+                XrVector3f d = qrot(qi, qrot(cam.q, dc));
+                if (fabsf(d.z) < 1e-7f) continue;
+                float t = -o.z / d.z;
+                if (t <= 0) continue;
+                float u = (o.x + d.x * t) / q->size.width + 0.5f, v = 0.5f - (o.y + d.y * t) / q->size.height;
+                if (u < 0 || u >= 1 || v < 0 || v >= 1) continue;
+                const uint8_t* s = img + 4 * ((int)(v * ih) * iw + (int)(u * iw));
+                float a = blend ? s[3] / 255.0f : 1;
+                float* p = acc + 3 * (y * OW + x);
+                for (int k = 0; k < 3; k++) p[k] = srgbToLin(s[k]) + p[k] * (1 - a);
+            }
+        free(img);
+    }
+    uint8_t* out = malloc(4 * (size_t)OW * OH);
+    for (size_t k = 0; k < (size_t)OW * OH; k++) {
+        for (int c = 0; c < 3; c++) {
+            float l = acc[3 * k + c];
+            l = l < 0 ? 0 : l > 1 ? 1 : l;
+            float sv = l <= 0.0031308f ? l * 12.92f : 1.055f * powf(l, 1 / 2.4f) - 0.055f;
+            out[4 * k + c] = (uint8_t)(sv * 255 + 0.5f);
+        }
+        out[4 * k + 3] = 255;
+    }
+    char path[512];
+    snprintf(path, sizeof path, "%s/f%04d_view.png", gShotDir, frame);
+    int rc = png_write_rgba(path, out, OW, OH);
+    trace("shot view %s", rc ? "FAILED" : "ok");
+    free(acc), free(out);
+}
+
 static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
     (void)s;
     if (!gSessionRunning) return XR_ERROR_SESSION_NOT_RUNNING;
@@ -928,6 +1030,7 @@ static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
             strcat(buf, t);
         }
     }
+    if (want && getenv("MOCK_XR_SHOT_VIEW")) compositeView(frame, ei);
     double margin = (double)(gBeginRec.predicted - end) / 1e6;
     double deadline = gDeadlineMs >= 0 ? gDeadlineMs : (double)gPeriod / 2e6;
     int late = margin < deadline;

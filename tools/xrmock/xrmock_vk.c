@@ -372,7 +372,17 @@ static uint8_t linearToSrgb8(float l) {
     return (uint8_t)(s * 255.0f + 0.5f);
 }
 
+static int dumpImpl(void* images, int index, uint32_t layer, int x, int y, int w, int h, const char* path, char* stats, size_t statcap, uint8_t** keep);
 int mockvk_dump_png(void* images, int index, uint32_t layer, int x, int y, int w, int h, const char* path, char* stats, size_t statcap) {
+    return dumpImpl(images, index, layer, x, y, w, h, path, stats, statcap, NULL);
+}
+uint8_t* mockvk_read_rgba(void* images, int index, uint32_t layer, int w, int h) {
+    char stats[160];
+    uint8_t* out = NULL;
+    if (dumpImpl(images, index, layer, 0, 0, w, h, NULL, stats, sizeof stats, &out)) { free(out); return NULL; }
+    return out;
+}
+static int dumpImpl(void* images, int index, uint32_t layer, int x, int y, int w, int h, const char* path, char* stats, size_t statcap, uint8_t** keep) {
     VkImages* r = (VkImages*)images;
     if (!r || index < 0 || index >= r->count || !r->im[index] || !gQueue) return -1;
     if (layer >= (uint32_t)r->layers) layer = 0;
@@ -462,9 +472,10 @@ int mockvk_dump_png(void* images, int index, uint32_t layer, int x, int y, int w
             memcpy(rgba + k * 4, px, 4);
             sum[0] += px[0]; sum[1] += px[1]; sum[2] += px[2];
         }
-        rc = png_write_rgba(path, rgba, w, h);
+        rc = path ? png_write_rgba(path, rgba, w, h) : 0;
         snprintf(stats, statcap, "%dx%d mean=(%.0f,%.0f,%.0f)", w, h, sum[0] / (double)npx, sum[1] / (double)npx, sum[2] / (double)npx);
-        free(rgba);
+        if (keep) *keep = rgba;
+        else free(rgba);
         DEV(vkUnmapMemory)(gDevice, mem);
     }
     DEV(vkDestroyBuffer)(gDevice, buf, NULL);

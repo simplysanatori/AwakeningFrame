@@ -128,6 +128,8 @@ Turning is smooth by default. With Turning set to Snap, a flick of the right sti
 
 Resetting the view turns the table back to the game's own angle and puts it in front of you again. Height, size and tilt stay as you set them. "View Reset" shows on the panel for a moment.
 
+In the game's menu the right controller points: pull the right trigger to click, push the right stick to scroll. Pointer Hand on the VR tab moves it to the left.
+
 With Buttons Match Labels on, A, B, X and Y work as printed on the Frame controllers instead of by position. The Comfort layout puts the sword on the right trigger and the shield on the left trigger.
 
 More detail is in [docs/CONTROLS.md](docs/CONTROLS.md).
@@ -142,6 +144,7 @@ Press **View** and **Menu** together to open the game's menu. The VR tab is next
 | Controller Layout | Switch, Comfort | Switch puts every button where a Switch Pro Controller has it. Comfort puts the sword on the right trigger and the shield on the left |
 | Turning | Smooth, Snap | How the right stick turns the table |
 | Buttons Match Labels | Off, On | On: A, B, X and Y work as printed on the controllers |
+| Pointer Hand | Right, Left | The controller that points at the menu |
 | Follow Mode | Smooth, Room, Fixed | How the table follows the game. Smooth holds each room still and follows Link in the overworld. Room holds still until the camera changes room. Fixed never moves |
 | Height | -50 to +40 cm | How high the table stands |
 | Size | 40% to 300% | How big the table is |

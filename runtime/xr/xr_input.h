@@ -13,6 +13,9 @@ void xr_input_attach(void);
 // The XR thread, once per display refresh (the session is running): xrSyncActions, the state to the game and the rig,
 // and the game's rumble to both controllers.
 void xr_input_frame(void);
+// The XR thread, once per display refresh after the app space's update: the menu laser for display time t (its pose to
+// xr_pointer.c, its position, click and scroll to the menu: menu.mm menu_xr_pointer).
+void xr_input_pointer(XrTime t);
 // Before xrDestroySession.
 void xr_input_shutdown(void);
 // The eye gaze's direction (unit, `base` space) at t; false: none (xr_vk.c xr_latch_gaze).

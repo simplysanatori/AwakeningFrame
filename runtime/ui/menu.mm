@@ -84,6 +84,31 @@ static void push(const QEvent &e) {
 }
 
 bool menu_is_open(void) { return g_open.load(); }
+
+// The VR mode's menu laser (runtime/xr/xr_input.c xr_input_pointer, the XR thread, every refresh while the menu has the
+// controls): where it meets the HUD panel in the panel's pixels (the menu's), its trigger as the left button and the
+// right stick as the wheel. A move under 1.5 px (0.5 px with the button down) isn't passed on: the hand's tremor would
+// otherwise move the mouse all the time and hide the D-pad's cursor. Off the panel: no mouse.
+static std::atomic<bool> g_xr_pointing{false};  // (render thread: hover ticks while the laser is the mouse)
+static std::atomic<bool> g_xr_pointer_used{false};
+static std::atomic<unsigned> g_xr_hover_ticks{0};
+extern "C" void menu_xr_pointer(bool on, float x, float y, bool down, float wheel) {
+    static bool was_on, was_down;
+    static float lx, ly;
+    g_xr_pointer_used = true;
+    float th = was_down ? 0.5f : 1.5f;
+    if (on && (!was_on || fabsf(x - lx) >= th || fabsf(y - ly) >= th)) {
+        QEvent q = {}; q.kind = QEvent::MOUSE_POS; q.x = x; q.y = y; push(q);
+        lx = x, ly = y;
+    } else if (!on && was_on) {
+        QEvent q = {}; q.kind = QEvent::MOUSE_POS; q.x = q.y = -FLT_MAX; push(q);
+    }
+    if (down != was_down) { QEvent q = {}; q.kind = QEvent::MOUSE_BUTTON; q.button = 0; q.down = down; push(q); }
+    if (wheel != 0) { QEvent q = {}; q.kind = QEvent::WHEEL; q.x = 0; q.y = wheel; push(q); }
+    was_on = on, was_down = down;
+    g_xr_pointing = on;
+}
+extern "C" unsigned menu_xr_hover_ticks(void) { return g_xr_hover_ticks.load(); }
 // (shader_prep.c, the preparation before the game's first frame) the label "Preparing shaders... N %": pct 0-100, -1 none
 static std::atomic<int> g_boot_pct{-1};
 extern "C" void menu_boot_notice(int pct) { g_boot_pct = pct; }
@@ -1255,6 +1280,13 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         if (key[0] && !strcmp(key, g_ov_key)) g_ov_same++;
         else { memcpy(g_ov_key, key, sizeof key); g_ov_same = key[0] ? 1 : 0; }
     }
+    {   // (the laser: the menu reopened, no button left down from the press that closed it - its release found the queue
+        // closed - and no mouse until the laser says where)
+        static bool was_captured;
+        bool cap = capturing();
+        if (cap && !was_captured && g_xr_pointer_used.load()) io.ClearInputMouse();
+        was_captured = cap;
+    }
     drain_events(io);
     // fonts are built at 34/56 px for a ~1080 px tall output; scale to the window
     float scale = (float)(th / 1080.0);
@@ -1384,6 +1416,12 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     if (kbd) keyboard_draw(io, scale);
     plastic_widgets(false);
     ImGui::GetStyle() = ov_style;
+    if (g_xr_pointing.load()) {  // (the laser's haptic tick: it reached a new control)
+        static ImGuiID last;
+        ImGuiID h = ImGui::GetCurrentContext()->HoveredId;
+        if (h != last && h) g_xr_hover_ticks++;
+        last = h;
+    }
     ImGui::Render();
     g_text_busy = open && ui_text_busy();
     // the pieces (and, the menu open over the game, the small copy of the game image they read): only with the menu or
