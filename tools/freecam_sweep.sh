@@ -21,7 +21,8 @@
 # game once and copying the data folder's save/ there; never written to). Refuses to run while ~/.cache/headset-in-use exists.
 # Environment: FREECAM_WIDE=<aspect>:<fovy scale> (the widened culling, default 3.2:1.5), FREECAM_SETTLE / _GAP / _SHOT
 # (frames: after the warp before the first step, between steps, from the step to its screenshot; 480 / 60 / 30),
-# FREECAM_SESSION_SECONDS (kill limit, default 3600).
+# FREECAM_SESSION_SECONDS (kill limit, default 3600). FREECAM_FAR=<units> (far plane pushed out in the orbit shots, default 40:
+# interiors have a far plane of 45, so a camera 50 units out sees nothing without it).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 REPO=$PWD
@@ -184,7 +185,7 @@ fi
 # ---- the sweep
 plan_run "${SPOTS[@]}"
 IFS='|' read -r _ lvl0 loc0 <<< "${SPOTS[0]}"
-ENVV=(LARECOMP_WARP_ON_LOAD="$FIRST" LARECOMP_FREECAM_AT="$AT" LARECOMP_FREECAM_LOG=1 LARECOMP_SHOT_AT="$SHOTS")
+ENVV=(LARECOMP_WARP_ON_LOAD="$FIRST" LARECOMP_FREECAM_AT="$AT" LARECOMP_FREECAM_LOG=1 LARECOMP_SHOT_AT="$SHOTS" LARECOMP_FREECAM_FAR="${FREECAM_FAR:-40}")
 [ -n "$WARPS" ] && ENVV+=(LARECOMP_WARP_AT="$WARPS")
 if [ $MODE = dry ]; then
     echo "freecam_sweep (dry run): ${#SPOTS[@]} spots x $NSTEPS steps, last frame $LAST"
