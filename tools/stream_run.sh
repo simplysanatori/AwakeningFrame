@@ -11,8 +11,10 @@ O=$1 LAST=$2; shift 2
 SAVE=${LARECOMP_SMOKE_SAVE:-$HOME/.local/share/lasrecomp-smoketest/save}
 # wait (poll every 2 min, up to an hour) while the headset is in use, the perf lane benchmarks (~/.cache/af-bench-lock)
 # or another lasrecomp runs
-busy() { [ -e "$HOME/.cache/headset-in-use" ] || [ -e "$HOME/.cache/af-bench-lock" ] || pgrep -x lasrecomp >/dev/null; }
-for i in $(seq 1 30); do busy || break; echo "stream_run: headset in use / bench lock / another lasrecomp: waiting" >&2; sleep 120; done
+# (a lock reading "reserved:stream" is this lane's slot, held for it by the overseer)
+busy() { [ -e "$HOME/.cache/headset-in-use" ] || pgrep -x lasrecomp >/dev/null ||
+         { [ -e "$HOME/.cache/af-bench-lock" ] && [ "$(cat "$HOME/.cache/af-bench-lock" 2>/dev/null)" != reserved:stream ]; }; }
+for i in $(seq 1 ${STREAM_WAIT_POLLS:-30}); do busy || break; echo "stream_run: headset in use / bench lock / another lasrecomp: waiting" >&2; sleep ${STREAM_POLL:-120}; done
 busy && { echo "stream_run: still busy: not running" >&2; exit 75; }
 mkdir -p "$O" && O=$(cd "$O" && pwd)
 rm -rf "$O/save" && cp -R "$SAVE" "$O/save" && : > "$O/settings.ini"
