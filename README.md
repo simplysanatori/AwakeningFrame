@@ -155,7 +155,7 @@ Press **View** and **Menu** together to open the game's menu. The VR tab is next
 
 The first choice is the default. Height, Size and Tilt start at 0, 100% and 0. Panel Distance starts at 2.0 m and Panel Width at 2.2 m. Foveation is High and Dynamic Resolution is On.
 
-Turning Foveation on from Off needs a restart. The settings are saved in `larecomp.ini`, and the table's height, size and tilt in `vr_rig.ini`, both in `~/.local/share/lasrecomp`.
+Every row but Refresh Rate applies at once. The settings are saved in `larecomp.ini`, and the table's height, size and tilt in `vr_rig.ini`, both in `~/.local/share/lasrecomp`.
 
 ## Performance
 
