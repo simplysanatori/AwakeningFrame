@@ -27,7 +27,13 @@ bool vr_cull_get(float *aspect, float *fovy_scale);
 // (ring draws) the table fit's footprint as a world-axis box (y unbounded), before LARECOMP_VR_CULL_EXTENT; false: none
 bool vr_cull_core_box(float lo[3], float hi[3]);
 bool vr_ring_on(void);  // LARECOMP_VR_RING set
-// (lane scene) LARECOMP_VR_SCENE=<rooms> / LARECOMP_VR_CULL_EXTENT: the drawn box's smaller half-extent (units), 0 = off
+// (scene, docs/af/SCENE.md) the world past the table: LARECOMP_VR_SCENE=off | low | backdrop | full | <rooms>, the VR tab's
+// row (live). Low / Full widen the culling to (LARECOMP_VR_SCENE_ROOMS, 2) + 0.5 rooms about the table centre with ring draws.
+enum { VR_SCENE_OFF, VR_SCENE_LOW, VR_SCENE_BACKDROP, VR_SCENE_FULL, VR_SCENE_N };
+void vr_scene_set_mode(int mode);
+int vr_scene_mode(void);
+void vr_scene_backdrop_wide(bool on);  // (scene.c) Backdrop's capture frames: culled and drawn as Full
+// the drawn box's smaller half-extent (units; the scene's or LARECOMP_VR_CULL_EXTENT's), 0 = off
 float vr_cull_scene_reach(void);
 // a draw with this world box: 0 core, 1 ring, 2 ring that still casts (LARECOMP_VR_RING_CAST), 3 past the EXTENT box
 // (lane scene: drawn nowhere but shared colour passes); against the footprint

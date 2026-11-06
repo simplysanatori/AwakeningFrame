@@ -2554,6 +2554,7 @@ typedef struct {
     uint8_t blend_on, a2c, topo_class, poly_fill;
     uint32_t write_mask[8];
     uint32_t view_mask;  // (multiview) the pass's view mask
+    uint32_t coarse;     // (scene, Low Quality) a draw past the table: 2x2 fragments (fov_pipeline_chain_coarse)
 } PipeKey;
 
 typedef struct { PipeKey k; uint64_t hash; VkPipeline pipe; _Atomic int state; } Pipe;  // state: 0 building, 1 ready, 2 failed
@@ -2576,7 +2577,7 @@ struct PipeMemo {
     VkFormat color[8], depth, stencil;
     uint32_t attrib[16], stream[16][2], rt_fmt[8];
     uint8_t blend[8][8], blend_on, a2c, cls, poly_fill;
-    uint32_t view_mask;
+    uint32_t view_mask, coarse;
     Pipe *pp;
     VtxLayout vl;  // the layout pipe_key_fill made from these inputs (dynamic vertex input leaves it out of pp's key)
 };
@@ -2742,7 +2743,8 @@ static void pipe_ci_fill(PipeCI *c, const PipeKey *k) {
     if (g_vk.vids) c->dyn[NDYN] = VK_DYNAMIC_STATE_VERTEX_INPUT_EXT;
     c->dy = (VkPipelineDynamicStateCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
                                                .dynamicStateCount = NDYN + g_vk.vids, .pDynamicStates = c->dyn};
-    c->ri = (VkPipelineRenderingCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .pNext = fov_pipeline_chain(),
+    const void *fov_chain = k->coarse && fov_pipeline_chain_coarse() ? fov_pipeline_chain_coarse() : fov_pipeline_chain();
+    c->ri = (VkPipelineRenderingCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .pNext = fov_chain,
                                             .viewMask = k->view_mask, .colorAttachmentCount = k->ncolor,
                                             .pColorAttachmentFormats = k->color, .depthAttachmentFormat = k->depth,
                                             .stencilAttachmentFormat = k->stencil};
@@ -7206,9 +7208,9 @@ static bool ring_route_(CmdRec *r, bool indexed, int log);
 static bool ring_route(CmdRec *r, bool indexed) {  // true: skip this draw
     extern bool vr_ring_on(void);
     g_ring_leq = false;
-    static int on = -1, log = 0;
-    if (on < 0) on = vr_ring_on(), log = getenv("LARECOMP_VR_RING_LOG") != NULL;
-    if (!on || g_eye < 0) return false;
+    static int log = -1;  // (vr_ring_on is read per draw: the VR tab's Surroundings row switches it live)
+    if (log < 0) log = getenv("LARECOMP_VR_RING_LOG") != NULL;
+    if (g_eye < 0 || !vr_ring_on()) return false;
     if (!log) return ring_route_(r, indexed, 0);
     uint64_t t0 = SDL_GetTicksNS();
     bool skip = ring_route_(r, indexed, 1);
@@ -7294,9 +7296,9 @@ static bool diet_draw(Prog *pr, uint64_t last_hash) {
 // interpolation (logging or replay) takes the full path.
 static bool ring_early(CmdRec *r, bool indexed) {
     extern bool vr_ring_on(void);
-    static int on = -1, log = 0;
-    if (on < 0) on = vr_ring_on(), log = getenv("LARECOMP_VR_RING_LOG") != NULL;
-    if (!on || g_eye < 0 || g_interp_log || g_interp_replaying || !st.rt.depth) return false;
+    static int log = -1;
+    if (log < 0) log = getenv("LARECOMP_VR_RING_LOG") != NULL;
+    if (g_eye < 0 || g_interp_log || g_interp_replaying || !st.rt.depth || !vr_ring_on()) return false;
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) return false;
     uint64_t t0 = log ? SDL_GetTicksNS() : 0;
     bool tw = vk_tex_twinned(st.rt.depth);
@@ -7572,10 +7574,18 @@ static void draw_(CmdRec *r, bool indexed) {
     int nat = st.nattrib < 0 ? 0 : st.nattrib > 16 ? 16 : st.nattrib, nst = st.nstream < 0 ? 0 : st.nstream > 16 ? 16 : st.nstream;
     uint32_t npc = pass_ncolor < 8 ? pass_ncolor : 8;
     prof_key_draws++;
+    // (scene: the Surroundings row's Low Quality) ring draws in an eye's colour pass shade 2x2 fragments
+    extern int vr_scene_mode(void);
+    uint32_t coarse = 0;
+    if (g_ring_leq && vr_scene_mode() == 1 /* VR_SCENE_LOW */) {
+        static bool said;
+        coarse = fov_pipeline_chain_coarse() ? 1u : 0u;
+        if (!said) said = true, LOG("[scene] low quality: draws past the table %s\n", coarse ? "shade 2x2 fragments" : "at full rate (no pipeline shading rates)");
+    }
     PipeKey k;
     VtxLayout vl;  // the draw's vertex layout (on a memo hit: the memo's, made from the same inputs)
     Pipe *pp;
-    if (pm && pm->pp && pm->gen == key_gen && pm->view_mask == pass_view_mask && pm->ncolor == pass_ncolor && pm->samples == pass_samples && pm->depth == pass_depth &&
+    if (pm && pm->pp && pm->gen == key_gen && pm->view_mask == pass_view_mask && pm->coarse == coarse && pm->ncolor == pass_ncolor && pm->samples == pass_samples && pm->depth == pass_depth &&
         pm->stencil == pass_stencil && pm->nattrib == st.nattrib && pm->nstream == st.nstream && pm->channel_mask == in.channel_mask &&
         pm->blend_on == in.blend_on && pm->a2c == in.a2c && pm->cls == in.topo_class && pm->poly_fill == in.poly_fill &&
         !memcmp(pm->color, pass_color, npc * sizeof pass_color[0]) && !memcmp(pm->rt_fmt, rt_fmt, sizeof rt_fmt) &&
@@ -7587,6 +7597,7 @@ static void draw_(CmdRec *r, bool indexed) {
     } else {
         pipe_key_fill(&k, pr, &in, pass_color, pass_ncolor, pass_depth, pass_stencil, pass_samples, &vl);
         k.view_mask = pass_view_mask;
+        k.coarse = coarse;
         uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
         if (!ph) ph = 1;
         uint32_t pslot = (uint32_t)(ph ^ (ph >> 29)) & (PIPE_TAB - 1);
@@ -7616,7 +7627,7 @@ static void draw_(CmdRec *r, bool indexed) {
             pipe_tab[pslot].pipe = pp;
         }
         if (pm) {
-            pm->gen = key_gen; pm->view_mask = pass_view_mask; pm->ncolor = pass_ncolor; pm->samples = pass_samples; pm->depth = pass_depth; pm->stencil = pass_stencil;
+            pm->gen = key_gen; pm->view_mask = pass_view_mask; pm->coarse = coarse; pm->ncolor = pass_ncolor; pm->samples = pass_samples; pm->depth = pass_depth; pm->stencil = pass_stencil;
             pm->nattrib = st.nattrib; pm->nstream = st.nstream; pm->channel_mask = in.channel_mask; pm->blend_on = in.blend_on;
             pm->a2c = in.a2c; pm->cls = in.topo_class; pm->poly_fill = in.poly_fill;
             memcpy(pm->color, pass_color, sizeof pm->color); memcpy(pm->rt_fmt, rt_fmt, sizeof pm->rt_fmt);
