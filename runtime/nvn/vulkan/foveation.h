@@ -33,4 +33,5 @@ void fov_note_views(const float orient[2][4], const float fov[2][4], uint64_t id
 // w x h; fx / fy: the filled part of the image, 0..1 of w / h, from the top-left) the density map to chain into the
 // VkRenderingInfo (a shading-rate or density-map attachment info, nothing chained), or NULL.
 // LARECOMP_VR_FOVEATION_LOG=1 logs the first 400 decisions.
+// eye 2: a multiview pass (both eyes; one map, the finer rate of the two foci)
 const void *fov_pass(int eye, bool per_eye, uint32_t w, uint32_t h, float fx, float fy);

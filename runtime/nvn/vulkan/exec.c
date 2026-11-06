@@ -38,6 +38,18 @@
 // draw, clear or copy runs only when a target is twinned (vk_tex_twinned); compute, counters and read-backs run in
 // eye 0 only; the game's memory writes of eye 0 are undone before eye 1 and redone by it.
 static int g_eye = -1;
+// ---- multiview (LARECOMP_MV=1; docs/af/STEREO.md "Multiview"): a list runs once (g_mv_run) and every pass whose
+// attachments are all twinned (layered: textures.c vk_mv_on) draws both eyes as one multiview pass (pass_view_mask 3).
+// A twinned pass that can't be one (twinned and shared attachments) is drawn into layer 0 and makes eye 1 run the
+// list again for it (mv_need_eye1; that run skips everything else).
+static bool g_mv_run, mv_need_eye1;
+static uint32_t pass_view_mask;  // the open pass's view mask (3: both eyes)
+static uint32_t g_mv_bits[2];    // (the draw being recorded) per stage, cbuf k has an [eye 0 | eye 1] copy (bit k)
+static uint32_t g_tex_amask;     // (the draw) its fragment textures sampled as both eyes' layers (sampler2DArray)
+static bool g_mvp;               // (the draw) it uses a multiview program (ShaderKey.mv)
+static struct { uint64_t passes, other, lists1, lists2, copies, mvprog, baseprog, bad_tex, bad_cb, building, eye1_passes; } mvs;
+static bool mv_passes_on(void);
+extern uint64_t renderer_exec_frame(void);
 static uint64_t st_skipped[2], st_ran1;  // (stats) eye 1: skipped / run draws+clears+copies
 static bool st_mixed_logged;
 static bool eye1_skip_rt(void);           // (below the state) eye 1 and no twinned attachment
@@ -901,21 +913,23 @@ static void guest_copy_flush(void) { gcopy_gen++; }
 // cam_override_patch's substitute for a bound range, as a transient copy shared by the draws of one submission that bind
 // the same range in the same eye (guest memory is stable within a submission, as for guest_copy; the camera epoch
 // covers a new latch). LARECOMP_CAM_PATCH_NOSHARE=1: a fresh patch and copy per binding, as before.
-static bool cam_patched(uint64_t addr, uint64_t size, VkSpan *out) {
+static bool cam_patched_eye(uint64_t addr, uint64_t size, int eye, VkSpan *out);
+static bool cam_patched(uint64_t addr, uint64_t size, VkSpan *out) { return cam_patched_eye(addr, size, g_eye, out); }
+static bool cam_patched_eye(uint64_t addr, uint64_t size, int eye, VkSpan *out) {
     static struct { uint64_t addr, size, seq; uint32_t epoch; int8_t eye; bool hit; VkSpan span; } memo[2048];
     static int noshare = -1;
     if (noshare < 0) noshare = getenv("LARECOMP_CAM_PATCH_NOSHARE") != NULL;
     uint64_t seq = vk_pending_seq() + (gcopy_gen << 40), h = (addr * 0x9E3779B97F4A7C15ull) ^ (size * 0xC2B2AE3D27D4EB4Full);
     uint32_t epoch = cam_override_epoch(), slot = (uint32_t)(h ^ (h >> 32)) & 2047;
     if (!noshare && memo[slot].seq == seq && memo[slot].addr == addr && memo[slot].size == size && memo[slot].epoch == epoch &&
-        memo[slot].eye == g_eye) {
+        memo[slot].eye == eye) {
         if (memo[slot].hit) *out = memo[slot].span;
         return memo[slot].hit;
     }
     uint8_t pb[4096];
     bool hit = cam_override_patch((const void *)(uintptr_t)addr, size, pb);
     if (hit) *out = vk_transient_copy(pb, size, 256);
-    memo[slot].addr = addr, memo[slot].size = size, memo[slot].seq = seq, memo[slot].epoch = epoch, memo[slot].eye = (int8_t)g_eye;
+    memo[slot].addr = addr, memo[slot].size = size, memo[slot].seq = seq, memo[slot].epoch = epoch, memo[slot].eye = (int8_t)eye;
     memo[slot].hit = hit, memo[slot].span = hit ? *out : (VkSpan){0};
     return hit;
 }
@@ -1090,8 +1104,33 @@ static uint32_t index_max(const void *src, uint32_t count, uint32_t isz, uint32_
     return m;
 }
 
+static bool mv_passes_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("LARECOMP_MV_PASSES"); on = vk_mv_on() && g_vk.multiview && (!e || atoi(e) != 0); }
+    return on;
+}
+// The bound attachments: 1 all layered (one multiview pass draws both eyes), 0 none twinned, -1 layered and shared
+// ones, a layered one through a view of another layer, or a twin without an eye-1 layer (eye 1 draws it)
+static int mv_rt_kind(void) {
+    int lay = 0, other = 0, twu = 0;
+    for (int i = 0; i < st.rt.ncolor; i++) {
+        NvnTexture *t = st.rt.color[i];
+        if (!t) continue;
+        if (!t->backend) vk_tex(t, true);
+        if (vk_b_layered(t->backend) && !(st.rt.has_cview[i] && (st.rt.cview[i].setmask & 2) && st.rt.cview[i].min_layer)) lay++;
+        else other++, twu += vk_tex_twinned(t);
+    }
+    if (st.rt.depth) {
+        NvnTexture *t = st.rt.depth;
+        if (!t->backend) vk_tex(t, true);
+        if (vk_b_layered(t->backend) && !(st.rt.has_dview && (st.rt.dview.setmask & 2) && st.rt.dview.min_layer)) lay++;
+        else other++, twu += vk_tex_twinned(t);
+    }
+    return lay && !other ? 1 : lay || twu ? -1 : 0;
+}
 static bool eye1_skip_rt(void) {
     if (g_eye != 1) return false;
+    if (g_mv_run && mv_rt_kind() == 1) { st_skipped[0]++; return true; }  // (eye 0's multiview pass drew it)
     bool tw = false, shared = false;
     for (int i = 0; i < st.rt.ncolor; i++)
         if (st.rt.color[i]) { if (vk_tex_twinned(st.rt.color[i])) tw = true; else shared = true; }
@@ -1100,7 +1139,7 @@ static bool eye1_skip_rt(void) {
         st_mixed_logged = true;
         LOG("[stereo] a pass with twinned and shared targets (the shared one is drawn by both eyes; logged once)\n");
     }
-    if (!tw) st_skipped[0]++; else st_ran1++;
+    if (!tw) st_skipped[0]++; else st_ran1++, mvs.eye1_passes += g_mv_run;
     return !tw;
 }
 
@@ -1516,9 +1555,19 @@ static void vk_end_pass_at(int line) {
         static int multi = -1;
         if (multi < 0) multi = getenv("LARECOMP_DEBUG_FRAMES") != NULL;
         if (multi && renderer_present_count() != debug_pass_frame) { debug_pass_frame = renderer_present_count(); debug_pass_no = 0; }
-        if (multi) snprintf(path, sizeof path, "build/pass_%llu_%03d.png", (unsigned long long)debug_pass_frame, debug_pass_no++);
+        if (multi) snprintf(path, sizeof path, "build/pass_%llu_%03d_e%d.png", (unsigned long long)debug_pass_frame, debug_pass_no++, g_eye);
+        else if (g_eye >= 0) snprintf(path, sizeof path, "build/pass_%03d_e%d.png", debug_pass_no++, g_eye);
         else snprintf(path, sizeof path, "build/pass_%03d.png", debug_pass_no++);
+        extern uint32_t vk_debug_save_layer;
+        vk_debug_save_layer = vk_b_layer(st.rt.color[0]->backend);  // (multiview storage: the eye's layer)
+        {
+            const TexBackend *db = st.rt.color[0]->backend;
+            LOG("[dbgpass] %s: %d color, first %ux%u fmt %#x %p (mv2 %d twinned %d layer %u), depth %p (twinned %d)\n", path, st.rt.ncolor,
+                st.rt.color[0]->width, st.rt.color[0]->height, st.rt.color[0]->format, (void *)st.rt.color[0], db->mv2,
+                vk_tex_twinned(st.rt.color[0]), vk_debug_save_layer, (void *)st.rt.depth, st.rt.depth ? vk_tex_twinned(st.rt.depth) : -1);
+        }
         renderer_save_texture_tex(st.rt.color[0]->backend, path);
+        vk_debug_save_layer = 0;
     }
 }
 
@@ -1591,6 +1640,20 @@ static void begin_pass(void) {
     }
     VkRenderingAttachmentInfo ca[8], da = {0}, sa = {0};
     uint32_t w = 0, minw = UINT32_MAX, minh = UINT32_MAX;  // w: first attachment seen
+    pass_view_mask = 0;
+    if (g_mv_run && g_eye == 0) {  // (multiview) both eyes in this pass, or eye 1 runs the list for it
+        int k = mv_rt_kind();
+        if (k == 1) pass_view_mask = 3, mvs.passes++;
+        else if (k < 0) {
+            mv_need_eye1 = true, mvs.other++;
+            static int nlog;
+            NvnTexture *t0 = st.rt.ncolor ? st.rt.color[0] : st.rt.depth;
+            if (nlog++ < 16)
+                LOG("[mv] a pass with twinned and shared attachments (%d color, first %ux%u fmt %#x, depth %s; frame %llu): eye 1 runs the list\n",
+                    st.rt.ncolor, t0 ? t0->width : 0, t0 ? t0->height : 0, t0 ? t0->format : 0, st.rt.depth ? "yes" : "no",
+                    (unsigned long long)renderer_exec_frame());
+        }
+    }
     pass_ncolor = (uint32_t)st.rt.ncolor;
     pass_samples = 1;
     for (int i = 0; i < st.rt.ncolor; i++) {
@@ -1599,7 +1662,8 @@ static void begin_pass(void) {
         pass_color[i] = VK_FORMAT_UNDEFINED;
         if (!t) continue;
         renderer_mark_gpu_owned(t);
-        VkImageView v = vk_view(t, &st.rt.cview[i], st.rt.has_cview[i], true, TEXTYPE_2D);
+        VkImageView v = pass_view_mask ? vk_view_mv(t, &st.rt.cview[i], st.rt.has_cview[i], true)
+                                       : vk_view(t, &st.rt.cview[i], st.rt.has_cview[i], true, TEXTYPE_2D);
         TexBackend *b = t->backend;
         if (!v) continue;
         ca[i].imageView = v;
@@ -1636,7 +1700,8 @@ static void begin_pass(void) {
     bool has_d = false, has_s = false;
     if (st.rt.depth) {
         renderer_mark_gpu_owned(st.rt.depth);
-        VkImageView v = vk_view(st.rt.depth, &st.rt.dview, st.rt.has_dview, true, TEXTYPE_2D);
+        VkImageView v = pass_view_mask ? vk_view_mv(st.rt.depth, &st.rt.dview, st.rt.has_dview, true)
+                                       : vk_view(st.rt.depth, &st.rt.dview, st.rt.has_dview, true, TEXTYPE_2D);
         TexBackend *b = st.rt.depth->backend;
         if (v && renderer_format_is_depth(st.rt.depth->format)) {
             VkRenderingAttachmentInfo a = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = v,
@@ -1679,7 +1744,7 @@ static void begin_pass(void) {
     }
     pass_w = minw; pass_h = minh;
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = 1,
-                          .colorAttachmentCount = pass_ncolor, .pColorAttachments = pass_ncolor ? ca : NULL,
+                          .viewMask = pass_view_mask, .colorAttachmentCount = pass_ncolor, .pColorAttachments = pass_ncolor ? ca : NULL,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
     if (g_eye >= 0 && fov_on()) {  // (VR foveation: eye passes into per-eye scalable targets get a rate / density map)
         bool per_eye = !placed && (pass_ncolor || has_d || has_s);
@@ -1693,7 +1758,7 @@ static void begin_pass(void) {
         if (per_eye && (has_d || has_s)) per_eye = vk_tex_twinned(st.rt.depth) && ((TexBackend *)st.rt.depth->backend)->scalable;
         if (!fb && (has_d || has_s)) fb = st.rt.depth->backend;
         float fx = fb && fb->ax > 0 ? fb->sx / fb->ax : 1, fy = fb && fb->ay > 0 ? fb->sy / fb->ay : 1;
-        ri.pNext = fov_pass(g_eye, per_eye && fb, minw, minh, fx, fy);
+        ri.pNext = fov_pass(pass_view_mask ? 2 : g_eye, per_eye && fb, minw, minh, fx, fy);  // (2: both eyes, multiview)
     }
     // LARECOMP_VK_LOG_PASSES=<n> (default 300 with =1): each of the first n passes before it begins - an Intel crash
     // inside vkCmdBeginRendering (issues #8, #46) ends the log on the pass the driver choked on
@@ -1845,7 +1910,7 @@ static void fullscreen_vertex_bind(VkCommandBuffer cb) {
 static VkPipeline clear_pipeline(int index, int kind, uint32_t mask, bool depth, bool stencil) {
     uint64_t key = 0xcbf29ce484222325ull;
 #define MIX(v) do { uint64_t v_ = (uint64_t)(v); for (int b_ = 0; b_ < 8; b_++) { key ^= (v_ >> (b_ * 8)) & 0xFF; key *= 0x100000001B3ull; } } while (0)
-    MIX(index); MIX(kind); MIX(mask); MIX(depth); MIX(stencil); MIX(pass_ncolor); MIX(pass_depth); MIX(pass_stencil); MIX(pass_samples);
+    MIX(index); MIX(kind); MIX(mask); MIX(depth); MIX(stencil); MIX(pass_view_mask); MIX(pass_ncolor); MIX(pass_depth); MIX(pass_stencil); MIX(pass_samples);
     for (uint32_t i = 0; i < pass_ncolor; i++) MIX(pass_color[i]);
     uint32_t slot = (uint32_t)key & (CLEAR_TAB - 1);
     for (int p = 0; p < CLEAR_TAB; p++, slot = (slot + 1) & (CLEAR_TAB - 1)) {
@@ -1881,7 +1946,7 @@ static VkPipeline clear_pipeline(int index, int kind, uint32_t mask, bool depth,
     VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
                                            .dynamicStateCount = ndyn, .pDynamicStates = dyn};
     VkPipelineRenderingCreateInfo rinfo = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .pNext = fov_pipeline_chain(),
-                                           .colorAttachmentCount = pass_ncolor,
+                                           .viewMask = pass_view_mask, .colorAttachmentCount = pass_ncolor,
                                            .pColorAttachmentFormats = pass_color, .depthAttachmentFormat = pass_depth,
                                            .stencilAttachmentFormat = pass_stencil};
     VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &rinfo, .stageCount = 2,
@@ -2020,6 +2085,8 @@ static VkPipelineLayout make_layout(Prog *p, int nsets, VkShaderStageFlags s0, V
     uint32_t npcr = 0;
     if (!direct && p->vi && p->vi->npush) pcr[npcr++] = (VkPushConstantRange){VK_SHADER_STAGE_VERTEX_BIT, 0, p->vi->npush * 4u};
     if (!direct && p->fi && p->fi->npush) pcr[npcr++] = (VkPushConstantRange){VK_SHADER_STAGE_FRAGMENT_BIT, p->fi->push_base, p->fi->npush * 4u};
+    if (p->vkey.mv && !direct)  // (multiview programs: the per-view cbuf masks, no promoted words)
+        npcr = 1, pcr[0] = (VkPushConstantRange){VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, MV_PUSH_BYTES};
     VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = (uint32_t)nsets,
                                      .pSetLayouts = p->set_layout, .pushConstantRangeCount = direct ? 1 : npcr,
                                      .pPushConstantRanges = direct ? &gd : npcr ? pcr : NULL};
@@ -2451,6 +2518,7 @@ typedef struct {
     uint8_t blend[8][8];
     uint8_t blend_on, a2c, topo_class, poly_fill;
     uint32_t write_mask[8];
+    uint32_t view_mask;  // (multiview) the pass's view mask
 } PipeKey;
 
 typedef struct { PipeKey k; uint64_t hash; VkPipeline pipe; _Atomic int state; } Pipe;  // state: 0 building, 1 ready, 2 failed
@@ -2473,6 +2541,7 @@ struct PipeMemo {
     VkFormat color[8], depth, stencil;
     uint32_t attrib[16], stream[16][2], rt_fmt[8];
     uint8_t blend[8][8], blend_on, a2c, cls, poly_fill;
+    uint32_t view_mask;
     Pipe *pp;
     VtxLayout vl;  // the layout pipe_key_fill made from these inputs (dynamic vertex input leaves it out of pp's key)
 };
@@ -2639,7 +2708,7 @@ static void pipe_ci_fill(PipeCI *c, const PipeKey *k) {
     c->dy = (VkPipelineDynamicStateCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
                                                .dynamicStateCount = NDYN + g_vk.vids, .pDynamicStates = c->dyn};
     c->ri = (VkPipelineRenderingCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .pNext = fov_pipeline_chain(),
-                                            .colorAttachmentCount = k->ncolor,
+                                            .viewMask = k->view_mask, .colorAttachmentCount = k->ncolor,
                                             .pColorAttachmentFormats = k->color, .depthAttachmentFormat = k->depth,
                                             .stencilAttachmentFormat = k->stencil};
     c->pi = (VkGraphicsPipelineCreateInfo){.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &c->ri, .stageCount = 2,
@@ -2700,6 +2769,7 @@ static void set_vertex_input(VkCommandBuffer cb, const VtxLayout *l) {
 // ================================================================== feedback snapshots (renderer.m resolve_feedback)
 static NvnTexture *feedback_tex[4];
 static VkImageView feedback_view[4];
+static VkImageView feedback_view_mv[4];  // (multiview pass: the snapshot's two layers as a 2D array)
 static int nfeedback;
 static uint64_t g_cur_fs_hash;
 static NvnTexture *snap_tex[8];
@@ -2729,7 +2799,7 @@ static bool is_attachment(NvnTexture *t) {
     return false;
 }
 
-static TexBackend *snapshot_image(NvnTexture *t, TexBackend *src) {
+static TexBackend *snapshot_image(NvnTexture *t, TexBackend *src, bool both) {
     Snap *s = NULL;
     for (int i = 0; i < nsnaps; i++) if (snaps[i].key == t) s = &snaps[i];
     if (!s) {
@@ -2737,7 +2807,7 @@ static TexBackend *snapshot_image(NvnTexture *t, TexBackend *src) {
         s->key = t;
     }
     TexBackend *d = &s->copy;
-    if (d->image && (d->width != src->width || d->height != src->height || d->format != src->format)) {
+    if (d->image && (d->width != src->width || d->height != src->height || d->format != src->format || d->mv2 != both)) {
         vk_views_forget(d);  // (resolution change)
         vk_defer_image(d->image, d->mem);
         d->image = VK_NULL_HANDLE;
@@ -2745,13 +2815,14 @@ static TexBackend *snapshot_image(NvnTexture *t, TexBackend *src) {
     }
     if (!d->image) {
         VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = src->format,
-                                .extent = {src->width, src->height, 1}, .mipLevels = 1, .arrayLayers = 1,
+                                .extent = {src->width, src->height, 1}, .mipLevels = 1, .arrayLayers = both ? 2 : 1,
                                 .samples = (VkSampleCountFlagBits)src->samples, .tiling = VK_IMAGE_TILING_OPTIMAL,
                                 .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
         VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &d->image, &d->mem, NULL));
         d->format = src->format; d->width = src->width; d->height = src->height; d->depth = 1; d->layers = 1; d->levels = 1;
         d->samples = src->samples; d->aspect = src->aspect; d->base_type = VK_IMAGE_VIEW_TYPE_2D;
+        d->mv2 = d->mv_tw = both, d->presented = true;  // (both eyes' layers; presented: never taken for a twin)
         vk_image_init_layout(vk_cmd(), d->image, d->aspect);
     }
     return d;
@@ -2985,24 +3056,27 @@ static void resolve_feedback(Prog *pr) {
             for (int k = 0; k < 8; k++) if (snap_tex[k] == t) si = k;
             bool self_write = t == st.rt.depth && st.ds[0] && st.ds[1];
             TexBackend *src = vk_tex(t, true);
+            // (multiview: a twin drawn by a multiview pass is sampled as both eyes' layers - both copied)
+            bool both = g_mv_run && g_eye == 0 && vk_b_layered(src) && mv_rt_kind() == 1;
             Snap *existing = NULL;
-            for (int k = 0; k < nsnaps; k++) if (snaps[k].key == t && snaps[k].copy.image) existing = &snaps[k];
+            for (int k = 0; k < nsnaps; k++) if (snaps[k].key == t && snaps[k].copy.image && snaps[k].copy.mv2 == both) existing = &snaps[k];
             VkImageAspectFlags sa = src->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : src->aspect;
             static const VkComponentMapping id = {0};
             if (!nosnap && si >= 0 && (snap_ok[si] || self_write) && existing) {
                 feedback_tex[nfeedback] = t;
+                feedback_view_mv[nfeedback] = both ? vk_image_view(&existing->copy, VK_IMAGE_VIEW_TYPE_2D_ARRAY, src->format, 0, 1, 0, 2, id, sa) : VK_NULL_HANDLE;
                 feedback_view[nfeedback++] = vk_image_view(&existing->copy, VK_IMAGE_VIEW_TYPE_2D, src->format, 0, 1, 0, 1, id, sa);
                 continue;
             }
             stat_feedback_copies++;
             if (ct_on()) LOG("[ct] snapshot %p %ux%u (was %s, si %d)\n", (void *)t, src->width, src->height, si >= 0 ? snap_why[si] : "new", si);
             vk_end_pass();
-            TexBackend *dst = snapshot_image(t, src);
+            TexBackend *dst = snapshot_image(t, src, both);
             VkCommandBuffer cb = vk_cmd();
             vk_full_barrier(cb);
             gp_mark(cb, "feedback snapshot %ux%u fmt %d", src->width, src->height, src->format);
-            VkImageCopy rg = {.srcSubresource = {src->aspect, 0, 0, 1}, .dstSubresource = {src->aspect, 0, 0, 1},
-                              .extent = {src->width, src->height, 1}};
+            VkImageCopy rg = {.srcSubresource = {src->aspect, 0, both ? 0 : vk_b_layer(src), both ? 2 : 1},
+                              .dstSubresource = {src->aspect, 0, 0, both ? 2 : 1}, .extent = {src->width, src->height, 1}};
             rec_CmdCopyImage(cb, src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
             if (g_debug_frame && (src->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) {
                 static int nd;
@@ -3014,6 +3088,7 @@ static void resolve_feedback(Prog *pr) {
                 cb = vk_cmd();
             }
             feedback_tex[nfeedback] = t;
+            feedback_view_mv[nfeedback] = both ? vk_image_view(dst, VK_IMAGE_VIEW_TYPE_2D_ARRAY, src->format, 0, 1, 0, 2, id, sa) : VK_NULL_HANDLE;
             feedback_view[nfeedback++] = vk_image_view(dst, VK_IMAGE_VIEW_TYPE_2D, src->format, 0, 1, 0, 1, id, sa);
             if (si < 0) { static int rr; si = rr++ & 7; snap_tex[si] = t; }
             snap_ok[si] = true;
@@ -3727,6 +3802,71 @@ static VkSpan drv_dedupe(int stage, uint64_t size) {
     return s;
 }
 
+// (multiview) the range and size cbuf_info binds for constant buffer k >= 3 of a stage. false: nothing bound
+static bool cbuf_range(int stage, const ShaderInfo *si, int k, Range *r, uint64_t *size) {
+    int idx = k - 3;
+    *r = (idx >= 0 && idx < 18) ? st.ubuf[stage][idx] : (Range){0, 0};
+    if (!r->addr) return false;
+    uint64_t sz = si->cbuf_size[k] ? si->cbuf_size[k] : 256;
+    if ((si->cbuf_dynamic & (1u << k)) && r->size) sz = r->size > 0x10000 ? 0x10000 : r->size;
+    if (sz > r->size && r->size) sz = r->size;
+    if (sz < 16) sz = 16;
+    *size = sz;
+    return true;
+}
+// (multiview) eye `eye`'s substitute for a bound range as cbuf_info makes it (the main camera, or a block with its
+// matrices patched); false: not the camera's. Shared by the draws of a submission (as cam_patched).
+static bool cam_sub(int stage, Range r, uint64_t size, int eye, VkSpan *out) {
+    if (!cam_override_active()) return false;
+    bool hit = false;
+    if (size <= 320) {
+        static struct { uint64_t addr, size, seq; uint32_t epoch; int8_t eye; bool hit; VkSpan span; } memo[256];
+        uint64_t seq = vk_pending_seq() + (gcopy_gen << 40), h = (r.addr * 0x9E3779B97F4A7C15ull) ^ (size * 0xC2B2AE3D27D4EB4Full);
+        uint32_t epoch = cam_override_epoch(), slot = (uint32_t)(h ^ (h >> 32)) & 255;
+        if (memo[slot].seq == seq && memo[slot].addr == r.addr && memo[slot].size == size && memo[slot].epoch == epoch && memo[slot].eye == eye) {
+            hit = memo[slot].hit;
+            if (hit) *out = memo[slot].span;
+        } else {
+            uint8_t cb[320];
+            cam_override_set_eye(eye);
+            hit = cam_override_ubo(stage, r.addr, r.size, cb);
+            cam_override_set_eye(g_eye == 1);
+            if (hit) *out = vk_transient_copy(cb, size, 256);
+            memo[slot].addr = r.addr, memo[slot].size = size, memo[slot].seq = seq, memo[slot].epoch = epoch, memo[slot].eye = (int8_t)eye;
+            memo[slot].hit = hit, memo[slot].span = hit ? *out : (VkSpan){0};
+        }
+        if (hit) return true;
+    }
+    if (size <= 4096) {
+        cam_override_set_eye(eye);
+        hit = cam_patched_eye(r.addr, size, eye, out);
+        cam_override_set_eye(g_eye == 1);
+    }
+    return hit;
+}
+// (multiview) the [eye 0 | eye 1] copy of a camera block: eye 1's `rows` rows (16 bytes) after eye 0's
+static bool cam_pair(int stage, Range r, uint64_t size, uint32_t rows, VkDescriptorBufferInfo *out) {
+    uint64_t stride = (uint64_t)rows * 16;
+    if (!rows || size > stride || stride + size > 65536) return false;
+    static struct { uint64_t addr, size, stride, seq; uint32_t epoch; VkSpan span; } memo[256];
+    uint64_t seq = vk_pending_seq() + (gcopy_gen << 40), h = (r.addr * 0x9E3779B97F4A7C15ull) ^ (size * 0xC2B2AE3D27D4EB4Full) ^ stride;
+    uint32_t epoch = cam_override_epoch(), slot = (uint32_t)(h ^ (h >> 32)) & 255;
+    if (memo[slot].seq == seq && memo[slot].addr == r.addr && memo[slot].size == size && memo[slot].stride == stride &&
+        memo[slot].epoch == epoch) {
+        *out = ubo_span(memo[slot].span, stride + size);
+        return true;
+    }
+    VkSpan e0, e1;
+    if (!cam_sub(stage, r, size, 0, &e0) || !cam_sub(stage, r, size, 1, &e1)) return false;
+    VkSpan sp = vk_transient(stride + size, 256);
+    memcpy(sp.ptr, e0.ptr, size);
+    memcpy((uint8_t *)sp.ptr + stride, e1.ptr, size);
+    memo[slot].addr = r.addr, memo[slot].size = size, memo[slot].stride = stride, memo[slot].seq = seq, memo[slot].epoch = epoch;
+    memo[slot].span = sp;
+    *out = ubo_span(sp, stride + size);
+    return true;
+}
+
 // Constant buffer k of a stage (renderer.m bind_cbufs), copied into transient memory.
 static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32_t gx, uint32_t gy, uint32_t gz) {
     static const uint8_t zeros[0x10000];
@@ -3771,6 +3911,10 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
     if ((si->cbuf_dynamic & (1u << k)) && r.size) size = r.size > 0x10000 ? 0x10000 : r.size;
     if (size > r.size && r.size) size = r.size;
     if (size < 16) size = 16;
+    if (g_mvp && stage < 2 && ((g_mv_bits[stage] >> k) & 1)) {  // (multiview: both eyes' copies, eye 1's rows apart)
+        VkDescriptorBufferInfo pb;
+        if (cam_pair(stage, r, size, si->cbuf_mv_rows[k], &pb)) return pb;
+    }
     if (cam_override_active() && size <= 320) {  // (free-camera probe, runtime/nvn/cam_override.c: the main camera's host copy)
         uint8_t cb[320];
         if (cam_override_ubo(stage, r.addr, r.size, cb)) return ubo_span(vk_transient_copy(cb, size, 256), size);
@@ -5766,6 +5910,7 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
     wh[0] = wh[1] = 0;
     fr[0] = fr[1] = 1;
     NvnTexEntry *ent = NULL;  // (shadow slots: what the view came from)
+    bool arr = stage == 1 && i < 24 && ((g_tex_amask >> i) & 1);  // (multiview: both eyes' layers as a 2D array)
     if (h && st.tpool && tic < (uint32_t)st.tpool->count) {
         NvnTexEntry *e = ent = &((NvnTexEntry *)st.tpool->entries)[tic];
         if (g_interp_log) e = ent = (NvnTexEntry *)interp_texentry(stage, i, e, sizeof *e);  // (frame interpolation: the frame's entry)
@@ -5779,21 +5924,23 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
             if (nomemo < 0) nomemo = getenv("LARECOMP_VK_NO_TEX_MEMO") != NULL;
             static struct { NvnTexture *tex; uint64_t vh, frame; uint32_t gen; uint8_t type, has_view; VkImageView view; } memo[1024];
             uint64_t vh = e->has_view ? hash_words(0, &e->view, sizeof e->view) : 0, frame = vk_frame_counter();
-            uint32_t ms = (uint32_t)((((uintptr_t)e->tex >> 4) ^ vh ^ (uint64_t)st_->type * 0x9E3779B97F4A7C15ull) & 1023);
+            uint8_t mtype = (uint8_t)(st_->type | (arr ? 0x80 : 0));
+            uint32_t ms = (uint32_t)((((uintptr_t)e->tex >> 4) ^ vh ^ (uint64_t)mtype * 0x9E3779B97F4A7C15ull) & 1023);
             if (!nomemo && memo[ms].tex == e->tex && memo[ms].vh == vh && memo[ms].frame == frame && memo[ms].gen == vk_view_gen &&
-                memo[ms].type == st_->type && memo[ms].has_view == e->has_view) {
+                memo[ms].type == mtype && memo[ms].has_view == e->has_view) {
                 view = memo[ms].view;
             } else {
-                view = vk_view(naliases ? alias_read(e->tex) : e->tex, &e->view, e->has_view, false, st_->type);
+                view = arr ? vk_view_mv(e->tex, &e->view, e->has_view, false)
+                           : vk_view(naliases ? alias_read(e->tex) : e->tex, &e->view, e->has_view, false, st_->type);
                 memo[ms].tex = e->tex; memo[ms].vh = vh; memo[ms].frame = frame; memo[ms].gen = vk_view_gen;
-                memo[ms].type = (uint8_t)st_->type; memo[ms].has_view = e->has_view; memo[ms].view = view;
+                memo[ms].type = mtype; memo[ms].has_view = e->has_view; memo[ms].view = view;
             }
             renderer_texture_scale(e->tex, &sc[0], &sc[1]);
             renderer_texture_fraction(e->tex, &fr[0], &fr[1]);
             wh[0] = e->tex->width; wh[1] = e->tex->height;
             for (int k = 0; k < nfeedback; k++)
                 if (e->tex == feedback_tex[k] && (st_->type == TEXTYPE_2D || st_->type == TEXTYPE_2D_ARRAY)) {
-                    view = feedback_view[k];
+                    view = arr ? feedback_view_mv[k] : feedback_view[k];
                     if (st_->type == TEXTYPE_2D_ARRAY) view = vk_dummy_view(TEXTYPE_2D_ARRAY);  // (2D snapshot as array: rare)
                 }
         } else if (e->dead_format) {
@@ -5801,7 +5948,8 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
         }
     }
     if (h && st.spool && tsc < (uint32_t)st.spool->count) smp = vk_sampler(&((NvnSamplerDesc *)st.spool->entries)[tsc]);
-    if (st_->shadow)
+    if (arr && !view) view = vk_dummy_view(TEXTYPE_2D_ARRAY);
+    if (st_->shadow && !arr)
         shadow_slot_check(stage, st_, i, h, tic, ent, ent && ent->tex ? (naliases ? alias_read(ent->tex) : ent->tex) : NULL, &view);
     if (!view) view = vk_dummy_view(st_->type);
     if (!smp) smp = vk_default_sampler(true);
@@ -6102,6 +6250,7 @@ static void prep_pipeline(void *arg) {
     const PipeIn in = {r->attrib, r->nattrib, r->stream, r->nstream, r->color, r->channel_mask, r->blend_on, r->blend,
                        r->a2c, r->topo, r->poly_fill};
     pipe_key_fill(&a->pp->k, pr, &in, color, ncolor, depth, stencil, r->samples ? r->samples : 1, NULL);
+    a->pp->k.view_mask = (r->flags & SR_MV) ? 3 : 0;
     uint64_t ph = hash_words(0xcbf29ce484222325ull, &a->pp->k, sizeof a->pp->k);
     if (!ph) ph = 1;
     // Another record makes the same pipeline (with dynamic vertex input: every record differing only in its vertex
@@ -6135,6 +6284,12 @@ bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlo
     vkey.flip_y = fkey.flip_y = (r->flags & SR_FLIP_Y) != 0;
     vkey.depth_minus_one = (r->flags & SR_DEPTH_MINUS_ONE) != 0;
     vkey.flip_x = fkey.flip_x = (r->flags & SR_FLIP_X) != 0;
+    if (r->flags & SR_MVP) {  // (a multiview program, mv_program)
+        if (!g_vk.multiview) return false;
+        vkey.mv = fkey.mv = 1;
+        for (int b = 0; b < 3; b++) vkey.tex_amask[b] = fkey.tex_amask[b] = (uint8_t)(r->mv_amask >> (b * 8));
+    }
+    if ((r->flags & SR_MV) && !g_vk.multiview) return false;
     for (int i = 0; i < r->nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(r->attrib[i] & 0xFF);
     for (int i = 0; i < r->ncolor && i < 8; i++) if (r->color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(r->color[i]);
     uint64_t ck = prog_content_key(r->vs, r->fs, &vkey, &fkey);
@@ -6377,7 +6532,9 @@ static void rec_from_state(ShaderRec *r, bool flip_x, uint32_t mode) {
     r->kind = 'G';
     r->vs = shader_stage_hash(&st.program->stages[0]);
     r->fs = shader_stage_hash(&st.program->stages[1]);
-    r->flags = (nvn_window_origin() == 0 ? SR_FLIP_Y : 0) | (nvn_depth_mode() == 0 ? SR_DEPTH_MINUS_ONE : 0) | (flip_x ? SR_FLIP_X : 0);
+    r->flags = (nvn_window_origin() == 0 ? SR_FLIP_Y : 0) | (nvn_depth_mode() == 0 ? SR_DEPTH_MINUS_ONE : 0) | (flip_x ? SR_FLIP_X : 0) |
+               (pass_view_mask ? SR_MV : 0) | (g_mvp ? SR_MVP : 0);
+    r->mv_amask = g_mvp ? g_tex_amask : 0;
     r->nattrib = (uint8_t)(st.nattrib < 16 ? st.nattrib : 16);
     memcpy(r->attrib, st.attrib, sizeof r->attrib[0] * r->nattrib);
     r->nstream = (uint8_t)(st.nstream < 16 ? st.nstream : 16);
@@ -6752,11 +6909,14 @@ static void stereo_composite(void) {
     st.rt.has_cview[0] = 0;
     memset(&st.rt.cview[0], 0, sizeof st.rt.cview[0]);
     st.rt_dirty = true;
-    g_eye_out_frame[g_eye] = renderer_exec_frame() + 1;
-    g_eye_out_n[g_eye]++;
-    stereo_note_composite(g_eye);  // (the poses this output was rendered with go with it into the layer)
-    g_eye_depth[g_eye] = st_last_depth ? vk_tex(st_last_depth, true) : NULL;
-    memcpy(g_eye_zr[g_eye], st_last_zr, sizeof st_last_zr);
+    if (g_mv_run && g_eye == 1) return;  // (multiview: eye 0's run noted both eyes' outputs)
+    for (int e = g_eye; e <= (g_mv_run ? 1 : g_eye); e++) {  // (multiview: the composite is one pass for both eyes)
+        g_eye_out_frame[e] = renderer_exec_frame() + 1;
+        g_eye_out_n[e]++;
+        stereo_note_composite(e);  // (the poses this output was rendered with go with it into the layer)
+        g_eye_depth[e] = st_last_depth ? vk_tex(st_last_depth, true) : NULL;
+        memcpy(g_eye_zr[e], st_last_zr, sizeof st_last_zr);
+    }
     static uint64_t n[2];
     if (n[g_eye]++ % 600 == 0) LOG("[stereo] eye %d composite #%llu (frame %llu)\n", g_eye, (unsigned long long)n[g_eye], (unsigned long long)renderer_exec_frame());
 }
@@ -7052,8 +7212,60 @@ static bool ring_early(CmdRec *r, bool indexed) {
     }
     return skip;
 }
+// (multiview pass) the program for this draw: the base one when nothing it reads differs per eye, else its multiview
+// variant (ShaderKey.mv: per-view cbufs, both eyes' layers of the twins it samples). Sets g_mv_bits, g_tex_amask and
+// g_mvp. NULL: the variant is still building (the draw is skipped, as any first use).
+static Prog *mv_program(Prog *pr, const ShaderKey *vkey, const ShaderKey *fkey) {
+    uint32_t amask = 0, bits[2] = {0, 0};
+    for (int i = 0; i < pr->fi->ntex; i++) {
+        NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
+        if (!t || !vk_b_layered(t->backend)) continue;
+        if (i < 24 && pr->fi->tex[i].type == TEXTYPE_2D && !pr->fi->tex[i].is_image) amask |= 1u << i;
+        else if (mvs.bad_tex++ < 8)
+            LOG("[mv] fragment texture %d (type %d) is a twin a multiview program can't sample per eye: eye 0's in both\n", i, pr->fi->tex[i].type);
+    }
+    for (int i = 0; i < pr->vi->ntex; i++) {
+        NvnTexture *t = shader_texture_object(0, &pr->vi->tex[i]);
+        if (t && vk_b_layered(t->backend) && mvs.bad_tex++ < 8) LOG("[mv] a vertex shader samples a twin: eye 0's in both\n");
+    }
+    if (cam_override_active())
+        for (int sg = 0; sg < 2; sg++) {
+            const ShaderInfo *si = sg ? pr->fi : pr->vi;
+            for (int k = 3; k < 18; k++) {
+                if (!((si->cbuf_mask >> k) & 1)) continue;
+                Range r;
+                uint64_t size;
+                VkSpan sp;
+                if (!cbuf_range(sg, si, k, &r, &size) || !cam_sub(sg, r, size, 0, &sp)) continue;
+                uint64_t stride = (uint64_t)si->cbuf_mv_rows[k] * 16;
+                if (!stride || size > stride || stride + size > 65536) {
+                    if (mvs.bad_cb++ < 8) LOG("[mv] camera block cbuf %d (stage %d, %llu bytes) can't take a second eye's copy\n", k, sg, (unsigned long long)size);
+                    continue;
+                }
+                bits[sg] |= 1u << k;
+            }
+        }
+    if (!amask && !bits[0] && !bits[1]) { mvs.baseprog++; return pr; }
+    ShaderKey vk2 = *vkey, fk2 = *fkey;
+    vk2.mv = fk2.mv = 1;
+    for (int b = 0; b < 3; b++) vk2.tex_amask[b] = fk2.tex_amask[b] = (uint8_t)(amask >> (b * 8));
+    Prog *mp = get_program(st.program, &vk2, &fk2);
+    int ps = mp ? atomic_load(&mp->state) : 2;
+    if (ps == 2) {
+        static int nlog;
+        if (nlog++ < 8) LOG("[mv] a multiview program failed (%s): the base one, eye 0's view in both\n", mp && mp->fi ? mp->fi->error : "?");
+        mvs.baseprog++;
+        return pr;
+    }
+    if (ps != 1) { mvs.building++; return NULL; }
+    g_mv_bits[0] = bits[0], g_mv_bits[1] = bits[1], g_tex_amask = amask, g_mvp = true;
+    mvs.mvprog++;
+    return mp;
+}
+
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
+    g_mvp = false, g_tex_amask = 0, g_mv_bits[0] = g_mv_bits[1] = 0;
     if (!st.program) { SKIP(SK_NO_PROGRAM); return; }
     if (ring_early(r, indexed)) { SKIP(SK_RING); return; }  // (lane ring: a ring draw in a depth-only pass)
     ShaderKey vkey = {0}, fkey = {0};
@@ -7200,6 +7412,11 @@ static void draw_(CmdRec *r, bool indexed) {
         if (st.rt.color[i] && ((st.channel_mask >> (i * 4)) & 0xF)) snapshots_invalidate(st.rt.color[i]);
     begin_pass();
     VkCommandBuffer cb = vk_cmd();
+    if (pass_view_mask) {  // (multiview pass: the program that draws both eyes right)
+        Prog *mp = mv_program(pr, &vkey, &fkey);
+        if (!mp) { SKIP(SK_PROG_BUILDING); return; }
+        pr = mp;
+    }
 
     uint32_t mode = (uint32_t)r->x[0];
     VkPrimitiveTopology topo;
@@ -7223,7 +7440,7 @@ static void draw_(CmdRec *r, bool indexed) {
     PipeKey k;
     VtxLayout vl;  // the draw's vertex layout (on a memo hit: the memo's, made from the same inputs)
     Pipe *pp;
-    if (pm && pm->pp && pm->gen == key_gen && pm->ncolor == pass_ncolor && pm->samples == pass_samples && pm->depth == pass_depth &&
+    if (pm && pm->pp && pm->gen == key_gen && pm->view_mask == pass_view_mask && pm->ncolor == pass_ncolor && pm->samples == pass_samples && pm->depth == pass_depth &&
         pm->stencil == pass_stencil && pm->nattrib == st.nattrib && pm->nstream == st.nstream && pm->channel_mask == in.channel_mask &&
         pm->blend_on == in.blend_on && pm->a2c == in.a2c && pm->cls == in.topo_class && pm->poly_fill == in.poly_fill &&
         !memcmp(pm->color, pass_color, npc * sizeof pass_color[0]) && !memcmp(pm->rt_fmt, rt_fmt, sizeof rt_fmt) &&
@@ -7234,6 +7451,7 @@ static void draw_(CmdRec *r, bool indexed) {
         vl = pm->vl;  // (the key leaves the layout out with dynamic vertex input: kept with the memo)
     } else {
         pipe_key_fill(&k, pr, &in, pass_color, pass_ncolor, pass_depth, pass_stencil, pass_samples, &vl);
+        k.view_mask = pass_view_mask;
         uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
         if (!ph) ph = 1;
         uint32_t pslot = (uint32_t)(ph ^ (ph >> 29)) & (PIPE_TAB - 1);
@@ -7263,7 +7481,7 @@ static void draw_(CmdRec *r, bool indexed) {
             pipe_tab[pslot].pipe = pp;
         }
         if (pm) {
-            pm->gen = key_gen; pm->ncolor = pass_ncolor; pm->samples = pass_samples; pm->depth = pass_depth; pm->stencil = pass_stencil;
+            pm->gen = key_gen; pm->view_mask = pass_view_mask; pm->ncolor = pass_ncolor; pm->samples = pass_samples; pm->depth = pass_depth; pm->stencil = pass_stencil;
             pm->nattrib = st.nattrib; pm->nstream = st.nstream; pm->channel_mask = in.channel_mask; pm->blend_on = in.blend_on;
             pm->a2c = in.a2c; pm->cls = in.topo_class; pm->poly_fill = in.poly_fill;
             memcpy(pm->color, pass_color, sizeof pm->color); memcpy(pm->rt_fmt, rt_fmt, sizeof pm->rt_fmt);
@@ -7551,6 +7769,8 @@ static void draw_(CmdRec *r, bool indexed) {
         rec_CmdPushConstants(cb, pr->layout, sg ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT, si->push_base,
                              si->npush * 4u, pw);
     }
+    if (g_mvp)  // (multiview program: which cbufs have both eyes' copies)
+        rec_CmdPushConstants(cb, pr->layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, MV_PUSH_BYTES, g_mv_bits);
     if (gc_shift && (pr->vi->uses_gmem || pr->fi->uses_gmem))
         gmem_chunk_bind(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, GMEM_CHUNK_SET(STAGE_FRAGMENT),
                         (pr->vi->uses_gmem ? 1u << STAGE_VERTEX : 0) | (pr->fi->uses_gmem ? 1u << STAGE_FRAGMENT : 0));
@@ -7791,7 +8011,7 @@ static void copy_buffer_to_texture(uint64_t src, const TexRefRec *dst) {
         }
     VkBufferImageCopy c = {.bufferOffset = s.off, .bufferRowLength = wb * fi->bw, .bufferImageHeight = hb * fi->bh,
                            .imageSubresource = {b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : b->aspect,
-                                                (uint32_t)level, array ? (uint32_t)rg[2] : 0, array ? nz : 1},
+                                                (uint32_t)level, array ? (uint32_t)rg[2] : vk_b_layer(b), array ? nz : 1},
                            .imageOffset = {rg[0], rg[1], array ? 0 : rg[2]},
                            .imageExtent = {(uint32_t)rg[3], (uint32_t)rg[4], array ? 1 : nz}};
     rec_CmdCopyBufferToImage(cb, s.buf, b->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
@@ -7823,7 +8043,7 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
         VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &srcimg, &small_mem, NULL));
         vk_image_init_layout(cb, srcimg, VK_IMAGE_ASPECT_COLOR_BIT);
-        VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)lroundf(t->width * tsx), (int32_t)lroundf(t->height * tsy), 1}},  // (the contents)
+        VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, vk_b_layer(b), 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)lroundf(t->width * tsx), (int32_t)lroundf(t->height * tsy), 1}},  // (the contents)
                           .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {(int32_t)t->width, (int32_t)t->height, 1}}};
         rec_CmdBlitImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, srcimg, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
         vk_full_barrier(cb);
@@ -7835,7 +8055,7 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     VkBufferImageCopy c = {.bufferOffset = out.off, .bufferRowLength = (uint32_t)(row / fi->bpb) * fi->bw,
                            .bufferImageHeight = (uint32_t)(img / row) * fi->bh,
                            .imageSubresource = {b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : b->aspect,
-                                                (uint32_t)level, array ? (uint32_t)rg[2] : 0, array ? nz : 1},
+                                                (uint32_t)level, array ? (uint32_t)rg[2] : srcimg == b->image ? vk_b_layer(b) : 0, array ? nz : 1},
                            .imageOffset = {rg[0], rg[1], array ? 0 : rg[2]},
                            .imageExtent = {(uint32_t)rg[3], (uint32_t)rg[4], array ? 1 : nz}};
     rec_CmdCopyImageToBuffer(cb, srcimg, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
@@ -7973,6 +8193,7 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     uint32_t sly = src->has_view && (src->view.setmask & 2) ? src->view.min_layer : 0;
     uint32_t dly = dst->has_view && (dst->view.setmask & 2) ? dst->view.min_layer : 0;
     if (slv >= s->levels || dlv >= d->levels || sly >= s->layers || dly >= d->layers) return;
+    sly += vk_b_layer(s), dly += vk_b_layer(d);  // (multiview storage: the eye's layer of a twin)
     {   // whole-image regions are the contents' extent in the level, and every region stays inside its level: scaled
         // allocations (internal resolution below 1x) round guest regions past the edge, and out-of-bounds copies /
         // blits are undefined in Vulkan (garbage that changed every frame on NVIDIA: flicker in the depth pyramid's
@@ -8057,7 +8278,12 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
 // (VR pass diet) the whole of src into dst, both twinned scene-sized targets of one format (vr_diet.c)
 static void diet_copy(NvnTexture *src, NvnTexture *dst) {
     TexRefRec s = {.tex = (uint64_t)(uintptr_t)src}, d = {.tex = (uint64_t)(uintptr_t)dst};
-    copy_texture(&s, &d, 0);
+    int nl = g_mv_run && g_eye == 0 && dst && vk_b_layered(dst->backend) ? 2 : 1;  // (multiview run: both layers)
+    for (int l = 0; l < nl; l++) {
+        if (nl == 2) vk_eye_layer = l;
+        copy_texture(&s, &d, 0);
+    }
+    if (nl == 2) vk_eye_layer = 0;
 }
 
 // ================================================================== present helpers (device.c)
@@ -8229,12 +8455,15 @@ static VkPipeline present_pipeline_ex(VkFormat fmt, bool rcas) {
 static VkPipeline present_pipeline(VkFormat fmt) { return present_pipeline_ex(fmt, false); }
 
 // Scanout shows the bytes the game wrote: sRGB images are read through a UNORM view (no decode), like metal.m.
-static VkImageView raw_view(TexBackend *b) {
+static VkImageView raw_view_layer(TexBackend *b, uint32_t layer) {
     VkFormat f = b->format == VK_FORMAT_R8G8B8A8_SRGB ? VK_FORMAT_R8G8B8A8_UNORM
                : b->format == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_B8G8R8A8_UNORM : b->format;
     static const VkComponentMapping id = {0};
-    return vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, f, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
+    return vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, f, 0, 1, layer, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
 }
+static VkImageView raw_view(TexBackend *b) { return raw_view_layer(b, 0); }
+uint32_t vk_debug_save_layer;  // (vk_stereo_dump, the debug frame's pass dumps: the layer renderer_save_texture_tex reads)
+#define save_layer vk_debug_save_layer
 
 // ---- post passes (Video tab "Anti-aliasing" / "Upscaler"): SMAA 1x at the game image's size, then AMD FSR 1 (EASU
 // upscale to the image's size in the window, RCAS sharpen) when it is smaller than its place in the window, as
@@ -8696,7 +8925,7 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
     rec_CmdBeginRendering(cb, &ri);
     VkPipeline p = present_pipeline(VK_FORMAT_R8G8B8A8_UNORM);
     VkDescriptorSet ds = vk_alloc_set(present_set_layout);
-    VkDescriptorImageInfo ii = {vk_default_sampler(true), raw_view(b), VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo ii = {vk_default_sampler(true), raw_view_layer(b, save_layer), VK_IMAGE_LAYOUT_GENERAL};
     VkWriteDescriptorSet wr = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,
                                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
     rec_UpdateDescriptorSets(1, &wr);
@@ -8833,7 +9062,8 @@ static void exec_list(uint64_t handle, int depth) {
             // ClearTexture(cmd, texture, view, region, color, mask): a render-target clear of the texture alone (renderer.m)
             const struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; float color[4]; } *ct = x;
             NvnTexture *t = (NvnTexture *)(uintptr_t)ct->tex;
-            if (!t || (g_eye == 1 && !vk_tex_twinned(t))) break;
+            if (!t || (g_eye == 1 && (!vk_tex_twinned(t) || (g_mv_run && vk_b_layered(t->backend))))) break;  // (mv: eye 0 did both)
+            if (g_eye == 0 && g_mv_run && vk_tex_twinned(t) && !vk_b_layered(t->backend)) mv_need_eye1 = true;
             snap_reason = "clear-texture"; snapshots_invalidate(NULL);
             alias_before_write(t, 0, "clear");
             RtState saved = st.rt;
@@ -8944,9 +9174,11 @@ static void exec_list(uint64_t handle, int depth) {
                 VkCommandBuffer cb = vk_cmd();  // (first: may begin the buffer, which resets the slot's queries)
                 CounterQ *q = &cq[cur_sub];
                 pthread_mutex_lock(&cq_lock);
-                if (q->pool && q->n < CQ_MAX) {
+                bool two = in_pass && pass_view_mask;  // (in a multiview pass a timestamp writes one query per view)
+                if (q->pool && q->n + two < CQ_MAX) {
                     rec_CmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, q->pool, q->n);
                     q->out[q->n++] = out;
+                    if (two) q->out[q->n++] = out;
                 }
                 pthread_mutex_unlock(&cq_lock);
             }
@@ -8955,7 +9187,18 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_COPY_TEXTURE_TO_TEXTURE: case CMD_DOWNSAMPLE: case CMD_COPY_BUFFER_TO_TEXTURE: {
             const TexRefRec *t = x;
             const TexRefRec *dst = r->op == CMD_COPY_BUFFER_TO_TEXTURE ? &t[0] : &t[1];
-            if (g_eye == 1 && !vk_tex_twinned((NvnTexture *)(uintptr_t)dst->tex)) { st_skipped[1]++; break; }  // (stereo: shared)
+            if (g_debug_frame) {
+                NvnTexture *s_ = r->op == CMD_COPY_BUFFER_TO_TEXTURE ? NULL : (NvnTexture *)(uintptr_t)t[0].tex, *d_ = (NvnTexture *)(uintptr_t)dst->tex;
+                LOG("[dbgcopy] e%d op %d %p (%ux%u tw %d) -> %p (%ux%u fmt %#x tw %d)\n", g_eye, r->op, (void *)s_, s_ ? s_->width : 0,
+                    s_ ? s_->height : 0, s_ ? vk_tex_twinned(s_) : -1, (void *)d_, d_ ? d_->width : 0, d_ ? d_->height : 0,
+                    d_ ? d_->format : 0, d_ ? vk_tex_twinned(d_) : -1);
+            }
+            {
+                NvnTexture *d_ = (NvnTexture *)(uintptr_t)dst->tex;
+                bool tw = vk_tex_twinned(d_), lay = d_ && vk_b_layered(d_->backend);
+                if (g_eye == 1 && (!tw || (g_mv_run && lay))) { st_skipped[1]++; break; }  // (stereo: shared; mv: eye 0 did both layers)
+                if (g_eye == 0 && g_mv_run && tw && !lay) mv_need_eye1 = true;  // (a twin without an eye-1 layer: eye 1 copies)
+            }
             if (g_eye == 0 && r->op != CMD_COPY_BUFFER_TO_TEXTURE && !vk_tex_twinned((NvnTexture *)(uintptr_t)dst->tex) &&
                 vk_tex_twinned((NvnTexture *)(uintptr_t)t[0].tex)) {
                 // (a shared target made from a twin: eye 1 would see eye 0's) the destination is twinned from now on, so
@@ -8968,9 +9211,18 @@ static void exec_list(uint64_t handle, int depth) {
                                   d_->width, d_->height, d_->format, (unsigned long long)renderer_exec_frame(),
                                   added ? "twinned from now on" : "not twinnable: eye 1 gets eye 0's");
             }
-            if (r->op == CMD_COPY_TEXTURE_TO_TEXTURE) copy_texture(&t[0], &t[1], r->x[6]);
-            else if (r->op == CMD_DOWNSAMPLE) copy_texture(&t[0], &t[1], 1);
-            else copy_buffer_to_texture(r->x[0], x);
+            {   // (multiview run: into both layers of a twin)
+                NvnTexture *d_ = (NvnTexture *)(uintptr_t)dst->tex;
+                int nl = g_mv_run && g_eye == 0 && d_ && vk_b_layered(d_->backend) ? 2 : 1;
+                mvs.copies += nl == 2;
+                for (int l = 0; l < nl; l++) {
+                    if (nl == 2) vk_eye_layer = l;
+                    if (r->op == CMD_COPY_TEXTURE_TO_TEXTURE) copy_texture(&t[0], &t[1], r->x[6]);
+                    else if (r->op == CMD_DOWNSAMPLE) copy_texture(&t[0], &t[1], 1);
+                    else copy_buffer_to_texture(r->x[0], x);
+                }
+                if (nl == 2) vk_eye_layer = 0;
+            }
             break;
         }
         case CMD_COPY_TEXTURE_TO_BUFFER: if (!g_interp_replaying && g_eye != 1) copy_texture_to_buffer(x, r->x[3]); break;
@@ -9098,6 +9350,14 @@ static void stereo_note_cpu(uint64_t ns0, uint64_t ns1) {
     }
 }
 
+// (multiview storage) the twins' layer that views and copies take from now on
+static void mv_layer(int l) {
+    extern uint32_t vk_view_gen;
+    vk_eye_layer = l;
+    vk_view_gen++;  // (the texture memo and cached sets hold the other layer's views)
+    snap_reason = "eye layer"; snapshots_invalidate(NULL);
+}
+
 static void stereo_execute(uint64_t handle) {
     static bool cams;
     if (!cams) { cams = true; stereo_cameras_init(); }
@@ -9107,24 +9367,53 @@ static void stereo_execute(uint64_t handle) {
     idx_memo_gen++;
     g_eye = 0;
     cam_override_set_eye(0);
+    if (vk_mv_on()) vk_mv_latch();  // (multiview storage: the candidates' eye-1 layers from now on)
+    g_mv_run = mv_passes_on();  // (multiview: one run draws both eyes; eye 1 runs only for the passes that can't)
+    mv_need_eye1 = false;
     uint64_t t0 = plat_now_ns();
     uint32_t q = st_ts_begin();
     exec_list(handle, 0);
     vk_end_pass();
     st_ts_end(q, 0);
+    if (g_mv_run) {
+        if (mv_need_eye1) mvs.lists2++; else mvs.lists1++;
+        static uint64_t t_log;
+        uint64_t now = plat_now_ns();
+        if (now - t_log > 5000000000ull) {
+            t_log = now;
+            LOG("[mv] 5 s: lists %llu one run, %llu with eye 1's; passes %llu multiview, %llu twinned+shared (eye 1 drew %llu); "
+                "%llu copies into both layers; draws: %llu multiview programs, %llu base, %llu skipped (building); "
+                "not per eye: %llu textures, %llu blocks\n",
+                (unsigned long long)mvs.lists1, (unsigned long long)mvs.lists2, (unsigned long long)mvs.passes,
+                (unsigned long long)mvs.other, (unsigned long long)mvs.eye1_passes, (unsigned long long)mvs.copies,
+                (unsigned long long)mvs.mvprog, (unsigned long long)mvs.baseprog, (unsigned long long)mvs.building,
+                (unsigned long long)mvs.bad_tex, (unsigned long long)mvs.bad_cb);
+            uint64_t bt = mvs.bad_tex, bc = mvs.bad_cb;
+            memset(&mvs, 0, sizeof mvs);
+            mvs.bad_tex = bt, mvs.bad_cb = bc;  // (their logs stay limited)
+        }
+        if (!mv_need_eye1) {  // (both eyes drawn: eye 0's memory writes stand, the fences are done after this submission)
+            stereo_note_cpu(plat_now_ns() - t0, 0);
+            goto done;
+        }
+    }
     gw_restore();
     uint64_t t1 = plat_now_ns();
     st = start;
     st.rt_dirty = true;
     g_eye = 1;
     cam_override_set_eye(1);
-    vk_stereo_swap(true);
+    if (vk_mv_on()) vk_mv_latch(), mv_layer(1);  // (multiview storage: eye 1's layer of the twins)
+    else vk_stereo_swap(true);
     q = st_ts_begin();
     exec_list(handle, 0);
     vk_end_pass();
     st_ts_end(q, 1);
-    vk_stereo_swap(false);
+    if (vk_mv_on()) mv_layer(0);
+    else vk_stereo_swap(false);
     stereo_note_cpu(t1 - t0, plat_now_ns() - t1);
+done:
+    g_mv_run = false;
     g_eye = -1;
     cam_override_set_eye(0);
     st.rt_dirty = true;
@@ -9146,11 +9435,14 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
     int drawn = 0;
     for (int eye = 0; eye < 2; eye++) {
         TexBackend *b = g_eye_out.backend;
-        if (eye == 1) b = b->twin;
+        bool lay = vk_b_layered(b);  // (multiview storage: eye 1 is layer 1)
+        if (eye == 1 && !lay) b = b->twin;
         if (!b || !b->image || !g_eye_out_frame[eye]) continue;
+        uint32_t ly = lay ? (uint32_t)eye : 0;
         if (g_eye_posted[eye] != g_eye_out_n[eye]) {  // (a new output: the eye post hook, once)
             g_eye_posted[eye] = g_eye_out_n[eye];
             StereoEyePost ep = {.eye = eye, .cb = cb, .color = b, .depth = g_eye_depth[eye], .width = b->width, .height = b->height,
+                                .layer = ly, .depth_layer = vk_b_layered(g_eye_depth[eye]) ? (uint32_t)eye : 0,
                                 .ax = b->scalable && b->ax > 0 ? b->sx / b->ax : 1, .ay = b->scalable && b->ay > 0 ? b->sy / b->ay : 1,
                                 .zn = g_eye_zr[eye][0], .zf = g_eye_zr[eye][1]};
             ep.have_matrices = stereo_eye_matrices(eye, ep.V, ep.P);
@@ -9175,7 +9467,7 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
         rec_CmdSetScissor(cb, 0, 1, &sc);
         VkPipeline p = present_pipeline_ex(fmt, false);
         VkDescriptorSet ds = vk_alloc_set(present_set_layout);
-        VkDescriptorImageInfo ii = {vk_default_sampler(true), raw_view(b), VK_IMAGE_LAYOUT_GENERAL};
+        VkDescriptorImageInfo ii = {vk_default_sampler(true), raw_view_layer(b, ly), VK_IMAGE_LAYOUT_GENERAL};
         VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,
                                   .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
         rec_UpdateDescriptorSets(1, &w);
@@ -9203,10 +9495,14 @@ void vk_stereo_dump(const char *dir, uint64_t frame) {
     if (!g_eye_out_ok || !g_eye_out.backend) return;
     char p[512];
     for (int e = 0; e < 2; e++) {
-        TexBackend *b = e ? ((TexBackend *)g_eye_out.backend)->twin : g_eye_out.backend;
+        TexBackend *b = g_eye_out.backend;
+        bool lay = vk_b_layered(b);
+        if (e && !lay) b = b->twin;
         if (!b) continue;
         snprintf(p, sizeof p, "%s/stereo_%05llu_eye%d.png", dir, (unsigned long long)frame, e);
+        save_layer = lay ? (uint32_t)e : 0;
         renderer_save_texture_tex(b, p);
+        save_layer = 0;
     }
     if (g_hud_ok && g_hud.backend) {
         snprintf(p, sizeof p, "%s/stereo_%05llu_hud.png", dir, (unsigned long long)frame);

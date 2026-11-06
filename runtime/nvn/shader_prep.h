@@ -23,7 +23,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-enum { SR_FLIP_Y = 1, SR_DEPTH_MINUS_ONE = 2, SR_FLIP_X = 4 };
+enum { SR_FLIP_Y = 1, SR_DEPTH_MINUS_ONE = 2, SR_FLIP_X = 4, SR_MV = 8, SR_MVP = 16 };  // (MV: a multiview pass's pipeline, MVP: its multiview program)
 
 typedef struct {
     char kind;               // 'G' graphics pipeline, 'C' compute program
@@ -43,6 +43,7 @@ typedef struct {
     uint8_t topo;            // primitive class: 0 points, 1 lines, 2 triangles
     uint8_t poly_fill;       // filled polygons (0: lines)
     uint32_t local[3];       // compute: local size
+    uint32_t mv_amask;       // (SR_MVP) fragment textures sampled as both eyes' layers (ShaderKey.tex_amask)
 } ShaderRec;
 
 // The record's text form (one line, no newline) and back

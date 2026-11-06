@@ -11,6 +11,7 @@
 #include "../interp.h"
 #include "vk.h"
 #include "record.h"
+#include "stereo.h"
 #include "../astc.h"
 #include "../tex_hash.h"
 #include "../renderer.h"
@@ -303,6 +304,17 @@ void vk_collect_dead(void) {
     ndead = k;
 }
 
+// ---- multiview storage (LARECOMP_MV=1; docs/af/STEREO.md "Multiview"): a twin candidate's image gets a second layer,
+// eye 1's, instead of a second image (vk_stereo_swap's twins). vk_eye_layer: the layer single-layer views take.
+int vk_eye_layer;
+static bool g_mk_mv2;  // (vk_stereo_twin_add) the image being made is a twin from the start
+bool vk_mv_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("LARECOMP_MV"); on = e && atoi(e) > 0 && stereo_wanted(); }
+    return on;
+}
+static bool twin_candidate(const NvnTexture *t, const TexBackend *b);
+extern uint32_t vk_view_gen;
 // The sRGB / UNORM counterpart of a colour format (VK_FORMAT_UNDEFINED: none). (g_vk.lean_usage format lists)
 static VkFormat srgb_twin(VkFormat f) {
     switch (f) {
@@ -403,9 +415,13 @@ static void create_image(NvnTexture *t, TexBackend *b) {
         if (b->nview_fmt == 1) flags &= ~VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
         else fl.viewFormatCount = 2, fl.pViewFormats = b->view_fmt;
     }
+    // (multiview storage) the eye-1 layer of a twin candidate (a 16:9 or guest-sized AO render target), or of a texture
+    // that becomes a twin (vk_stereo_twin_add)
+    bool mv2 = vk_mv_on() && type == VK_IMAGE_TYPE_2D && layers == 1 && samples == 1 && depth == 1 &&
+               (g_mk_mv2 || b->mv_tw || (!b->presented && twin_candidate(t, b)));
     VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .pNext = fl.viewFormatCount ? &fl : NULL,
                             .flags = flags, .imageType = type, .format = vf,
-                            .extent = {tw, th, depth}, .mipLevels = levels, .arrayLayers = layers,
+                            .extent = {tw, th, depth}, .mipLevels = levels, .arrayLayers = mv2 ? 2 : layers,
                             .samples = (VkSampleCountFlagBits)samples, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage,
                             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
@@ -427,6 +443,7 @@ static void create_image(NvnTexture *t, TexBackend *b) {
         VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL));
         depthfmt = false;
     }
+    b->mv2 = mv2 && ci.arrayLayers == 2;
     b->format = vf;
     b->width = tw; b->height = th; b->depth = depth; b->layers = layers; b->levels = levels; b->samples = samples;
     b->aspect = depthfmt ? aspect_of(t->format) : VK_IMAGE_ASPECT_COLOR_BIT;
@@ -532,6 +549,54 @@ static int g_ntwinit;
 bool vk_stereo_twin_add(NvnTexture *t) {
     TexBackend *b = t ? t->backend : NULL;
     if (!b || b->twin || b->is_twin || b->presented || !b->image) return false;
+    if (vk_mv_on()) {  // (multiview storage) the image again with two layers, both holding the old contents
+        if (b->mv_tw) return false;
+        if (b->mv2) {  // (made layered at creation, a candidate not latched yet: eye 1's layer starts as eye 0's)
+            b->mv_tw = true;
+            VkCommandBuffer cb = vk_cmd();
+            vk_full_barrier(cb);
+            VkImageCopy c[16];
+            uint32_t n = 0;
+            for (uint32_t lv = 0; lv < b->levels && lv < 16; lv++)
+                c[n++] = (VkImageCopy){.srcSubresource = {b->aspect, lv, 0, 1}, .dstSubresource = {b->aspect, lv, 1, 1},
+                                       .extent = {level_w(b, lv), level_h(b, lv), 1}};
+            rec_CmdCopyImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, b->image, VK_IMAGE_LAYOUT_GENERAL, n, c);
+            vk_full_barrier(cb);
+            vk_view_gen++;
+            return true;
+        }
+        if (b->layers != 1 || b->depth != 1 || b->samples != 1 || b->astc_bw ||
+            (b->base_type != VK_IMAGE_VIEW_TYPE_2D && b->base_type != VK_IMAGE_VIEW_TYPE_2D_ARRAY)) {
+            static int nlog;
+            if (nlog++ < 16) LOG("[mv] twin add %ux%u fmt %#x refused: mv2 %d layers %u depth %u samples %u type %d\n", t->width, t->height,
+                                 t->format, b->mv2, b->layers, b->depth, b->samples, b->base_type);
+            return false;
+        }
+        TexBackend old = *b;
+        views_forget(b);
+        g_mk_mv2 = true;
+        create_image(t, b);
+        g_mk_mv2 = false;
+        if (!b->mv2 || b->width != old.width || b->height != old.height || b->levels != old.levels) {
+            LOG("[mv] twin add %ux%u fmt %#x: the image could not be made layered (mv2 %d)\n", t->width, t->height, t->format, b->mv2);
+            // (not made layered: keep the new image, the old contents are lost as with any re-creation)
+            defer((Dead){.img = old.image, .mem = old.mem});
+            return b->mv2;
+        }
+        VkCommandBuffer cb = vk_cmd();
+        vk_full_barrier(cb);
+        VkImageCopy c[2 * 16];
+        uint32_t n = 0;
+        for (uint32_t lv = 0; lv < old.levels && lv < 16; lv++)
+            for (uint32_t ly = 0; ly < 2; ly++)
+                c[n++] = (VkImageCopy){.srcSubresource = {old.aspect, lv, 0, 1}, .dstSubresource = {b->aspect, lv, ly, 1},
+                                       .extent = {level_w(&old, lv), level_h(&old, lv), 1}};
+        rec_CmdCopyImage(cb, old.image, VK_IMAGE_LAYOUT_GENERAL, b->image, VK_IMAGE_LAYOUT_GENERAL, n, c);
+        vk_full_barrier(cb);
+        defer((Dead){.img = old.image, .mem = old.mem});
+        b->mv_tw = true;
+        return true;
+    }
     for (int i = 0; i < g_ntwc; i++) if (g_twc[i] == t) return false;
     twc_add(t);
     if (g_ntwinit < 64) g_twinit[g_ntwinit++] = t;
@@ -557,6 +622,25 @@ static void twc_remove(NvnTexture *t) {
 }
 
 extern uint32_t vk_view_gen;
+void vk_mv_latch(void) {
+    static int made;
+    for (int i = 0; i < g_ntwc; i++) {
+        TexBackend *b = g_twc[i]->backend;
+        if (!b || b->mv_tw || b->presented || !b->image) continue;
+        if (!b->mv2) {
+            static int nlog;
+            if (nlog++ < 16) LOG("[mv] candidate %ux%u fmt %#x has no eye-1 layer (layers %u depth %u samples %u): shared\n",
+                                 g_twc[i]->width, g_twc[i]->height, g_twc[i]->format, b->layers, b->depth, b->samples);
+            b->mv_tw = false;
+            continue;
+        }
+        b->mv_tw = true;
+        vk_view_gen++;
+        if (made++ < 64)
+            LOG("[mv] twin %ux%u fmt %#x (image %ux%u%s, layer 1)\n", g_twc[i]->width, g_twc[i]->height, g_twc[i]->format, b->width,
+                b->height, b->scalable ? "" : ", guest-sized AO");
+    }
+}
 int vk_stereo_swap(bool eye1) {
     vk_view_gen++;  // (exec.c's texture-view memos and cached sets name eye 0's views: not valid across the switch)
     if (!eye1) {
@@ -1018,7 +1102,17 @@ static bool vk_view_compatible(VkFormat image, VkFormat view) {
 
 // render: attachment view (one level, one layer). Otherwise a sampled view of type want_textype (TEXTYPE_*),
 // with the NVN component swizzle, converting between compatible types the way renderer.m does.
+static VkImageView view_(NvnTexture *t, const NvnTextureView *v, bool has_view, bool render, int want_textype, bool both);
 VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool render, int want_textype) {
+    return view_(t, v, has_view, render, want_textype, false);
+}
+VkImageView vk_view_mv(NvnTexture *t, const NvnTextureView *v, bool has_view, bool render) {
+    const TexBackend *b = t ? t->backend : NULL;
+    if (!vk_b_layered(b)) return VK_NULL_HANDLE;
+    return view_(t, v, has_view, render, TEXTYPE_2D, true);
+}
+// both: (multiview) a 2D_ARRAY view of the two eye layers; else a layered image's views take layer vk_eye_layer
+static VkImageView view_(NvnTexture *t, const NvnTextureView *v, bool has_view, bool render, int want_textype, bool both) {
     TexBackend *b = vk_tex(t, render);
     if (!has_view) v = NULL;
     VkFormat fmt = b->format;
@@ -1042,6 +1136,27 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
     if (lv0 + nlv > b->levels) nlv = b->levels - lv0;
     if (ly0 >= b->layers) ly0 = b->layers - 1;
     if (ly0 + nly > b->layers) nly = b->layers - ly0;
+    if (vk_b_layered(b)) {  // (multiview storage: b->layers is 1; layer 1 is eye 1's)
+        if (both) {
+            VkImageAspectFlags asp = render ? b->aspect : b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : b->aspect;
+            VkComponentMapping sw2 = IDENTITY;
+            if (!render && !(b->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))) {
+                const uint8_t *sz = v && (v->setmask & 8) ? v->swizzle : t->swizzle;
+                uint8_t c[4];
+                for (int i = 0; i < 4; i++) c[i] = sz[i] <= 5 ? sz[i] : (uint8_t)(2 + i);
+                if (c[0] || c[1] || c[2] || c[3]) {
+                    if (fmt_of(t->format).alpha_one)
+                        for (int i = 0; i < 4; i++) if (c[i] == 5) c[i] = 1;
+                    sw2 = (VkComponentMapping){(VkComponentSwizzle)(c[0] + 1), (VkComponentSwizzle)(c[1] + 1), (VkComponentSwizzle)(c[2] + 1),
+                                               (VkComponentSwizzle)(c[3] + 1)};
+                } else if (fmt_of(t->format).alpha_one) {
+                    sw2.a = VK_COMPONENT_SWIZZLE_ONE;
+                }
+            }
+            return vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D_ARRAY, fmt, lv0, render ? 1 : nlv, 0, 2, sw2, asp);
+        }
+        ly0 = (uint32_t)vk_eye_layer;
+    }
     if (render) {
         VkImageViewType type = b->base_type == VK_IMAGE_VIEW_TYPE_3D ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
         if (b->base_type == VK_IMAGE_VIEW_TYPE_3D) return VK_NULL_HANDLE;  // (3D render targets: not used by the game)
