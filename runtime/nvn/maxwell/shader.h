@@ -43,15 +43,14 @@ typedef struct {
     bool flip_y;            // lower-left window origin
     bool flip_x;            // mirror the image left to right (mirror mode's scene composite). (In the padding
                             // after flip_y: keys without it hash as before - shader caches stay valid.)
-    uint8_t mv;             // (GLSL, VR multiview passes; padding too) 1: GL_EXT_multiview, each constant buffer k >= 3
-                            // read at row + gl_ViewIndex * bit k of the push word mvm[stage] * cbuf_mv_rows[k] (the
-                            // runtime binds [eye 0 | eye 1] copies of the camera's blocks); no promoted push words
+    uint8_t mv;             // (GLSL, VR multiview passes; padding too) this stage's per-eye constant buffers: bit i = cbuf
+                            // k = i + 3 (3..10), read by eye 1 cbuf_mv_rows[k] rows on (the runtime binds [eye 0 | eye 1]
+                            // copies of the camera's blocks; the block is declared twice as long); those blocks' words are
+                            // never promoted to push constants. A key with mv or tex_amask set: GL_EXT_multiview
     uint32_t vs_out_mask;   // fragment: varyings the vertex shader provides
     uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
-    uint8_t tex_amask[3];   // (mv, fragment textures 0-23; padding) the 2D slot is a sampler2DArray at layer gl_ViewIndex
+    uint8_t tex_amask[3];   // (multiview, fragment textures 0-23; padding) the 2D slot is a sampler2DArray at layer gl_ViewIndex
 } ShaderKey;
-// (mv) the push constant words with each stage's per-view cbuf mask: vertex at byte 0, fragment at byte 4
-#define MV_PUSH_BYTES 8
 
 typedef struct {
     uint32_t handle_offset;  // byte offset of the texture handle in the bound texture cbuf

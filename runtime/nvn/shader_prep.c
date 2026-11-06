@@ -62,6 +62,7 @@ uint8_t shader_topo_class(uint32_t mode) { return mode == 0 ? 0 : mode == 1 || m
 // ------------------------------------------------------------------ text form
 // G vs=<hash> fs=<hash> f=<flags> a=<attrib,...> s=<stride/divisor,...> c=<format[:view],...> d=<depth> n=<samples>
 //   m=<channel mask> b=<blend enables> B=<blend state of each target, 16 hex digits,...> k=<a2c> t=<topology> p=<fill>
+//   [v=<array twins: fragment textures>] [e=<per-eye cbufs: vertex,fragment>] (multiview programs, SR_MVP)
 // C cs=<hash> l=<x,y,z>
 void shader_rec_format(const ShaderRec *r, char *out, size_t n) {
     size_t o = 0;
@@ -89,6 +90,7 @@ void shader_rec_format(const ShaderRec *r, char *out, size_t n) {
     }
     PUT(" k=%u t=%u p=%u", r->a2c, r->topo, r->poly_fill);
     if (r->mv_amask) PUT(" v=%x", r->mv_amask);
+    if (r->mv_cb[0] || r->mv_cb[1]) PUT(" e=%x,%x", r->mv_cb[0], r->mv_cb[1]);
 #undef PUT
 }
 
@@ -176,6 +178,11 @@ bool shader_rec_parse(const char *line, ShaderRec *r) {
     r->topo = (v = field(line, "t")) ? (uint8_t)strtoul(v, NULL, 16) : 2;
     r->poly_fill = (v = field(line, "p")) ? (uint8_t)strtoul(v, NULL, 16) : 1;
     if ((v = field(line, "v"))) r->mv_amask = (uint32_t)strtoul(v, NULL, 16);
+    if ((v = field(line, "e"))) {  // (vertex,fragment)
+        char *e;
+        r->mv_cb[0] = (uint8_t)strtoul(v, &e, 16);
+        if (*e == ',') r->mv_cb[1] = (uint8_t)strtoul(e + 1, NULL, 16);
+    }
     return r->vs && r->fs;
 }
 
@@ -588,12 +595,11 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
     }
     FILE **files = calloc((size_t)idx_nfiles + 1, sizeof *files);
     int done = 0, prepared = 0, missing = 0, failed = 0, prepared_seen = 0, mv_prepared = 0, mv_skipped = 0;
-    // Multiview records (SR_MV / SR_MVP: the VR eye passes' pipelines and programs with LARECOMP_MV, vulkan/exec.c):
+    // Multiview records (SR_MV / SR_MVP: the VR eye passes' pipelines and programs, vulkan/exec.c):
     // with multiview on they go first, from both lists - in such a run they are what the eye passes draw, and the
     // time budget (shader_prep_boot) may end the run before the player's own list; with it off they are left out
     // (the renderer couldn't build them: no "failed" counts for them), and stay in the file.
-    const char *mve = getenv("LARECOMP_MV");
-    bool mv_on = mve && atoi(mve) > 0;
+    bool mv_on = renderer_prepare_multiview();
     for (int pass = 0; pass < 4; pass++) {  // (multiview: the shipped list's, the player's), the shipped list, the player's
         bool own = pass & 1, mv_pass = pass < 2;
         if (mv_pass && !mv_on) continue;

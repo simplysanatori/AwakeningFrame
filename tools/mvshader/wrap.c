@@ -13,6 +13,7 @@ typedef struct {
     int ntex, npush;
     uint8_t tex_type[64], tex_shadow[64], tex_image[64];
     uint16_t mv_rows[18];  // (HAVE_MV) ShaderInfo.cbuf_mv_rows
+    uint8_t push_cb[64];   // ShaderInfo.push_cb (npush of them)
 } HxOut;
 
 void hx_config(uint64_t gbase, uint64_t gsize, int frag_sg, int stack_vars, int structured, int push, int mirror) {
@@ -39,6 +40,7 @@ int hx_translate(const uint8_t *code, size_t max, int stage, const void *key, co
     o->out_mask = si->out_mask, o->cbuf_mask = si->cbuf_mask, o->cbuf_dynamic = si->cbuf_dynamic;
     memcpy(o->cbuf_size, si->cbuf_size, sizeof o->cbuf_size);
     o->ntex = si->ntex, o->npush = si->npush;
+    memcpy(o->push_cb, si->push_cb, sizeof o->push_cb);
     for (int i = 0; i < si->ntex && i < 64; i++)
         o->tex_type[i] = si->tex[i].type, o->tex_shadow[i] = si->tex[i].shadow, o->tex_image[i] = si->tex[i].is_image;
 #ifdef HAVE_MV

@@ -4,11 +4,13 @@
 // nothing of the game is kept here. For each record, with the keys the renderer makes for it (vulkan/exec.c
 // renderer_prepare, Steam Frame defaults: structured, push constants, shader global memory as copies):
 //   - mv = 0: this tree's translator gives byte for byte the reference translator's GLSL (both stages);
-//   - mv = 1 with no array twins, and with every 2D sampled fragment texture as an array twin (the most a multiview
-//     program can have, exec.c mv_program): it translates, compiles with shaderc as the renderer does (Vulkan 1.3,
-//     -O0) and the SPIR-V validates (SPIRV-Tools, Vulkan 1.3); the per-eye row strides are those of the mv = 0 build
-//     (the renderer decides with the base program's, binds with the variant's), and no push words are promoted;
-//   - the record's text form with SR_MV / SR_MVP / v= round-trips (shader_rec_format / _parse).
+//   - multiview (ShaderKey.mv: each stage's per-eye cbufs 3..10, tex_amask: array twins), in the combinations a camera
+//     block and twins can give - every cbuf read per eye or only the lowest, no / every / one 2D sampled fragment texture
+//     a twin (exec.c mv_program's rule): it translates, compiles with shaderc as the renderer does (Vulkan 1.3, -O0)
+//     and the SPIR-V validates (SPIRV-Tools, Vulkan 1.3); every cbuf array index is a constant (eye 1's per-eye reads
+//     "<row>u + MVR<k>"); no word of a per-eye block is promoted to push constants; the row strides are those of the
+//     mv = 0 build;
+//   - the record's text form with SR_MV / SR_MVP / v= / e= round-trips (shader_rec_format / _parse).
 // Usage: harness <romfs> <ref.so> <new.so> <list or log>... (run.sh builds and runs it)
 #include <dlfcn.h>
 #include <lz4.h>
@@ -36,6 +38,7 @@ bool shader_seen_shipped(const char *line) { (void)line; return false; }
 char *shader_seen_read(uint64_t *file_game) { *file_game = 0; return NULL; }
 void shader_seen_prep_done(uint64_t game, const char *keep) { (void)game; (void)keep; }
 bool renderer_prepare_begin(void) { return true; }
+bool renderer_prepare_multiview(void) { return false; }
 int renderer_prepare_pending(void) { return 0; }
 void renderer_prepare_end(void) {}
 
@@ -47,6 +50,7 @@ typedef struct {
     int ntex, npush;
     uint8_t tex_type[64], tex_shadow[64], tex_image[64];
     uint16_t mv_rows[18];
+    uint8_t push_cb[64];
 } HxOut;
 typedef struct {
     void (*config)(uint64_t, uint64_t, int, int, int, int, int);
@@ -184,7 +188,7 @@ static void *worker(void *arg) {
 // ---- the checks, per record
 static struct {
     int recs, graphics, compute, programs, ref_fail, new_fail, diff, mv_progs, mv_fail, mv_amask_progs, mv_slots,
-        rows_diff, push_left, no_ext, rec_rt, norm_cmp, norm_diff;
+        rows_diff, push_left, no_ext, rec_rt, norm_cmp, norm_diff, const_bad, push_words;
 } S;
 static Set prog_seen;
 static int ndiff_shown;
@@ -200,23 +204,34 @@ static void diff_note(const char *what, uint64_t vh, uint64_t fh, const char *a,
 }
 
 
-// (MVH_NOPUSH=1: no promoted push words in either build) the multiview GLSL with no array twins, its multiview parts
-// taken out - the extension, the VO / VB defines, the mvm block, "+ VO<k>" / "+ VB<k>" at each access, the doubled
-// block sizes - must be the mv = 0 GLSL with its block sizes taken out too: every constant buffer access of k >= 3
-// got its eye offset, and nothing else changed
+// (MVH_NOPUSH=1: no promoted push words in either build) a multiview GLSL with no array twins, its multiview parts
+// taken out - the extension, the MVR / MVB defines, each per-eye read "(gl_ViewIndex == 0 ? <eye 0's> : <eye 1's>)"
+// down to eye 0's, " + (gl_ViewIndex == 0 ? 0u : MVB<k>)" in each dynamic one, the block sizes - must be the mv = 0
+// GLSL with its block sizes taken out too: nothing else changed
 static char *norm_glsl(const char *src) {
     size_t n = strlen(src);
     char *o = malloc(n + 1), *w = o;
+    static const char sel[] = "(gl_ViewIndex == 0 ? ";
     for (const char *p = src; *p;) {
         const char *eol = strchr(p, '\n');
         size_t l = eol ? (size_t)(eol - p + 1) : strlen(p);
-        if (!strncmp(p, "#extension GL_EXT_multiview", 27) || !strncmp(p, "#define VO", 10) || !strncmp(p, "#define VB", 10) ||
-            !strncmp(p, "layout(push_constant) uniform PC { uint mvm[2]; };", 50)) { p += l; continue; }
+        if (!strncmp(p, "#extension GL_EXT_multiview", 27) || !strncmp(p, "#define MVR", 11) || !strncmp(p, "#define MVB", 11)) {
+            p += l;
+            continue;
+        }
         const char *e = p + l;
         while (p < e) {
             int k, len = 0;
-            if (*p == 'u' && sscanf(p, "u + VO%d]%n", &k, &len) == 1 && len) { *w++ = ']'; p += len; continue; }
-            if (*p == ' ' && sscanf(p, " + VB%d)%n", &k, &len) == 1 && len) { *w++ = ')'; p += len; continue; }
+            if (*p == ' ' && sscanf(p, " + (gl_ViewIndex == 0 ? 0u : MVB%d)%n", &k, &len) == 1 && len) { p += len; continue; }
+            if (!strncmp(p, sel, sizeof sel - 1)) {  // (eye 0's read: up to the " : " at this depth; then past the ')')
+                const char *a = p + sizeof sel - 1, *q = a;
+                int d = 0;
+                while (q < e && !(d == 0 && !strncmp(q, " : ", 3))) { if (*q == '(' || *q == '[') d++; else if (*q == ')' || *q == ']') d--; q++; }
+                const char *r = q;
+                d = 1;
+                while (r < e && d) { if (*r == '(') d++; else if (*r == ')') d--; r++; }
+                if (q < e && !d) { memcpy(w, a, (size_t)(q - a)), w += q - a; p = r; continue; }
+            }
             if (!strncmp(p, "uniform CB", 10)) {  // (uniform CB<k> { uvec4 cb<k>[N]; }: N dropped)
                 const char *b = strchr(p, '['), *c = b ? strchr(b, ']') : NULL;
                 if (b && c && c < e) { memcpy(w, p, (size_t)(b - p + 1)), w += b - p + 1; p = c; continue; }
@@ -240,15 +255,42 @@ static void norm_check(const char *what, const char *base, const char *mv) {
     free(a), free(b);
 }
 
+// Every constant buffer array access (cb<k>[...], outside the clamped dynamic cbr()) indexes with a constant: digits, or
+// for a per-eye block eye 1's "<digits>u + MVR<k>". Per-eye reads come in the select form only, no other gl_ViewIndex
+// in an index, and nothing of the old push block. Returns the non-constant accesses.
+static int const_index_check(const char *what, const char *src, uint8_t mask) {
+    int bad = 0;
+    if (strstr(src, "mvm")) bad++, fprintf(fail_log, "mv-const %s: an mvm block\n", what);
+    for (const char *p = src; (p = strstr(p, "cb")); p += 2) {
+        if (p > src && ((p[-1] >= 'a' && p[-1] <= 'z') || (p[-1] >= 'A' && p[-1] <= 'Z') || (p[-1] >= '0' && p[-1] <= '9') || p[-1] == '_')) continue;
+        int k, len = 0;
+        if (sscanf(p, "cb%d[%n", &k, &len) != 1 || !len || k < 3) continue;
+        if (p >= src + 8 && !strncmp(p - 7, "uvec4 ", 6)) continue;  // (the declaration)
+        const char *ix = p + len, *q = strchr(ix, ']');
+        if (!q) { bad++; continue; }
+        char t[128];
+        snprintf(t, sizeof t, "%.*s", (int)(q - ix < 127 ? q - ix : 127), ix);
+        bool digits = t[0] != 0;
+        for (const char *c = t; *c; c++) digits &= *c >= '0' && *c <= '9';
+        int r, k2, l2 = 0;
+        bool eye1 = sscanf(t, "%du + MVR%d%n", &r, &k2, &l2) == 2 && l2 == (int)strlen(t) && k2 == k && k >= 3 && k <= 10 && ((mask >> (k - 3)) & 1);
+        if (!digits && !eye1) {
+            if (bad++ < 4) fprintf(fail_log, "mv-const %s: cb%d[%s]\n", what, k, t);
+        }
+    }
+    return bad;
+}
+
 static void mv_variant(const ShaderBlob *vsb, const ShaderBlob *fsb, const ShaderKey *vkey0, const ShaderKey *fkey0,
-                       const HxOut *bv, const HxOut *bf, uint32_t amask, uint64_t vh, uint64_t fh) {
+                       const HxOut *bv, const HxOut *bf, uint32_t amask, uint8_t vmask, uint8_t fmask, uint64_t vh, uint64_t fh) {
+    if (!amask && !vmask && !fmask) return;
     ShaderKey vk = *vkey0, fk = *fkey0;
-    vk.mv = fk.mv = 1;
+    vk.mv = vmask, fk.mv = fmask;
     for (int b = 0; b < 3; b++) vk.tex_amask[b] = fk.tex_amask[b] = (uint8_t)(amask >> (b * 8));
     HxOut v, f;
     uint32_t cap = 64;
-    char what[96];
-    snprintf(what, sizeof what, "%016llx_%016llx_a%x", (unsigned long long)vh, (unsigned long long)fh, amask);
+    char what[112];
+    snprintf(what, sizeof what, "%016llx_%016llx_a%x_e%x,%x", (unsigned long long)vh, (unsigned long long)fh, amask, vmask, fmask);
     S.mv_progs++;
     if (!tr_new.translate(vsb->code, vsb->const_offset ? vsb->const_offset : 0x10000, STAGE_VERTEX, &vk,
                           vsb->code + vsb->const_offset, vsb->const_size, 0, cap, &v)) {
@@ -265,23 +307,37 @@ static void mv_variant(const ShaderBlob *vsb, const ShaderBlob *fsb, const Shade
         return;
     }
     if (!amask && getenv("MVH_NOPUSH")) { norm_check(what, bv->msl, v.msl); norm_check(what, bf->msl, f.msl); }
-    if (v.npush || f.npush) S.push_left++, fprintf(fail_log, "mv-push %s: %d / %d promoted words\n", what, v.npush, f.npush);
-    if (!strstr(v.msl, "GL_EXT_multiview") || !strstr(f.msl, "GL_EXT_multiview")) S.no_ext++;
+    // promoted words: none from a per-eye block (the others as at mv = 0)
+    for (int sg = 0; sg < 2; sg++) {
+        const HxOut *o = sg ? &f : &v;
+        uint8_t m = sg ? fmask : vmask;
+        for (int i = 0; i < o->npush; i++)
+            if (o->push_cb[i] >= 3 && o->push_cb[i] <= 10 && ((m >> (o->push_cb[i] - 3)) & 1)) {
+                S.push_left++;
+                fprintf(fail_log, "mv-push %s: a word of per-eye cbuf %d promoted (%s)\n", what, o->push_cb[i], sg ? "fs" : "vs");
+                break;
+            }
+    }
+    S.push_words += v.npush + f.npush;
+    // the extension where the key makes a multiview shader (the stage's mask, or array twins: the key carries them in both)
+    if ((vmask || amask) && !strstr(v.msl, "GL_EXT_multiview")) S.no_ext++;
+    if ((fmask || amask) && !strstr(f.msl, "GL_EXT_multiview")) S.no_ext++;
+    S.const_bad += const_index_check(what, v.msl, vmask) + const_index_check(what, f.msl, fmask);
     for (int k = 3; k < 18; k++) {
         if (((bv->cbuf_mask >> k) & 1) && bv->mv_rows[k] != v.mv_rows[k]) S.rows_diff++, fprintf(fail_log, "mv-rows vs %s cbuf %d: %u / %u\n", what, k, bv->mv_rows[k], v.mv_rows[k]);
         if (((bf->cbuf_mask >> k) & 1) && bf->mv_rows[k] != f.mv_rows[k]) S.rows_diff++, fprintf(fail_log, "mv-rows fs %s cbuf %d: %u / %u\n", what, k, bf->mv_rows[k], f.mv_rows[k]);
     }
     static int ndump;
     if (getenv("MVH_DUMP") && ndump < (getenv("MVH_DUMP_MAX") ? atoi(getenv("MVH_DUMP_MAX")) : 40)) {  // (MVH_DUMP=<dir>: the first
-        // multiview variants with twins, for reading; MVH_DUMP_MAX of them, 40)
-        for (int sg = 0; sg < 2 && amask; sg++) {
+        // multiview variants, for reading; MVH_DUMP_MAX of them, 40)
+        for (int sg = 0; sg < 2; sg++) {
             char p[600];
             snprintf(p, sizeof p, "%s/%s.%s", getenv("MVH_DUMP"), what, sg ? "frag" : "vert");
             FILE *df = fopen(p, "w");
             if (df) fputs(sg ? f.msl : v.msl, df), fclose(df), ndump++;
         }
     }
-    char w2[112];
+    char w2[128];
     snprintf(w2, sizeof w2, "%s_vs", what);
     job_add(v.msl, STAGE_VERTEX, w2);
     snprintf(w2, sizeof w2, "%s_fs", what);
@@ -294,17 +350,17 @@ static void rec_roundtrip(const ShaderRec *r) {
     char a[2048], b[2048];
     ShaderRec q = *r, p;
     q.flags |= SR_MV | SR_MVP;
-    q.mv_amask = 0xA5C3u & 0xFFFFFFu;
+    q.mv_amask = 0xA5C3u & 0xFFFFFFu, q.mv_cb[0] = 0x05, q.mv_cb[1] = 0xC0;
     for (int pass = 0; pass < 2; pass++) {
         shader_rec_format(&q, a, sizeof a);
         if (!shader_rec_parse(a, &p)) { S.rec_rt++; fprintf(fail_log, "record parse: %s\n", a); return; }
         shader_rec_format(&p, b, sizeof b);
-        if (strcmp(a, b) || p.flags != q.flags || p.mv_amask != q.mv_amask || p.vs != q.vs || p.fs != q.fs) {
+        if (strcmp(a, b) || p.flags != q.flags || p.mv_amask != q.mv_amask || p.mv_cb[0] != q.mv_cb[0] || p.mv_cb[1] != q.mv_cb[1] || p.vs != q.vs || p.fs != q.fs) {
             S.rec_rt++;
             fprintf(fail_log, "record round trip:\n  %s\n  %s\n", a, b);
             return;
         }
-        q.flags &= (uint8_t)~(SR_MV | SR_MVP), q.mv_amask = 0;  // (and the plain record)
+        q.flags &= (uint8_t)~(SR_MV | SR_MVP), q.mv_amask = 0, q.mv_cb[0] = q.mv_cb[1] = 0;  // (and the plain record)
     }
 }
 
@@ -358,15 +414,20 @@ bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlo
         diff_note("fs", r->vs, r->fs, raf ? af.msl : af.error, rbf ? bf.msl : bf.error);
     if (rav && !raf) S.ref_fail++;
     if (!rbf) { S.new_fail++; free(av.msl), free(bv.msl), free(raf ? af.msl : NULL); return true; }
-    // mv = 1: no array twins; every 2D sampled fragment texture a twin (exec.c mv_program's rule)
     uint32_t amask = 0;
     for (int i = 0; i < bf.ntex && i < 24; i++)
         if (bf.tex_type[i] == TEXTYPE_2D && !bf.tex_image[i]) amask |= 1u << i;
-    mv_variant(vsb, fsb, &vkey, &fkey, &bv, &bf, 0, r->vs, r->fs);
+    // mv: per-eye blocks - every cbuf 3..10 each stage reads, or only its lowest; array twins - none, every 2D sampled
+    // fragment texture (exec.c mv_program's rule), or only the lowest; the combinations a camera block / twin can give
+    uint8_t vall = (uint8_t)(bv.cbuf_mask >> 3), fall = (uint8_t)(bf.cbuf_mask >> 3);
+    if (amask) S.mv_amask_progs++, S.mv_slots += __builtin_popcount(amask);
+    mv_variant(vsb, fsb, &vkey, &fkey, &bv, &bf, 0, vall, fall, r->vs, r->fs);
+    mv_variant(vsb, fsb, &vkey, &fkey, &bv, &bf, 0, vall & -vall, fall & -fall, r->vs, r->fs);
+    mv_variant(vsb, fsb, &vkey, &fkey, &bv, &bf, 0, 0, fall, r->vs, r->fs);
     if (amask) {
-        S.mv_amask_progs++, S.mv_slots += __builtin_popcount(amask);
-        mv_variant(vsb, fsb, &vkey, &fkey, &bv, &bf, amask, r->vs, r->fs);
-        if (amask & (amask - 1)) mv_variant(vsb, fsb, &vkey, &fkey, &bv, &bf, amask & -amask, r->vs, r->fs);  // (one twin)
+        mv_variant(vsb, fsb, &vkey, &fkey, &bv, &bf, amask, 0, 0, r->vs, r->fs);
+        mv_variant(vsb, fsb, &vkey, &fkey, &bv, &bf, amask, vall, fall, r->vs, r->fs);
+        if (amask & (amask - 1)) mv_variant(vsb, fsb, &vkey, &fkey, &bv, &bf, amask & -amask, vall & -vall, 0, r->vs, r->fs);
     }
     if (getenv("MVH_BASE_COMPILE")) {  // (control: the mv = 0 shaders through the same compile and validation)
         job_add(bv.msl, STAGE_VERTEX, "base_vs");
@@ -437,12 +498,13 @@ int main(int argc, char **argv) {
     for (int i = 0; i < nthreads && i < 16; i++) pthread_join(th[i], NULL);
     printf("records %d (graphics %d, compute %d), programs %d\n", S.recs, S.graphics, S.compute, S.programs);
     printf("mv=0: ref failed %d, new failed %d, differ from ref %d\n", S.ref_fail, S.new_fail, S.diff);
-    printf("mv=1: variants %d (with array twins: %d programs, %d twin slots), translate failed %d, push words left %d, "
-           "no multiview extension %d, row strides differ %d\n", S.mv_progs, S.mv_amask_progs, S.mv_slots, S.mv_fail, S.push_left, S.no_ext, S.rows_diff);
+    printf("mv: variants %d (with array twins: %d programs, %d twin slots), translate failed %d, per-eye words promoted %d "
+           "(push words kept %d), no multiview extension %d, row strides differ %d, non-constant cbuf indices %d\n", S.mv_progs,
+           S.mv_amask_progs, S.mv_slots, S.mv_fail, S.push_left, S.push_words, S.no_ext, S.rows_diff, S.const_bad);
     printf("compile+validate: %d unique shaders, compile failed %d, validation failed %d\n", st_compiled, st_compile_fail, st_valid_fail);
     printf("records with SR_MV|SR_MVP|v= round trip failed %d\n", S.rec_rt);
-    if (S.norm_cmp) printf("mv=1 minus its multiview parts = mv=0: %d compared, %d differ\n", S.norm_cmp, S.norm_diff);
-    bool ok = !S.diff && !S.mv_fail && !S.push_left && !S.no_ext && !S.rows_diff && !st_compile_fail && !st_valid_fail && !S.rec_rt && !S.norm_diff;
+    if (S.norm_cmp) printf("multiview minus its multiview parts = mv=0: %d compared, %d differ\n", S.norm_cmp, S.norm_diff);
+    bool ok = !S.diff && !S.mv_fail && !S.push_left && !S.no_ext && !S.rows_diff && !st_compile_fail && !st_valid_fail && !S.rec_rt && !S.norm_diff && !S.const_bad;
     printf("%s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }

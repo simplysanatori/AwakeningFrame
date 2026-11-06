@@ -44,6 +44,7 @@ typedef struct {
     uint8_t poly_fill;       // filled polygons (0: lines)
     uint32_t local[3];       // compute: local size
     uint32_t mv_amask;       // (SR_MVP) fragment textures sampled as both eyes' layers (ShaderKey.tex_amask)
+    uint8_t mv_cb[2];        // (SR_MVP) vertex, fragment: per-eye constant buffers (ShaderKey.mv: bit i = cbuf i + 3)
 } ShaderRec;
 
 // The record's text form (one line, no newline) and back
@@ -78,7 +79,7 @@ void shader_rec_note(const ShaderRec *r);
 // list's format. Every variant the game builds that the shipped list doesn't have is added (queued by
 // shader_rec_note, written by a background thread in batches and at exit; at most 20000 records), and the next
 // preparation does them after the shipped list ("[shader] prepared N + M seen before"; multiview records, SR_MV /
-// SR_MVP, before both with LARECOMP_MV on and not at all with it off), so a shader met once is
+// SR_MVP, before both when renderer_prepare_multiview() and not at all otherwise), so a shader met once is
 // ready from the second run on. LARECOMP_SHADER_SEEN=0 turns it off (nothing recorded, nothing prepared from it).
 bool shader_seen_on(void);
 void shader_seen_note(const ShaderRec *r);
@@ -109,6 +110,7 @@ typedef struct {
 bool renderer_prepare_begin(void);
 bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vs, const ShaderBlob *fs);
 int renderer_prepare_pending(void);
+bool renderer_prepare_multiview(void);  // the multiview records (SR_MV / SR_MVP) can be built and are this run's eye passes
 void renderer_prepare_end(void);  // all builds done (e.g. keep the pipeline cache)
 
 // Prepares every record of the shipped list (LARECOMP_SHADER_LIST=<file>: that list instead) from the game files in

@@ -5,7 +5,7 @@
 # reference translator is REF (default: the steam-frame branch's runtime/nvn/maxwell). Needs shaderc, SPIRV-Tools
 # and lz4 (system libraries) and the game files (extracted/romfs, or ROMFS=...). Failing shaders go to
 # build/mvshader/fail/. MVH_THREADS (3): compile threads; MVH_BASE_COMPILE=1 also compiles the mv = 0 shaders;
-# MVH_NOPUSH=1: no promoted push words (both builds), and the multiview GLSL minus its multiview parts compared
+# MVH_NOPUSH=1: no promoted push words (both builds), and the multiview GLSL (no twins) minus its multiview parts compared
 # with the mv = 0 GLSL; MVH_NOCOMPILE=1: translations only. MVH_YIELD=1: also pause while a lasrecomp process runs (or ~/.cache/headset-in-use exists). It runs at idle priority.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
