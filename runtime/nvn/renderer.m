@@ -1861,6 +1861,7 @@ static NSMutableDictionary<NSNumber *, Prog *> *g_prep_progs;  // program conten
 static NSMutableDictionary<NSString *, id> *g_prep_pipes;       // pipeline key (pipeline_key) -> pipeline state
 static NSMutableDictionary<NSNumber *, NSValue *> *g_prep_cs;   // compute content key -> CsProg
 static _Atomic int g_prep_pending;                              // builds still running
+static _Atomic int g_prep_finished;                             // builds done
 static dispatch_queue_t g_prep_queue;
 
 static uint64_t prog_content_key(uint64_t vh, uint64_t fh, const ShaderKey *vkey, const ShaderKey *fkey) {
@@ -6020,6 +6021,7 @@ bool renderer_prepare_begin(void) {
 }
 
 int renderer_prepare_pending(void) { return g_prep_pending; }
+int renderer_prepare_finished(void) { return g_prep_finished; }
 void renderer_prepare_end(void) {  // (the binary archive: saved now, off this thread - a PLAY waiting on the
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ archive_save(false); });  // preparation doesn't wait for it)
     LOG("[metal] shader archive: %d pipelines loaded from it, %d added; ready after %.0f ms; library compiles %.0f ms, "
@@ -6032,6 +6034,7 @@ static void prep_run(void (^job)(void)) {
     g_prep_pending++;
     dispatch_async(g_prep_queue, ^{
         @autoreleasepool { job(); }
+        g_prep_finished++;
         g_prep_pending--;
         dispatch_semaphore_signal(g_prep_slots);
     });

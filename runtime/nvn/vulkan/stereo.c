@@ -136,6 +136,13 @@ static void quat_mat(const float q[4], float m[3][3]) {  // x y z w -> rotation 
 }
 
 static uint64_t g_logged_frame;
+static struct { bool ok, room, zone; float anchor[3], lo[3], hi[3]; } g_table;  // (stereo_table: the latest latch's)
+bool stereo_table(float anchor[3], bool *room, bool *zone, float lo[3], float hi[3]) {
+    if (!g_table.ok) return false;
+    memcpy(anchor, g_table.anchor, 12), memcpy(lo, g_table.lo, 12), memcpy(hi, g_table.hi, 12);
+    *room = g_table.room, *zone = g_table.zone;
+    return true;
+}
 
 #ifdef LARECOMP_HAVE_XR
 static bool eye_fn(const CamLatch *l, const float pivot_in[3], float V[2][16], float P[2][16]) {
@@ -155,6 +162,8 @@ static bool eye_fn(const CamLatch *l, const float pivot_in[3], float V[2][16], f
     XrRigPose rp;
     xr_rig_update(&ri, &rp);
     memcpy(pivot, rp.anchor, 12);
+    g_table.ok = true, g_table.room = rp.area != XR_RIG_OPEN, g_table.zone = ri.zone;
+    memcpy(g_table.anchor, rp.anchor, 12), memcpy(g_table.lo, ri.zlo, 12), memcpy(g_table.hi, ri.zhi, 12);
     cam_override_table_anchor(pivot);  // (perf lane: the culling fit centres the table here)
     const float *Rw = rp.R;  // world -> app (row-major); its transpose takes app to world
     const float *gp = l->ref.P;

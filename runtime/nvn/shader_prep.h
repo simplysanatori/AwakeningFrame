@@ -107,6 +107,7 @@ typedef struct {
 bool renderer_prepare_begin(void);
 bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vs, const ShaderBlob *fs);
 int renderer_prepare_pending(void);
+int renderer_prepare_finished(void);  // builds done so far (with pending: the share of the queued builds done)
 void renderer_prepare_end(void);  // all builds done (e.g. keep the pipeline cache)
 
 // Prepares every record of the shipped list (LARECOMP_SHADER_LIST=<file>: that list instead) from the game files in

@@ -7,6 +7,8 @@
 //   tint   eye 0 only, a 2x1 image: the average colour of the geometry in the top and the bottom band of the
 //          eye, moved a little toward each frame's value (reads last frame's from the other of two images)
 //   main   the XR eye image: colour, depth and mask read once each; backdrop, fog, edge fade, dither
+// Mode fade is the main pass alone: each pixel's point on the table (its depth, or where its ray meets the floor) is
+// darkened by its distance across the floor from the table's centre (a round fade to black), dithered.
 // The mask, tint and everything else are device local; nothing is read back.
 #include "edge.h"
 
@@ -17,6 +19,7 @@
 
 #include "../../platform.h"
 #include "../../rt.h"
+#include "../screen_filter.h"
 #include "../vr_cull.h"
 #include "record.h"
 #include "stereo.h"
@@ -37,8 +40,15 @@ static struct {
     float tau;                 // seconds the backdrop colours take to follow the scene
     int debug;
     bool indoors;              // also in interiors and dungeons (default: the overworld only)
+    float radius, width;       // fade: clear within radius of the table's centre, black past radius + width (game units)
+    float room_margin;         // fade in a room: the radius reaches at least this past the room's farthest corner
     float pivot_default;
 } cfg;
+
+// fade's defaults (game units; a screen is about 15 x 12, a tile 1.5; docs/af/EDGE.md "Fade")
+#define FADE_RADIUS 13.0f
+#define FADE_WIDTH 12.0f
+#define FADE_ROOM_MARGIN 1.5f
 
 static bool hex3(const char *s, float out[3]) {
     unsigned v;
@@ -56,7 +66,8 @@ static void cfg_init(void) {
         else if (!strcmp(e, "fog") || !strcmp(e, "1")) cfg.mode = EDGE_FOG;
         else if (!strcmp(e, "gradient")) cfg.mode = EDGE_GRADIENT;
         else if (!strcmp(e, "passthrough")) cfg.mode = EDGE_PASSTHROUGH;
-        else if (*e) LOG("[edge] LARECOMP_VR_EDGE=%s unknown (fog, gradient, black, passthrough): off\n", e);
+        else if (!strcmp(e, "fade")) cfg.mode = EDGE_FADE;
+        else if (*e) LOG("[edge] LARECOMP_VR_EDGE=%s unknown (fade, passthrough, black, fog, gradient): off\n", e);
     }
     cfg.fog_start = 1e6f, cfg.fog_end = 2e6f;  // (distance fog is off unless LARECOMP_VR_EDGE_FOG asks: only the void band fades)
     if ((e = getenv("LARECOMP_VR_EDGE_FOG"))) {
@@ -81,9 +92,16 @@ static void cfg_init(void) {
     cfg.tau = (e = getenv("LARECOMP_VR_EDGE_TAU")) && atof(e) > 0 ? (float)atof(e) : 0.8f;
     cfg.indoors = (e = getenv("LARECOMP_VR_EDGE_INDOORS")) && atoi(e) > 0;
     cfg.debug = (e = getenv("LARECOMP_VR_EDGE_DEBUG")) ? atoi(e) : 0;
+    cfg.radius = (e = getenv("LARECOMP_VR_EDGE_RADIUS")) && atof(e) > 0 ? (float)atof(e) : FADE_RADIUS;
+    cfg.width = (e = getenv("LARECOMP_VR_EDGE_WIDTH")) && atof(e) > 0 ? (float)atof(e) : FADE_WIDTH;
+    cfg.room_margin = FADE_ROOM_MARGIN;
     float s = (e = getenv("LARECOMP_VR_SCALE")) && atof(e) > 0 ? (float)atof(e) : 0.067f;
     float d = (e = getenv("LARECOMP_VR_DIST")) && atof(e) > 0 ? (float)atof(e) : 1.0f;
     cfg.pivot_default = d / s;
+    if (cfg.mode == EDGE_FADE)
+        LOG("[edge] mode fade: clear within %.1f units of the table's centre, black past %.1f (rooms: their farthest corner + %.1f at least)\n",
+            cfg.radius, cfg.radius + cfg.width, cfg.room_margin);
+    else
     LOG("[edge] mode %s, fog %.2f..%.2f x pivot distance, edge fade radius %.3f of the height x %.2f, haze desat %.2f x%.2f%s\n",
         cfg.mode == EDGE_BLACK ? "black" : cfg.mode == EDGE_FOG ? "fog" : cfg.mode == EDGE_GRADIENT ? "gradient" : "passthrough",
         cfg.fog_start, cfg.fog_end, cfg.soft, cfg.strength, cfg.desat, cfg.bright, cfg.fixed_colours ? ", colours fixed" : "");
@@ -115,6 +133,9 @@ bool edge_passthrough_wanted(void) { return edge_mode() == EDGE_PASSTHROUGH; }
     "  vec4 rc;    // quadrilateral on, floor y, unused, strength\n"                                                  \
     "  vec4 rb;    // the fade band at each edge of the quadrilateral (game units)\n"                                  \
     "  vec4 sky;   // the sky tone, how much of the backdrop it takes\n"                                               \
+    "  vec4 fd;    // fade: the table's centre (world), radius (units)\n"                                               \
+    "  vec4 fw;    // fade: width (units), -, -, -\n"                                                                   \
+    "  vec4 pf;    // the present's screen filter: mode, the rig's blink (screen_filter.h)\n"                         \
     "} u;\n"                                                                                                           \
     "layout(set = 0, binding = 1) uniform sampler2D dt;\n"                                                             \
     "layout(set = 0, binding = 2) uniform sampler2D ct;\n"                                                             \
@@ -207,6 +228,20 @@ static const char *main_fs =
     "  if (u.fl.x > 0.5) z = z * 2.0 - 1.0;\n"
     "  float pd = u.zt.y / (z + u.zt.x);\n"       // planar distance
     "  float r = geo ? pd * length(ray) : 1e9;\n"  // distance from the eye
+    // (fade) the pixel's point on the table: the geometry's own (its depth), else where its ray meets the floor (the
+    // game's glows and other draws that leave the depth cleared); its distance across the floor from the table's centre
+    "  float fk = 1.0;\n"
+    "  if (u.fl.z > 3.5) {\n"
+    "    vec3 E = -(u.vr[0].xyz * u.vr[0].w + u.vr[1].xyz * u.vr[1].w + u.vr[2].xyz * u.vr[2].w);\n"
+    "    vec3 dw = u.vr[0].xyz * ray.x + u.vr[1].xyz * ray.y + u.vr[2].xyz * ray.z;\n"
+    "    float t = geo ? pd : (dw.y < -1e-5 ? (u.fd.y - E.y) / dw.y : -1.0);\n"
+    "    fk = 0.0;\n"
+    "    if (t > 0.0) {\n"
+    "      vec2 wp = E.xz + dw.xz * t;\n"
+    "      float x = clamp((length(wp - u.fd.xz) - u.fd.w) / max(u.fw.x, 1e-3), 0.0, 1.0);\n"
+    "      fk = 1.0 - x * x * x * (x * (x * 6.0 - 15.0) + 10.0);\n"  // (smootherstep: no kink where it starts or ends)
+    "    }\n"
+    "  }\n"
     "  float elev = dot(normalize(ray), u.up.xyz);\n"
     "  vec3 tc = texelFetch(tn, ivec2(0, 0), 0).rgb, bc = texelFetch(tn, ivec2(1, 0), 0).rgb;\n"
     "  vec3 skyc = mix(tc, u.sky.rgb, u.sky.w);\n"                 // (the scene's top colour, toward a sky tone)
@@ -228,14 +263,19 @@ static const char *main_fs =
     "      rect = max(rect, (1.0 - t * t * (3.0 - 2.0 * t)) * u.rc.w);\n"  // (full at the edge, none a band inside)
     "    }\n"
     "  }\n"
-    "  float cover = texture(mk, p).r;\n"  // (how near the void is, 0..1)
+    "  float cover = u.fl.z > 3.5 ? 0.0 : texture(mk, p).r;\n"  // (how near the void is, 0..1; fade: no mask)
     "  float edge = smoothstep(0.06, 0.92, cover) * u.fog.w;\n"
     "  float fade = !geo ? 1.0 : (u.fl.z < 1.5 ? max(max(fog, edge), rect) : 0.0);\n"
     "  vec3 c = mix(s.rgb, back, fade);\n"
     "  float a = 1.0;\n"
-    "  if (u.fl.z > 2.5) { a = 1.0 - fade; c = s.rgb * a; }\n"  // (passthrough: premultiplied)
+    "  if (abs(u.fl.z - 3.0) < 0.5) { a = 1.0 - fade; c = s.rgb * a; }\n"  // (passthrough: premultiplied)
     "  float n = ign(gl_FragCoord.xy, u.fl.w) + ign(gl_FragCoord.xy + 17.0, u.fl.w + 3.0) - 1.0;\n"  // (triangular)
+    "  if (u.fl.z > 3.5) {\n"  // (fade: toward black; dithered where darkened and not black already, so the void stays black)
+    "    c = s.rgb * fk;\n"
+    "    c += n / 255.0 * min((1.0 - fk) * 8.0, 1.0) * min(max(s.r, max(s.g, s.b)) * 32.0, 1.0);\n"
+    "  } else\n"
     "  c += n / 255.0 * min(fade * 8.0, 1.0);\n"  // (dither only where something was blended: the rest is untouched)
+    "  { vec4 pf = u.pf;\n" SCREEN_FILTER_SRC("vec3") "  }\n"  // (the present's screen filter and the rig's blink)
     "  float dm = u.mi.z;\n"
     "  if (abs(dm - 9.0) < 0.5) {\n"
     "    if (quad == 0) c = s.rgb;\n"
@@ -260,6 +300,7 @@ static const char *main_fs =
     "    else if (m == 3) c = geo ? vec3(rect, fog, edge) : vec3(1.0, 0.0, 1.0);\n"
     "    else if (m == 4) c = vec3(elev * 0.5 + 0.5, g, 0.0);\n"
     "    else if (m == 5) c = back;\n"
+    "    else if (m == 6) c = vec3(fk, geo ? 1.0 : 0.0, 0.0) * (0.25 + 0.75 * dot(s.rgb, vec3(0.333)));\n"
     "    a = 1.0;\n"
     "  }\n"
     "  o = vec4(c, a);\n"
@@ -395,7 +436,7 @@ static void begin(VkCommandBuffer cb, VkImageView view, VkImageLayout layout, ui
     }
 }
 
-typedef struct { float proj[4], zt[4], fl[4], up[4], cc[4], sz[4], fog[4], top[4], bot[4], mi[4], vr[3][4], rq[2][4], rc[4], rb[4], sky[4]; } UBlock;
+typedef struct { float proj[4], zt[4], fl[4], up[4], cc[4], sz[4], fog[4], top[4], bot[4], mi[4], vr[3][4], rq[2][4], rc[4], rb[4], sky[4], fd[4], fw[4], pf[4]; } UBlock;
 
 static VkDescriptorSet make_set(const UBlock *ub, VkImageView depth, VkImageView color, VkImageView mask, VkImageView tint) {
     VkSpan s = vk_transient_copy(ub, sizeof *ub, 256);
@@ -504,7 +545,19 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
     if (cfg.mode == EDGE_BLACK || eye < 0 || eye > 1 || !noted[eye].have) return false;
     {   // outdoors only: an interior or a dungeon (or the title) keeps its dark void and the game's own glow, drawn by the present as before
         extern int game_level_overworld(void);  // (widescreen.c) 1 the overworld, 0 another level, -1 not in play
-        if (!cfg.indoors && game_level_overworld() != 1) return false;
+        int ow = game_level_overworld();
+        if (cfg.mode == EDGE_FADE ? ow < 0 : !cfg.indoors && ow != 1) return false;  // (fade: everywhere in play)
+    }
+    float fade_c[3] = {0}, fade_r = cfg.radius;  // (fade) the table's centre and the clear radius
+    if (cfg.mode == EDGE_FADE) {
+        float lo[3], hi[3];
+        bool room, zone;
+        if (!stereo_table(fade_c, &room, &zone, lo, hi)) return false;
+        if (room && zone)  // (a room or a side view: all of it stays clear; the fade only softens what lies past it)
+            for (int i = 0; i < 4; i++) {
+                float dx = (i & 1 ? hi[0] : lo[0]) - fade_c[0], dz = (i & 2 ? hi[2] : lo[2]) - fade_c[2];
+                fade_r = fmaxf(fade_r, sqrtf(dx * dx + dz * dz) + cfg.room_margin);
+            }
     }
     EdgeEye ein = {.eye = eye};
     const EdgeEye *in = &ein;
@@ -541,7 +594,7 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
     u.proj[0] = P[0], u.proj[1] = P[5], u.proj[2] = P[2], u.proj[3] = P[6];
     u.zt[0] = P[10], u.zt[1] = P[11], u.zt[2] = in->zn, u.zt[3] = in->zf - in->zn;
     u.fl[0] = in->depth_minus1 ? 1.0f : 0.0f, u.fl[1] = in->origin_lower_left ? 1.0f : 0.0f;
-    u.fl[2] = cfg.mode == EDGE_FOG ? 1.0f : cfg.mode == EDGE_GRADIENT ? 2.0f : 3.0f;
+    u.fl[2] = cfg.mode == EDGE_FOG ? 1.0f : cfg.mode == EDGE_GRADIENT ? 2.0f : cfg.mode == EDGE_PASSTHROUGH ? 3.0f : 4.0f;
     u.fl[3] = (float)(g.frame++ % 64);
     u.up[0] = V[1], u.up[1] = V[5], u.up[2] = V[9];  // the world's up in eye space (the view's second column)
     float pd = in->pivot_dist > 0 ? in->pivot_dist : cfg.pivot_default;
@@ -582,6 +635,14 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
         }
     }
     memcpy(u.sky, cfg.sky, sizeof cfg.sky), u.sky[3] = cfg.skymix;
+    memcpy(u.fd, fade_c, sizeof fade_c), u.fd[3] = fade_r, u.fw[0] = cfg.width;
+    screen_filter_params(u.pf);  // (the present's screen filter and the rig's blink, as the present draw would apply them)
+    {
+        static float said_r = -1;
+        if (cfg.mode == EDGE_FADE && fabsf(fade_r - said_r) > 0.5f)
+            LOG("[edge] fade: centre (%.1f %.1f %.1f), clear to %.1f units, black past %.1f\n", fade_c[0], fade_c[1], fade_c[2], fade_r,
+                fade_r + cfg.width), said_r = fade_r;
+    }
     u.mi[0] = cfg.desat, u.mi[1] = cfg.bright, u.mi[2] = (float)cfg.debug, u.mi[3] = cfg.fixed_colours ? 1.0f : 0.0f;
 
     // the backdrop colours: eye 0 makes this frame's from the last (the other image); eye 1 reads them
@@ -589,7 +650,8 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
     vk_full_barrier(cb);  // (the scene and the eye output)
     static int bench = -1;  // (LARECOMP_VR_EDGE_BENCH: 1 no backdrop colours, 2 no mask, 4 no main pass: timing only)
     if (bench < 0) bench = getenv("LARECOMP_VR_EDGE_BENCH") ? atoi(getenv("LARECOMP_VR_EDGE_BENCH")) : 0;
-    if (in->eye == 0 && !(bench & 1)) {
+    bool fade = cfg.mode == EDGE_FADE;  // (fade: the main pass alone, no backdrop colours or mask)
+    if (in->eye == 0 && !(bench & 1) && !fade) {
         VkDescriptorSet set = make_set(&u, in->depth, in->color, g.mask[0].view, g.tint[prev].view);
         begin(cb, g.tint[cur].view, VK_IMAGE_LAYOUT_GENERAL, 2, 1);
         fullscreen(cb, g.pipe[P_TINT], set);
@@ -600,7 +662,7 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
     // the coverage of geometry, blurred
     float fl3 = u.fl[3];
     VkDescriptorSet set;
-    if (!(bench & 2)) {
+    if (!(bench & 2) && !fade) {
     set = make_set(&u, in->depth, in->color, g.mask[1].view, g.tint[cur].view);
     begin(cb, g.mask[0].view, VK_IMAGE_LAYOUT_GENERAL, mw, mh);
     fullscreen(cb, g.pipe[P_COV], set);

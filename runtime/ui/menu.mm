@@ -84,6 +84,9 @@ static void push(const QEvent &e) {
 }
 
 bool menu_is_open(void) { return g_open.load(); }
+// (shader_prep.c, the preparation before the game's first frame) the label "Preparing shaders... N %": pct 0-100, -1 none
+static std::atomic<int> g_boot_pct{-1};
+extern "C" void menu_boot_notice(int pct) { g_boot_pct = pct; }
 static void set_open(bool open);
 static int g_tab = -1000, g_tab_request = -2;  // (-2: no request; -1 is the Prelaunch tab; -1000: the first tab)
 extern "C" void menu_test_open(void) {
@@ -1170,7 +1173,7 @@ void menu_tabs_draw(float scale, ImFont *font, ImFont *font_big, bool in_game, v
 // Whether menu_render draws anything: the menu, the keyboard, an overlay (FPS, inventory, tracker, chaos, race, a
 // pickup card).
 static bool render_needed(bool open, bool kbd, bool inv, bool trk, bool trkd, bool chaos, bool race, bool flyin, bool dpad) {
-    return open || kbd || g_settings.show_fps || inv || trk || trkd || chaos || race || flyin || dpad;
+    return open || kbd || g_boot_pct.load() >= 0 || g_settings.show_fps || inv || trk || trkd || chaos || race || flyin || dpad;
 }
 
 #ifdef __APPLE__
@@ -1222,7 +1225,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         char rk[64], dk[160] = "";
         // (only the FPS counter, the run timer and the d-pad cross; input only reaches ImGui while the menu or the name
         // entry is up)
-        if (!open && !kbd && !inv && !trk && !trkd && !chaos && !flyin && race_overlay_key(rk, sizeof rk)) {
+        if (!open && !kbd && !inv && !trk && !trkd && !chaos && !flyin && g_boot_pct.load() < 0 && race_overlay_key(rk, sizeof rk)) {
             pthread_mutex_lock(&q_lock);
             bool events = !q_events.empty();
             pthread_mutex_unlock(&q_lock);
@@ -1307,6 +1310,18 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         ImGui::End();
     }
 
+    if (int bp = g_boot_pct.load(); bp >= 0) {  // (the boot preparation's label, centred, on a dark plate: in VR the panel is clear around it)
+        ImFont *f = g_font_big ? g_font_big : ImGui::GetFont();
+        char t[160];
+        snprintf(t, sizeof t, "%s\xE2\x80\xA6 %d%%", L("Preparing shaders"), bp);
+        float fs = f->FontSize * scale;
+        ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, 0, t), c(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
+        float px = 34 * scale, py = 20 * scale;
+        ImDrawList *dl = ImGui::GetBackgroundDrawList();
+        dl->AddRectFilled(ImVec2(c.x - ts.x * 0.5f - px, c.y - ts.y * 0.5f - py), ImVec2(c.x + ts.x * 0.5f + px, c.y + ts.y * 0.5f + py),
+                          IM_COL32(12, 14, 18, 220), 14 * scale);
+        dl->AddText(f, fs, ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), IM_COL32(236, 238, 242, 255), t);
+    }
     if (race) race_overlay_draw(io.DisplaySize, g_menu_font_big, scale);
     if (dpad) dpad_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont(), scale);
     if (flyin) {
