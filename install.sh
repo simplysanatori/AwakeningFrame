@@ -2,13 +2,19 @@
 # Installs AwakeningFrame on the Steam Frame: builds LAS Recomp (with its VR mode) from a source tree,
 # copies the program and the launch wrapper to ~/Games/AwakeningFrame/app, and adds an "AwakeningFrame"
 # entry to the Steam library, set to 120 Hz in SteamVR, with placeholder art. Steam must be running.
-#   ./install.sh [--src DIR] [--no-build] [--skip-steam] [--no-art]
+#   ./install.sh [--src DIR] [--no-build] [--skip-steam] [--no-art] [--warm]
 #     --src DIR     the source tree to build and install from (default ~/Games/AwakeningFrame/src, or
 #                   AWAKENINGFRAME_SRC). It needs the game code: build/lasgame.so, or generated/ (or the game
 #                   files, which this script then uses to run `make gen`, minutes).
 #     --no-build    install what the tree has already built (also when the build is up to date: make is cheap)
 #     --skip-steam  leave Steam's library and SteamVR's settings alone (Steam need not be running)
 #     --no-art      no library art
+#     --warm        after installing, run tools/warm_shaders.sh: a headless tour of every spot of the game (VR under the
+#                   mock runtime, then flat) that fills the shader caches, so the first play has no compile hitches
+#                   (docs/af/WARM.md). Optional, long (the first time most of an hour); needs a test save
+#                   (~/.local/share/lasrecomp-smoketest/save, or LARECOMP_SMOKE_SAVE) and waits while the headset is in
+#                   use. A failed or interrupted warm-up changes nothing else: run tools/warm_shaders.sh again.
+#                   Without it the program prepares the shaders it already knows at each start (seconds once warm).
 # From an unpacked release (a top-level lasrecomp and lasgame.so next to this script: how Frametanium runs it)
 # the program is copied as it is and nothing is built.
 # The game files are a separate step (steam-frame/prepare-game.sh) and stay in ~/.local/share/lasrecomp
@@ -32,6 +38,7 @@ SRC=${AWAKENINGFRAME_SRC:-$HOME/Games/AwakeningFrame/src}
 SKIP_STEAM=${AWAKENINGFRAME_SKIP_STEAM:-}
 BUILD=1
 ART=1
+WARM=0
 FLAG=${AF_HEADSET_FLAG:-$HOME/.cache/headset-in-use}
 VRCMD=${AF_VRCMD:-/opt/steamvr/bin/linuxarm64/vrcmd}
 CEFPORT=${AF_CEF_PORT:-8080}
@@ -46,8 +53,9 @@ while [ $# -gt 0 ]; do
     --no-build) BUILD=0; shift ;;
     --skip-steam) SKIP_STEAM=1; shift ;;
     --no-art) ART=0; shift ;;
+    --warm) WARM=1; shift ;;
     -h | --help) sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
-    *) echo "usage: $0 [--src DIR] [--no-build] [--skip-steam] [--no-art]" >&2; exit 2 ;;
+    *) echo "usage: $0 [--src DIR] [--no-build] [--skip-steam] [--no-art] [--warm]" >&2; exit 2 ;;
   esac
 done
 
@@ -164,6 +172,18 @@ if [ -z "$SKIP_STEAM" ]; then
     ARGS=(--appid "$APPID" --art "$DEST/art" --live --icon-dest "$DEST/art/icon.png")
     [ -n "$GRID" ] && ARGS+=(--grid "$GRID")
     python3 -I "$TOOLS/set-art.py" "${ARGS[@]}" || echo "warning: could not set the library art"
+  fi
+fi
+
+# ---- optional: warm the shader caches (tools/warm_shaders.sh), last, so a long run never holds up the rest
+if [ "$WARM" = 1 ]; then
+  WARMSH=
+  for f in "$HERE/tools/warm_shaders.sh" "$HERE/warm_shaders.sh"; do [ -x "$f" ] && { WARMSH=$f; break; }; done
+  if [ -z "$WARMSH" ]; then
+    echo "warm: warm_shaders.sh is not here, skipping"
+  else
+    echo "warm: touring the game's spots to fill the shader caches (waits while the headset is in use; Ctrl-C leaves the install as it is)"
+    AWAKENINGFRAME_SRC="$SRC" LARECOMP_DATA_ROOT="$DATA" "$WARMSH" --app "$DEST" --root "$DATA" || echo "warm: not finished (run $WARMSH again; the install itself is done)"
   fi
 fi
 

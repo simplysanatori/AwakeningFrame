@@ -521,7 +521,14 @@ bool cam_override_ubo(int stage, uint64_t addr, uint64_t size, void *out320) {
     if (c->kind == CAM_STEREO) {
         if (!eye_cams() || addr != g_latch.addr || size != 320) return false;
         const float *g = (const float *)(uintptr_t)addr;
-        if (memcmp(g, g_latch.orig, 128)) return false;
+        if (memcmp(g, g_latch.orig, 128)) {  // (the latched camera's address holds another camera now: not substituted)
+            static uint64_t n_miss;
+            if (n_miss++ < 40 || n_miss % 1000 == 0)
+                LOG("[stereo] eye %d, frame %llu: the camera at %#llx changed since the latch (game eye %.2f %.2f %.2f -> %.2f %.2f %.2f; %llu so far)\n",
+                    g_eye_cur, (unsigned long long)g_latch.frame, (unsigned long long)addr, g_latch.ref.eye[0], g_latch.ref.eye[1],
+                    g_latch.ref.eye[2], g[68], g[69], g[70], (unsigned long long)n_miss);
+            return false;
+        }
         stereo_build(g, (float *)out320);
         return true;
     }

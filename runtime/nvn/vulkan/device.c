@@ -350,20 +350,36 @@ void vk_log_memory(const char *why) {
 static size_t pcache_saved;  // bytes of the last save (or load)
 void vk_pipeline_cache_save(void);
 
+// The pipeline cache's tag: the GPU, its driver and the cache format only. Not this build or the shader translator:
+// the driver keys every entry by the SPIR-V and the state, so a changed translator just stops hitting the old entries
+// (and the cache would otherwise start empty at every new build: ~1 min of compiles to get back). The SPIR-V cache
+// (shaders.c) is keyed by its GLSL source the same way. A cache over PCACHE_MAX (stale entries add up) starts over.
+#define PCACHE_MAX (192u << 20)
 static void pipeline_cache_tag(char *out, size_t n) {
-    char gpu[400], uuid[2 * VK_UUID_SIZE + 1];
+    char uuid[2 * VK_UUID_SIZE + 1];
     for (int i = 0; i < VK_UUID_SIZE; i++) snprintf(uuid + 2 * i, 3, "%02x", g_vk.props.pipelineCacheUUID[i]);
-    snprintf(gpu, sizeof gpu, "%s, vendor %x device %x, driver %u, cache %s", g_vk.props.deviceName, g_vk.props.vendorID,
-             g_vk.props.deviceID, g_vk.props.driverVersion, uuid);
-    shader_cache_tag(out, n, gpu);
+    snprintf(out, n, "pipeline cache %d | %s, vendor %x device %x, driver %u, cache %s", SHADER_CACHE_VERSION,
+             g_vk.props.deviceName, g_vk.props.vendorID, g_vk.props.deviceID, g_vk.props.driverVersion, uuid);
 }
 
-static void *pipeline_cache_saver(void *a) {  // every 3 minutes, when it grew
+// Pipelines made so far (every vk_create_*_pipeline: the game's own and the preparation's)
+static _Atomic unsigned pipes_made;
+
+// Saved when the cache grew and nothing new has been built for a few seconds (a level's compiles are over), not on a
+// timer and not only at exit: a kill, a crash or SteamVR ending the app loses at most the last area's compiles.
+static void *pipeline_cache_saver(void *a) {
     (void)a;
+    unsigned saved_at = atomic_load(&pipes_made), last = saved_at;
+    int quiet = 0;
     for (;;) {
-        SDL_Delay(180000);
+        SDL_Delay(1000);
         if (rq_stopping()) break;  // (quitting: backend_quit saves it)
-        vk_pipeline_cache_save();
+        unsigned now = atomic_load(&pipes_made);
+        if (now != last) last = now, quiet = 0;
+        else if (++quiet == 3 && now != saved_at) {
+            saved_at = now;
+            vk_pipeline_cache_save();
+        }
     }
     return NULL;
 }
@@ -617,6 +633,7 @@ static void log_pipeline_stats(VkPipeline p) {
 }
 
 VkResult vk_create_graphics_pipeline(const VkGraphicsPipelineCreateInfo *ci, VkPipeline *out) {
+    atomic_fetch_add(&pipes_made, 1);
     if (g_shader_stats) {
         VkGraphicsPipelineCreateInfo c = *ci;
         c.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
@@ -631,6 +648,7 @@ VkResult vk_create_graphics_pipeline(const VkGraphicsPipelineCreateInfo *ci, VkP
 }
 
 VkResult vk_create_compute_pipeline(const VkComputePipelineCreateInfo *ci, VkPipeline *out) {
+    atomic_fetch_add(&pipes_made, 1);
     if (g_shader_stats) {
         VkComputePipelineCreateInfo c = *ci;
         c.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
@@ -939,11 +957,19 @@ static void create_device(void) {
     size_t sz = 0;
     void *data = NULL;
     FILE *fp = shader_cache_tag_ok(PCACHE_TAG, tag) ? fopen(PCACHE_FILE, "rb") : NULL;
-    if (!fp && !access(PCACHE_FILE, F_OK)) LOG("[vk] pipeline cache from another build / GPU / driver: starting a new one\n");
+    if (!fp && !access(PCACHE_FILE, F_OK)) LOG("[vk] pipeline cache from another GPU / driver: starting a new one\n");
     if (fp) {
         fseek(fp, 0, SEEK_END);
         sz = (size_t)ftell(fp);
         fseek(fp, 0, SEEK_SET);
+        if (sz > PCACHE_MAX) {
+            LOG("[vk] pipeline cache is %zu MB: starting a new one\n", sz >> 20);
+            fclose(fp);
+            fp = NULL;
+            sz = 0;
+        }
+    }
+    if (fp) {
         data = malloc(sz);
         if (fread(data, 1, sz, fp) != sz) sz = 0;
         fclose(fp);

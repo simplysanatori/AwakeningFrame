@@ -9,6 +9,10 @@ layer. Design: `~/.claude/plans/awakeningframe-vr-design.md` sections 2-6. Code:
 
 - **Each list runs once per eye** (`exec.c stereo_execute`). Before eye 1, the bound state is restored. The game's
   memory writes from eye 0 (uniform updates, buffer-to-buffer copies) are undone, and eye 1 then redoes them.
+- **Fences after both eyes:** a list's fence syncs are signalled once both eyes ran (the submission after eye 1).
+  Signalled in eye 0, a flush later in the list let the game see the fence done and write the next frame's scene
+  blocks while eye 0 still read them: eye 0's blocks then did not match the latched camera, so eye 0 drew with the
+  game's own camera whenever the camera moved (one eye flat: "cross-eyed when moving").
 - **Eye 1 runs a draw, clear or copy only when a target is twinned.** Twinned targets are the 16:9 render targets
   (the scalable ones) and the guest-sized AO targets. Shadow maps, cube maps and small offscreen targets are drawn
   once, in eye 0, and shared. Compute, counters and read-backs run in eye 0 only.
