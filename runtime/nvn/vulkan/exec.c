@@ -188,7 +188,7 @@ static bool overlap_on(void) {
     if (on < 0) {
         const char *e = getenv("LARECOMP_GPU_OVERLAP"), *w = getenv("LARECOMP_OVERLAP_WATCH");
         uint32_t g;
-        // Shader global memory as copies (gmir_on: no heap import - Turnip on the Steam Frame): the GPU reads nothing
+        // Shader global memory as copies (gmir_on: no heap import - Turnip with LARECOMP_VK_HEAP_DMABUF=0): the GPU reads nothing
         // of the game's memory in place - every range is copied at translation, which the game's SyncWait still waits
         // for (rq_wait_item) - and its stores reach guest memory as each submission completes (gmir_writeback, also on
         // a deferred SyncWait). So the overlap needs no storage snapshots there (snap_on). On by default in the VR mode
@@ -2114,7 +2114,7 @@ static VkPipelineLayout make_layout(Prog *p, int nsets, VkShaderStageFlags s0, V
     if (gm) p->set_layout[nsets++] = gmem_chunk_layout();
     // (lazy chunks, vertex / fragment: the storage buffers' chunks as push constants, shader.h GMEM_DIRECT_MAX)
     VkPushConstantRange gd = {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16 * GMEM_DIRECT_MAX};
-    bool direct = gm && gc_lazy && s1 == VK_SHADER_STAGE_FRAGMENT_BIT;
+    bool direct = gm && gc_lazy && !maxwell_gmem_whole && s1 == VK_SHADER_STAGE_FRAGMENT_BIT;
     // (LARECOMP_VK_PUSH_CB: the shaders' promoted constant buffer words, ShaderInfo.npush: vertex from 0, fragment after)
     VkPushConstantRange pcr[2];
     uint32_t npcr = 0;
@@ -4124,7 +4124,7 @@ static bool gmem_import(uint64_t size) {
 // itself, through its own DRM file as for any vkMapMemory. Else the memory is exported as a dma-buf and that is
 // mmapped there - which some systems refuse (issue #92: RX 6800 XT, Mesa 25.0.7, "Permission denied"), and then
 // the whole heap was a userptr import again.
-// Default on for RADV and Mesa's PanVK (issue #483); LARECOMP_VK_HEAP_DMABUF=0 off, =1 on any Linux driver with dma-buf
+// Default on for RADV, Mesa's PanVK (issue #483) and Turnip; LARECOMP_VK_HEAP_DMABUF=0 off, =1 on any Linux driver with dma-buf
 // export or placed maps. LARECOMP_VK_NO_GMEM: off.
 // LARECOMP_VK_HEAP_PLACED=0: the dma-buf mapping even where placed maps exist (tests).
 #ifdef __linux__
@@ -4235,6 +4235,7 @@ static bool guest_heap_dmabuf_try(void) {
     bool placed = g_vk.map_placed && (!pe || atoi(pe));
     if (!placed && !g_vk.dmabuf) { LOG("[vk] heap as driver memory: no way to map it here\n"); return false; }
     bi.pNext = placed ? NULL : &eb;  // (an exportable buffer only for the dma-buf mapping)
+    if (g_vk.bda) bi.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;  // (Turnip: chunks of it by address, gc_import)
     VkBuffer buf;
     if (vkCreateBuffer(g_vk.dev, &bi, NULL, &buf) != VK_SUCCESS) { LOG("[vk] heap as driver memory: buffer failed\n"); return false; }
     VkMemoryRequirements req;
@@ -4250,7 +4251,8 @@ static bool guest_heap_dmabuf_try(void) {
         vkDestroyBuffer(g_vk.dev, buf, NULL);
         return false;
     }
-    VkMemoryDedicatedAllocateInfo ded = {.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, .buffer = buf};
+    VkMemoryAllocateFlagsInfo af = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
+    VkMemoryDedicatedAllocateInfo ded = {.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, .pNext = g_vk.bda ? &af : NULL, .buffer = buf};
     VkExportMemoryAllocateInfo ex = {.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO, .pNext = &ded,
                                      .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
     VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = placed ? (void *)&ded : (void *)&ex,
@@ -4383,6 +4385,20 @@ void backend_guest_heap_prepare(void) {
         // permissions (and nothing here drops heap page entries later). About 2.5 s and 6.5 MB of page tables for
         // 3.3 GB. LARECOMP_VK_HEAP_PREFAULT=0: not done.
         const char *st = getenv("LARECOMP_SOFT_WRITE_TRACKING"), *pf = getenv("LARECOMP_VK_HEAP_PREFAULT");
+        // Turnip (Steam Frame, Adreno 750, Linux 7.2): the msm driver's fault handler counts the page from the VMA's
+        // start too (vmf->address - vma->vm_start), and the prefault below doesn't hold there: under memory pressure
+        // its shrinker evicts an idle buffer and zaps the CPU's page entries, which then fault in again from the wrong
+        // place in every part after a split (tools: a 3.3 GB placed map, one page protected, read back 25 s later -
+        // every page above it held the buffer's first pages; in the game the heap allocator's header at the first save
+        // load, the same crash every run). Without page protection the mapping stays one VMA and a refault is right.
+        // So no soft tracking there: the overlap runs with the hash probe (overlap_on). LARECOMP_SOFT_WRITE_TRACKING=1:
+        // on anyway (tests).
+        if (g_vk.heap_no_split && !(st && atoi(st))) {
+            gmem_mprotect_broken = true;
+            LOG("[vk] heap as driver memory: no soft write tracking on this driver (a page fault after a split maps the "
+                "wrong page); the overlap uses the hash probe\n");
+            return;
+        }
         if (!(st && !atoi(st)) && !(pf && !atoi(pf))) {
             uint64_t t0 = SDL_GetTicksNS();
             int r = madvise((void *)(uintptr_t)HEAP_BASE, HEAP_MAX, MADV_NOHUGEPAGE);
@@ -4469,6 +4485,7 @@ static struct {
     VkBuffer buf;
     VkDeviceMemory mem;
     uint64_t size, addr;  // (addr: the chunk's device address, lazy mode)
+    uint64_t boff;        // the chunk's offset in buf: 0 for an import, its heap offset in the driver memory heap (gmem_buf)
 } gc[GC_MAX];
 static int gc_n;             // chunks over HEAP_MAX
 static uint32_t gc_shift;    // 0: one buffer
@@ -4521,13 +4538,30 @@ static void gc_remember(int k) {
 static int gc_imported;
 static uint64_t gc_imported_bytes, stat_gc_misses;
 
+// The heap as driver memory where one storage buffer can't span it (Turnip: 128 MB): the lazy chunks' path over
+// ranges of the one buffer instead of windows - each access takes its chunk's device address from the table - where
+// a window is picked with one branch per window in every access (26 here, against 1-4 on the GPUs windows were made
+// for: VR at 120 Hz, Mabe held at 30 with the GPU at 20.1 ms a frame; chunks: 60 fps, 16.0 ms). Every chunk is there
+// from the start, so shaders count no misses and the draw's chunks aren't push constants (maxwell_gmem_whole: those
+// would overlap the constant buffer words Turnip gets as push constants).
+static bool gmem_driver_chunks(void) {
+#ifdef __linux__
+    return gc_lazy && gmem_dmabuf;
+#else
+    return false;
+#endif
+}
 static bool gmem_lazy(void) {
     static int lazy = -1;
     if (lazy >= 0) return lazy;
     lazy = g_vk.lazy_heap;
     if (!lazy && g_vk.heap_probe && !getenv("LARECOMP_VK_NO_GMEM")) lazy = whole_import_probe_oom();
-    if (lazy && (!g_vk.host_import || !g_vk.bda || !g_vk.ssbo_chunks)) {
-        LOG("[vk] lazy heap import: not possible here (%s)\n", !g_vk.host_import ? "no host memory import" : !g_vk.bda ? "no buffer device addresses" : "no stores from fragment / vertex shaders");
+    bool driver_heap = false;
+#ifdef __linux__
+    driver_heap = gmem_dmabuf && g_vk.bda;  // (gmem_chunk_decide runs after the heap is made: gmir_on)
+#endif
+    if (lazy && (!(g_vk.host_import || driver_heap) || !g_vk.bda || !g_vk.ssbo_chunks)) {
+        LOG("[vk] lazy heap import: not possible here (%s)\n", !(g_vk.host_import || driver_heap) ? "no host memory import" : !g_vk.bda ? "no buffer device addresses" : "no stores from fragment / vertex shaders");
         lazy = 0;
     }
     return lazy;
@@ -4546,7 +4580,7 @@ static uint32_t gmem_chunk_shift(void) {
 static void gmem_chunk_decide(void) {
     if (gmir_on()) {  // (copies: no heap binding at all, every stage goes through the table)
         gc_lazy = false, gc_shift = 0, gc_n = 0;
-        maxwell_gmem_lazy = maxwell_gmem_fs_miss = false;
+        maxwell_gmem_lazy = maxwell_gmem_fs_miss = maxwell_gmem_whole = false;
         maxwell_gmem_mirror = true;
         gc_shift_decided = 0;
         return;
@@ -4557,6 +4591,7 @@ static void gmem_chunk_decide(void) {
     gc_lazy = gmem_lazy();
     shift = 0;
     if (e) { uint64_t b = strtoull(e, NULL, 10) << 20; if (b) shift = 63 - __builtin_clzll(b); }
+    else if (gc_lazy && gmem_driver_chunks() && lim && lim < (1ull << 30)) shift = 63 - __builtin_clzll(lim);  // (as large as a storage buffer)
     else if (gc_lazy) shift = 24;
     else if (HEAP_MAX > lim && lim) shift = 63 - __builtin_clzll(lim);
     if (shift > 30) shift = 30;  // (1 GB at most: NVIDIA computes a block's length in signed 32 bits, a 2 GB range reads as negative)
@@ -4584,10 +4619,12 @@ static void gmem_chunk_decide(void) {
     gc_shift = (uint32_t)shift;
     gc_n = shift ? n : 0;
     maxwell_gmem_lazy = gc_lazy;
+    maxwell_gmem_whole = gmem_driver_chunks();
     maxwell_gmem_fs_miss = gc_lazy && getenv("LARECOMP_VK_GMEM_FS_MISS") && atoi(getenv("LARECOMP_VK_GMEM_FS_MISS")) != 0;
     if (maxwell_gmem_fs_miss) LOG("[vk] lazy chunks: every fragment shader counts misses, no early tests (LARECOMP_VK_GMEM_FS_MISS)\n");
     if (shift) LOG("[vk] guest heap bound to shaders in %llu MB %s (storage buffers up to %llu MB here)\n",
-                   (unsigned long long)(1ull << shift) >> 20, gc_lazy ? "chunks, imported as the game binds them" : "windows", (unsigned long long)lim >> 20);
+                   (unsigned long long)(1ull << shift) >> 20, maxwell_gmem_whole ? "chunks of the driver memory, by device address" :
+                   gc_lazy ? "chunks, imported as the game binds them" : "windows", (unsigned long long)lim >> 20);
     gc_shift_decided = shift;
 }
 
@@ -4604,6 +4641,28 @@ static bool host_import(uint64_t off, uint64_t size, VkBuffer *buf, VkDeviceMemo
 // Lazy mode: chunk k imported (again, if the heap grew into it since). False: not mapped yet / the import failed.
 static bool gc_import(int k) {
     uint64_t off = (uint64_t)k << gc_shift, heap = gmem_heap_size();
+#ifdef __linux__
+    // The heap as driver memory (Turnip: storage buffers of 128 MB at most): a chunk is a range of the one buffer,
+    // its device address and offset - nothing imported, the whole chunk there whatever the heap's size
+    if (gmem_dmabuf && gmem_buf) {
+        if (k < 0 || k >= gc_n) return false;
+        if (gc[k].buf) return true;
+        static uint64_t base;
+        static VkBuffer base_of;
+        if (base_of != gmem_buf) {
+            VkBufferDeviceAddressInfo ai = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = gmem_buf};
+            base = vkGetBufferDeviceAddress(g_vk.dev, &ai);
+            base_of = gmem_buf;
+        }
+        gc[k].buf = gmem_buf; gc[k].mem = VK_NULL_HANDLE; gc[k].boff = off;
+        gc[k].size = gmem_size - off < (1ull << gc_shift) ? gmem_size - off : 1ull << gc_shift;
+        gc[k].addr = base + off;
+        gc_imported++;
+        gc_imported_bytes += gc[k].size;
+        gc_gen++;
+        return true;
+    }
+#endif
     if (k < 0 || k >= gc_n || off >= heap) return false;
     uint64_t size = heap - off < (1ull << gc_shift) ? heap - off : 1ull << gc_shift;
     if (gc[k].buf && gc[k].size >= size) return true;
@@ -4621,7 +4680,7 @@ static bool gc_import(int k) {
         gc_imported++;
     }
     VkBufferDeviceAddressInfo ai = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = buf};
-    gc[k].buf = buf; gc[k].mem = mem; gc[k].size = size;
+    gc[k].buf = buf; gc[k].mem = mem; gc[k].size = size; gc[k].boff = 0;
     gc[k].addr = vkGetBufferDeviceAddress(g_vk.dev, &ai);
     gc_imported_bytes += size;
     gc_gen++;
@@ -4753,7 +4812,7 @@ static VkDescriptorSet gmem_chunk_set(const int dk[GMEM_DIRECT_MAX]) {
     if (gc_lazy && gc_remembered_heap != gmem_heap_size()) {
         gc_remembered_heap = gmem_heap_size();
         gc_remembered_load();
-        for (int k = 0; k < gc_n; k++) if (gc_remembered[k] && !gc[k].buf) gc_import(k);
+        for (int k = 0; k < gc_n; k++) if ((gc_remembered[k] || gmem_driver_chunks()) && !gc[k].buf) gc_import(k);
     }
     static struct { VkDescriptorSet set; int dk[GMEM_DIRECT_MAX]; } cache[GC_SET_CACHE];
     static int ncache, next;
@@ -4789,7 +4848,7 @@ static VkDescriptorSet gmem_chunk_set(const int dk[GMEM_DIRECT_MAX]) {
                                          .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[1]};
         for (int j = 0; j < GMEM_DIRECT_MAX; j++) {  // (GDir<j>: the chunk's own import, whole; unused: the zero buffer)
             int k = dk[j];
-            bi[2 + j] = k >= 0 && k < gc_n && gc[k].buf ? (VkDescriptorBufferInfo){gc[k].buf, 0, gc_direct_bytes(k)}
+            bi[2 + j] = k >= 0 && k < gc_n && gc[k].buf ? (VkDescriptorBufferInfo){gc[k].buf, gc[k].boff, gc_direct_bytes(k)}
                                                        : (VkDescriptorBufferInfo){gc_dummy, 0, 4096};
             w[nw++] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = GMEM_DIRECT_BINDING + j,
                                              .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[2 + j]};
@@ -4870,7 +4929,7 @@ static void gmem_chunk_bind(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeli
     }
     uint32_t gd[GMEM_DIRECT_MAX * 4];
     int dk[GMEM_DIRECT_MAX] = {-1, -1, -1, -1};
-    bool direct = gc_lazy && bp == VK_PIPELINE_BIND_POINT_GRAPHICS;
+    bool direct = gc_lazy && !maxwell_gmem_whole && bp == VK_PIPELINE_BIND_POINT_GRAPHICS;
     if (direct) gmem_direct_pick(stages, gd, dk);
     VkDescriptorSet set = gmem_chunk_set(dk);
     rec_CmdBindDescriptorSets(cb, bp, layout, set_index, 1, &set, 0, NULL);
@@ -4910,7 +4969,7 @@ static void gmem_copy(VkCommandBuffer cb, VkBuffer other, const VkBufferCopy *cp
             int k = (int)(h >> gc_shift);
             uint64_t in = h - ((uint64_t)k << gc_shift), piece = (1ull << gc_shift) - in < left ? (1ull << gc_shift) - in : left;
             if (k < gc_n && (gc[k].buf || gc_import(k)) && in + piece <= gc[k].size) {
-                VkBufferCopy c = to_heap ? (VkBufferCopy){o, in, piece} : (VkBufferCopy){in, o, piece};
+                VkBufferCopy c = to_heap ? (VkBufferCopy){o, gc[k].boff + in, piece} : (VkBufferCopy){gc[k].boff + in, o, piece};
                 if (to_heap) rec_CmdCopyBuffer(cb, other, gc[k].buf, 1, &c);
                 else rec_CmdCopyBuffer(cb, gc[k].buf, other, 1, &c);
             }
@@ -5827,7 +5886,7 @@ static bool guest_direct_(int kind, uint64_t addr, uint64_t size, VkBuffer *buf,
         if (vcache_lookup(addr, size, buf, off)) return true;
         heap_clean(addr, size);
         *buf = gc[k].buf;
-        *off = o - ((uint64_t)k << gc_shift);
+        *off = gc[k].boff + o - ((uint64_t)k << gc_shift);
         return true;
     }
     if (addr + size > HEAP_BASE + gmem_size && kernel_heap_size() != gmem_tried) { gmem_tried = kernel_heap_size(); gmem_info(); }
@@ -5868,7 +5927,7 @@ void vk_exec_reset(void) {
     }
     gmem_size = gmem_tried = 0;
     for (int k = 0; k < gc_n; k++) {  // (lazy chunks: their pages are replaced too)
-        if (gc[k].buf) { vkDestroyBuffer(g_vk.dev, gc[k].buf, NULL); vkFreeMemory(g_vk.dev, gc[k].mem, NULL); }
+        if (gc[k].buf && gc[k].mem) { vkDestroyBuffer(g_vk.dev, gc[k].buf, NULL); vkFreeMemory(g_vk.dev, gc[k].mem, NULL); }
         memset(&gc[k], 0, sizeof gc[k]);
     }
     gc_imported = 0; gc_scanned = 0; gc_imported_bytes = 0; gc_gen++;  // (gc_remembered stays: the same heap layout next boot)

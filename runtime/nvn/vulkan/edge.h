@@ -20,8 +20,11 @@
 
 typedef enum { EDGE_BLACK = 0, EDGE_FOG, EDGE_GRADIENT, EDGE_PASSTHROUGH, EDGE_FADE } EdgeMode;
 
-// The mode (LARECOMP_VR_EDGE, read once).
+// The mode (LARECOMP_VR_EDGE at the start; then the VR tab's, edge_set_mode).
 EdgeMode edge_mode(void);
+// The VR tab's Table Edge while the game runs (runtime/vr_settings.c): 0 black, 1 fade, 2 passthrough (VRS_EDGE_*).
+// The next eye is drawn in the new mode; the XR thread's blend mode follows with the set those eyes go in.
+void edge_set_mode(int vrs);
 // Passthrough wanted (mode passthrough): xr_loop.c's xrEndFrame then needs environmentBlendMode ALPHA_BLEND (when the
 // runtime offers it) and XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT on the projection layer (edge_layer_flags).
 bool edge_passthrough_wanted(void);
