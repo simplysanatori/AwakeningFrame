@@ -9,6 +9,7 @@
 #include "../../platform.h"
 #include "../../rt.h"
 #include "../cam_override.h"
+#include "foveation.h"
 #ifdef LARECOMP_HAVE_XR
 #include "../../xr/xr.h"
 #else
@@ -223,6 +224,10 @@ static bool eye_fn(const CamLatch *l, const float pivot_in[3], float V[2][16], f
     }
     g_rv.ok = true, g_rv.id = vid;
     memcpy(g_rv.ev, ev, sizeof ev);
+    fov_note_views((const float[2][4]){{ev[0].orientation[0], ev[0].orientation[1], ev[0].orientation[2], ev[0].orientation[3]},
+                                      {ev[1].orientation[0], ev[1].orientation[1], ev[1].orientation[2], ev[1].orientation[3]}},
+                   (const float[2][4]){{ev[0].fov[0], ev[0].fov[1], ev[0].fov[2], ev[0].fov[3]},
+                                      {ev[1].fov[0], ev[1].fov[1], ev[1].fov[2], ev[1].fov[3]}}, vid);  // (foveation.c)
     memcpy(g_rv.V, V, sizeof g_rv.V), memcpy(g_rv.P, P, sizeof g_rv.P);
     return true;
 }

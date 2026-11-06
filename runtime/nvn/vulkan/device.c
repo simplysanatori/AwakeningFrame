@@ -14,6 +14,7 @@
 #include "../../ui/menu.h"
 #include "../rqueue.h"
 #include "vk.h"
+#include "foveation.h"
 #include "record.h"
 #include "../output_scale.h"
 #include "../renderer.h"
@@ -692,6 +693,8 @@ static void create_device(void) {
     // LARECOMP_VK_SHADER_STATS=1: each pipeline's statistics from the driver (registers, spills, cycles: tuning shaders)
     bool pexec_ext = getenv("LARECOMP_VK_SHADER_STATS") && atoi(getenv("LARECOMP_VK_SHADER_STATS")) &&
                      has_ext(ep, ne, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
+    bool fdm_ext = has_ext(ep, ne, VK_EXT_FRAGMENT_DENSITY_MAP_EXTENSION_NAME);  // (VR foveation: foveation.c)
+    bool fsr_ext = has_ext(ep, ne, VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME);
     free(ep);
 
     // features the backend relies on (all present on current desktop drivers)
@@ -896,6 +899,7 @@ static void create_device(void) {
         g_shader_stats = true;
         LOG("[vk] shader statistics on (LARECOMP_VK_SHADER_STATS): one [stats] line per pipeline stage, pipelines not cached\n");
     }
+    if (xr_mode()) fov_device_setup(g_vk.phys, fdm_ext, fsr_ext, ext, &n_ext, &f);
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
                                   .queueCount = 1, .pQueuePriorities = &prio};

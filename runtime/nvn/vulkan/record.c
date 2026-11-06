@@ -1080,19 +1080,26 @@ void rec_CmdPipelineBarrier2(VkCommandBuffer cb, const VkDependencyInfo *di) {
     ENQ_END();
 }
 
-// ---- rendering: the info, its colour attachments, then the depth and stencil ones (nothing chained)
-CMD_ARGS(CmdBeginRendering, VkRenderingInfo ri; VkRenderingAttachmentInfo depth, stencil; uint8_t has_depth, has_stencil;)  // then colour[]
+// ---- rendering: the info, its colour attachments, then the depth and stencil ones (nothing chained but one shading-rate
+// or density-map attachment: foveation.c)
+CMD_ARGS(CmdBeginRendering, VkRenderingInfo ri; VkRenderingAttachmentInfo depth, stencil;
+         union { VkRenderingFragmentDensityMapAttachmentInfoEXT fdm; VkRenderingFragmentShadingRateAttachmentInfoKHR fsr; } fov;
+         uint8_t has_depth, has_stencil, has_fov;)  // then colour[]
 static void CmdBeginRendering_run(const void *p) {
     const CmdBeginRenderingArgs *a = p;
     VkRenderingInfo ri = a->ri;
     ri.pColorAttachments = ri.colorAttachmentCount ? after(a, sizeof *a) : NULL;
     ri.pDepthAttachment = a->has_depth ? &a->depth : NULL;
     ri.pStencilAttachment = a->has_stencil ? &a->stencil : NULL;
+    ri.pNext = a->has_fov ? &a->fov : NULL;
     vkCmdBeginRendering(a->cb, &ri);
 }
 void rec_CmdBeginRendering(VkCommandBuffer cb, const VkRenderingInfo *ri) {
     if (on <= 0) { vkCmdBeginRendering(cb, ri); return; }
-    if (ri->pNext) FATAL("[vk] recorder: a chained rendering info\n");
+    const VkBaseInStructure *fov = ri->pNext;
+    if (fov && ((fov->sType != VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_INFO_EXT &&
+                 fov->sType != VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_INFO_KHR) || fov->pNext))
+        FATAL("[vk] recorder: a chained rendering info\n");
     for (uint32_t i = 0; i < ri->colorAttachmentCount; i++) if (ri->pColorAttachments[i].pNext) FATAL("[vk] recorder: a chained attachment\n");
     if ((ri->pDepthAttachment && ri->pDepthAttachment->pNext) || (ri->pStencilAttachment && ri->pStencilAttachment->pNext))
         FATAL("[vk] recorder: a chained attachment\n");
@@ -1104,6 +1111,11 @@ void rec_CmdBeginRendering(VkCommandBuffer cb, const VkRenderingInfo *ri) {
     a->ri.pColorAttachments = NULL; a->ri.pDepthAttachment = NULL; a->ri.pStencilAttachment = NULL;
     a->has_depth = ri->pDepthAttachment != NULL;
     a->has_stencil = ri->pStencilAttachment != NULL;
+    a->has_fov = fov != NULL;
+    if (fov && fov->sType == VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_INFO_EXT)
+        a->fov.fdm = *(const VkRenderingFragmentDensityMapAttachmentInfoEXT *)fov;
+    else if (fov) a->fov.fsr = *(const VkRenderingFragmentShadingRateAttachmentInfoKHR *)fov;
+    a->ri.pNext = NULL;
     if (a->has_depth) a->depth = *ri->pDepthAttachment;
     if (a->has_stencil) a->stencil = *ri->pStencilAttachment;
     if (sc) memcpy(after(a, sizeof *a), ri->pColorAttachments, sc);
