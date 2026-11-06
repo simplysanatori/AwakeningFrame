@@ -240,6 +240,7 @@ static void eye_planes(const CamRef *r, float m, float pl[4][4]) {  // left, rig
     }
 }
 
+static unsigned g_swing[2];  // (vr_cull_fit, LARECOMP_LOG_CULL) swings since the last log line: fitted, used
 void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3], const CamRef *eye0, const CamRef *eye1) {
     if (!C.init) init();
     if (C.mode != VR_CULL_FIT || !l || !l->valid) { g_rect.have = false; return; }
@@ -328,6 +329,35 @@ void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3],
     tx = fminf(tx * 1.05f, TMAX), ty = fminf(ty * 1.05f, TMAX);
     if (tx < tx0) tx = tx0;
     if (ty < ty0) ty = ty0;
+    // (lane scene) hold: with the Surroundings box the fit swings from frame to frame as the head moves (a corner that
+    // dips behind the game camera takes it from about 2 to 20 and back), and the game's list of drawn objects with it:
+    // flicker. So the widening grows at once and shrinks only after LARECOMP_VR_CULL_HOLD frames (60) without growing,
+    // by 3% a frame. Only while the box is on (Low, Full, Backdrop's capture frames); the table fit alone keeps the plain
+    // fit, and the held values start again from it (LARECOMP_VR_CULL_HOLD_ALL=1: always).
+    {
+        static int hold = -1, all;
+        if (hold < 0) {
+            const char *e = getenv("LARECOMP_VR_CULL_HOLD");
+            hold = e && *e ? atoi(e) : 60, all = getenv("LARECOMP_VR_CULL_HOLD_ALL") != NULL;
+        }
+        static float htx, hty;
+        static uint64_t gx, gy;
+        {   // (LARECOMP_LOG_CULL) fits that moved the vertical tangent by more than a third from the previous one: as fitted, as used
+            static float rp, up;
+            float used = hold > 0 && (all || atomic_load(&g_ex) > 0) ? fmaxf(ty, hty) : ty;
+            if (rp > 0 && fabsf(ty - rp) > 0.33f * fminf(ty, rp)) g_swing[0]++;
+            if (up > 0 && fabsf(used - up) > 0.33f * fminf(used, up)) g_swing[1]++;
+            rp = ty, up = used;
+        }
+        if (hold > 0 && (all || atomic_load(&g_ex) > 0)) {
+            uint64_t f = l->frame;
+            if (tx >= htx || f < gx) htx = tx, gx = f;
+            else if (f - gx > (uint64_t)hold) htx = fmaxf(tx, htx * 0.97f);
+            if (ty >= hty || f < gy) hty = ty, gy = f;
+            else if (f - gy > (uint64_t)hold) hty = fmaxf(ty, hty * 0.97f);
+            tx = htx, ty = hty;
+        } else htx = tx, hty = ty, gx = gy = l->frame;
+    }
     float fs = atanf(ty) / atanf(ty0);
     atomic_store(&g_aspect, tx / ty), atomic_store(&g_fs, fs);
     static uint64_t logged;
@@ -335,8 +365,9 @@ void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3],
         logged = l->frame;
         float lo[3], hi[3];
         bool core = vr_cull_core_box(lo, hi);
-        LOG("[vrcull] f%llu fitted: tan x %.3f y %.3f (stock %.3f %.3f): aspect %.3f, fovy x%.3f; %d points%s; core x %.1f..%.1f z %.1f..%.1f\n",
+        LOG("[vrcull] f%llu fitted: tan x %.3f y %.3f (stock %.3f %.3f): aspect %.3f, fovy x%.3f; %d points%s; core x %.1f..%.1f z %.1f..%.1f; swings %u fitted, %u used\n",
             (unsigned long long)l->frame, tx, ty, tx0, ty0, tx / ty, fs, npts, behind ? ", some behind the camera" : "",
-            core ? lo[0] : 0, core ? hi[0] : 0, core ? lo[2] : 0, core ? hi[2] : 0);
+            core ? lo[0] : 0, core ? hi[0] : 0, core ? lo[2] : 0, core ? hi[2] : 0, g_swing[0], g_swing[1]);
+        g_swing[0] = g_swing[1] = 0;
     }
 }

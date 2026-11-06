@@ -34,9 +34,19 @@ Low and Full (and Backdrop's capture frames):
 - once the box reaches behind the game camera its frustum lets through every resident room in front of it, so ring
   draws whose box misses the culling box are left out everywhere (class 3, "beyond", in `vr_ring_class`);
 - the round fade (Table Edge: Fade) ends at the box's nearer side instead of 25 units out.
+- the fitted widening is held: it grows at once and shrinks only after `LARECOMP_VR_CULL_HOLD` frames (60) without
+  growing, 3% a frame. Without it a box corner dipping behind the game camera as the head moves took the tangent from
+  about 2 to 20 for single frames, and objects at the edge of the game's frustum (the cuccos below the table) came and
+  went: flicker;
+- only room geometry is left out past the box (class 3); characters, props and sprites still draw. Draw boxes are
+  memoised by buffer address and checked against three of their vertices each time: buffers rewritten in place
+  (sprites, effects) used to get another draw's box, about two draws a frame, and so vanished for a frame.
 
 Low Quality's coarse shading needs the device's pipeline shading rates (the foveation's setup: off at startup means
 none); without them Low Quality is Full. The rate combines with the foveation map (MAX) where the driver offers it.
+On the Frame's driver the pipelines get the 2 x 2 rate (`[scene] low quality: draws past the table shade 2x2
+fragments`), but neither the pictures nor the GPU time change measurably (multiview, foveated passes): for now Low
+Quality costs what Full costs.
 
 Explicit `LARECOMP_VR_CULL_EXTENT` / `_TMAX` / `LARECOMP_VR_RING` win in every mode.
 
@@ -45,10 +55,10 @@ Explicit `LARECOMP_VR_CULL_EXTENT` / `_TMAX` / `LARECOMP_VR_RING` win in every m
 Drawing the outer rooms every frame costs the game thread as much as the GPU: the game handles every object its
 frustum lets through, even those the executor then leaves out. Backdrop pays that only on a capture:
 
-1. ask vr_cull for the wide culling (as Full) and wait `LARECOMP_VR_BACKDROP_DELAY` new eye outputs (4) for it to reach
+1. ask vr_cull for the wide culling (as Full) and wait `LARECOMP_VR_BACKDROP_DELAY` new eye outputs (8) for it to reach
    the eyes;
 2. copy eye 0's output and scene depth, with that frame's camera; back to the table fit;
-3. every frame after, draw the capture into both eyes as a grid mesh (`LARECOMP_VR_BACKDROP_GRID`, 256 x 256 cells): each
+3. every frame after, draw the capture into both eyes as a grid mesh (`LARECOMP_VR_BACKDROP_GRID`, 128 x 128 cells): each
    grid point moved to where its depth puts it in the world, drawn with the eye's current camera, into the pixels the
    live scene left empty (scene depth still cleared). The live game always wins. Cells whose corners differ in distance
    from the capture's eye by more than `LARECOMP_VR_BACKDROP_JUMP` (8%) are left out: no sheets between a tree and the
@@ -57,7 +67,20 @@ frustum lets through, even those the executor then leaves out. Backdrop pays tha
 A capture is taken when there is none, when the table's centre moved `LARECOMP_VR_BACKDROP_MOVE` units (6), when eye 0
 turned `LARECOMP_VR_BACKDROP_TURN` degrees (25) from the captured view, when the level changes, after
 `LARECOMP_VR_BACKDROP_REFRESH` seconds (0: never), and at most every `LARECOMP_VR_BACKDROP_GAP` seconds (1).
-`LARECOMP_VR_BACKDROP_LOG=1` logs each one.
+Not while the world changes: at the start, after a level change, after a warp (the table's centre jumps more than
+3 units between two outputs) and during the rig's blink, it waits `LARECOMP_VR_BACKDROP_SETTLE` seconds (2.5; 0.5
+after a blink) for the rooms to stream in and the game to fade in, then takes a capture and one more a settle later.
+A level change drops the old level's picture at once. `LARECOMP_VR_BACKDROP_LOG=1` logs each one.
+
+## The edge fill (`scene.c`, every mode but Off, overworld only)
+
+Where the drawn world ends, the void past it takes the colour next to it and fades out, instead of a hard black edge
+(`LARECOMP_VR_SCENE_EDGE=0`: off). An eighth-size image holds, per 8 x 8 block of the eye, the average colour of the
+drawn pixels (16 taps; the live scene's depth or the backdrop's) times their share; its mips spread that out, and each
+empty pixel reads the levels from the coarsest down, each over the coarser ones where it has colour (pull-push): the
+nearest drawn world's colour, smoothly spread. It fades with the share of drawn pixels around it, over
+`LARECOMP_VR_SCENE_EDGE_REACH` of the eye's height (0.18); past that the void stays as it was. Indoors nothing changes
+(the dark around a room is the game's look).
 
 Limits: the picture is still (nothing outside animates; the owner's call); it covers what eye 0 saw at the capture;
 characters in it stay where they were (only where the live scene is empty); no visit is needed: it is taken from
@@ -78,9 +101,15 @@ with the head 45 degrees down. GPU = the pacer's GPU per game frame; CPU = the g
 | overview | Full at 864² eyes | 16.3 | 20.8 | 11.2 | 30 | 38 |
 | default | Off | 14.7 | 8.3 | 9.1 | 57 | 21 |
 | default | Full | 16.4 | 15.7 | 9.3 | 29.4 | 19 |
+| overview | Backdrop, no edge fill | 14.4 | 7.5 | 8.5 | 55.5 | 41 |
+| overview | Backdrop | 15.8 | 7.5 | 8.5 | 56.5 | 33 |
+| default | Backdrop | 16.2 | 8.5 | 9.3 | 56.7 | 15 |
 
 - The game thread is what Full costs at 60 FPS: +7 ms at the default scale, +15 at the overview. At 90 Hz (30 FPS)
   Full fits.
 - The outer draws are pixel-heavy (one profiled overview frame: main colour 16 of 32 ms), so 2 x 2 shading helps the
   GPU; it does nothing for the game thread.
-- No memory change: the rooms are resident anyway.
+- No memory change: the rooms are resident anyway (Backdrop adds one eye's colour and depth, and a D16 image).
+- Backdrop keeps 60 FPS: the picture costs about 0.4 ms, the edge fill about 1.4 ms (both eyes); the capture frames
+  (a few after each settle, move or turn) cost what Full costs. The edge fill also covers the cells Backdrop leaves
+  out at depth jumps.
