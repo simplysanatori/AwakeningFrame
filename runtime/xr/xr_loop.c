@@ -290,18 +290,20 @@ static void *xr_thread(void *arg) {
             }
         }
         {   // below 100 Hz (90): the game held in its 30 fps mode (pace.c pace_xr_lock); 120 Hz: 60 as the pacer decides.
-            // LARECOMP_XR_FPS=60 (a test): below 100 Hz the pacer decides too, with a 16.67 ms game frame
+            // LARECOMP_XR_FPS=60 (a test): below 100 Hz the pacer decides too, with a 16.67 ms game frame.
+            // About 60 Hz (SteamVR throttling 120 Hz, framesToThrottle=1): 60 as the pacer decides, one refresh a frame
             static int locked = -1;
             static int test60 = -1;
             if (test60 < 0) test60 = getenv("LARECOMP_XR_FPS") && atoi(getenv("LARECOMP_XR_FPS")) == 60;
             int fr = __atomic_exchange_n(&g_fps_req, -1, __ATOMIC_ACQ_REL);
             if (fr >= 0 && (fr == 60) != (test60 == 1)) test60 = fr == 60, LOG("[xr] game frame rate at 90 Hz: %s (VR settings)\n", test60 ? "60 fps (test)" : "30 fps");
-            int want = g_xr.display_hz < 100 ? (test60 ? 60 : 30) : 0;
+            bool hz60 = g_xr.display_hz > 0 && g_xr.display_hz < 75;
+            int want = hz60 ? 1 : g_xr.display_hz < 100 ? (test60 ? 60 : 30) : 0;  // (1: 60 fps at 60 Hz)
             if (want != locked) {
                 pace_xr_lock(want == 30 ? 30 : 0);
-                pace_xr_frame_ms(want == 30 ? 0 : want == 60 ? 1e3 / 60 : 2e3 / g_xr.display_hz);
+                pace_xr_frame_ms(want == 30 ? 0 : want == 60 ? 1e3 / 60 : (want == 1 ? 1e3 : 2e3) / g_xr.display_hz);
                 if (want == 60) LOG("[xr] test: 60 fps at %.0f Hz (uneven cadence)\n", g_xr.display_hz);
-                LOG("[xr] display at %.0f Hz: the game %s\n", g_xr.display_hz, want == 30 ? "held at 30 fps (3 refreshes a frame)" : want == 60 ? "at 60 fps (1 or 2 refreshes a frame)" : "at 60 fps (2 refreshes a frame)");
+                LOG("[xr] display at %.0f Hz: the game %s\n", g_xr.display_hz, want == 30 ? "held at 30 fps (3 refreshes a frame)" : want == 60 ? "at 60 fps (1 or 2 refreshes a frame)" : want == 1 ? "at 60 fps (1 refresh a frame)" : "at 60 fps (2 refreshes a frame)");
                 locked = want;
             }
         }
