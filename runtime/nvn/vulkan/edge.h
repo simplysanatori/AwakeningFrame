@@ -24,27 +24,13 @@ EdgeMode edge_mode(void);
 // runtime offers it) and XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT on the projection layer (edge_layer_flags).
 bool edge_passthrough_wanted(void);
 
-typedef struct {
-    int eye;                    // 0 left, 1 right (eye 0 also updates the backdrop colours)
-    VkImageView color;          // the eye output (sampled; GENERAL layout)
-    VkImageView depth;          // the scene depth, depth aspect (sampled; GENERAL). VK_NULL_HANDLE: edge_eye returns false
-    float color_crop[2];        // the present's crop of the colour: the visible part of the image, as (fx, fy) of its size
-    float depth_crop[2];        // the same for the depth image
-    bool origin_lower_left;     // renderer_origin_lower_left(): the present's flip
-    float V[16], P[16];         // this eye's view and projection (row-major, column vectors), as the game's camera
-    float zn, zf;               // st.depth_range (0, 1 normally)
-    bool depth_minus1;          // nvn_depth_mode() == 0: depth is stored as (ndc z + 1) / 2
-    float pivot_dist;           // eye to the diorama pivot in game units; <= 0: LARECOMP_VR_DIST / LARECOMP_VR_SCALE
-} EdgeEye;
-
-// Records the passes into the frame's command buffer outside any rendering, then draws the result into the XR eye
-// image `target` (extent w x h, format fmt; COLOR_ATTACHMENT_OPTIMAL in and out) in place of the present draw.
-// false: edge off (mode black), no depth, or a failure (logged once): the caller draws the eye as before and nothing
-// was recorded.
-bool edge_eye(VkCommandBuffer cb, const EdgeEye *in, VkImageView target, VkFormat fmt, uint32_t w, uint32_t h);
-
-// The eye cameras of the latest game frame (stereo.c eye_fn, once per frame): V[eye], P[eye] row-major as the game's
-// camera, pivot_dist the eye's distance to the diorama pivot in game units. Until the rig lane's hook hands them over
-// with each eye, this is how edge_eye's caller fills EdgeEye.V / .P / .pivot_dist (edge_cameras).
-void edge_note_cameras(const float V[2][16], const float P[2][16], float pivot_dist);
-bool edge_cameras(int eye, float V[16], float P[16], float *pivot_dist);
+// The eye post hook (stereo.h stereo_eye_post, defined in edge.c): once per new eye output it notes that eye's colour
+// image, scene depth, matrices and depth range. Nothing is drawn there: the eye output is a B10G11R11 image (no alpha,
+// 5-6 mantissa bits: a smooth gradient written back into it would band), so the result goes straight into the XR eye
+// image instead.
+//
+// edge_eye: records the passes for eye `eye` from the latest noted inputs into the frame's command buffer outside any
+// rendering, then draws the result into the XR eye image `target` (extent w x h, format fmt; COLOR_ATTACHMENT_OPTIMAL
+// in and out) in place of the present draw (exec.c vk_stereo_eyes, one line). false: mode black, no depth noted, or a
+// failure (logged once): the caller draws the eye as before and nothing was recorded.
+bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uint32_t w, uint32_t h);

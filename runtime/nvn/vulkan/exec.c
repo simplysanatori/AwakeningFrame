@@ -6612,34 +6612,48 @@ static void snow_cover_check(CmdRec *r, bool indexed, Prog *pr) {
 }
 
 static void draw_(CmdRec *r, bool indexed);
-// (stereo) the scene's composite into the window image goes to the eye output instead (per eye: it is twinned); the
-// window image keeps the HUD, cleared transparent at the composite (eye 0). st.rt is restored after the draw.
-static NvnTexture g_eye_out;
-static bool g_eye_out_ok, st_redirected, st_hud_alpha, st_blend_forced;
+// (stereo) the scene's composite into the window image goes to the eye output instead (per eye: it is twinned). The
+// HUD: the window image is B10G11R11 (no alpha), so after eye 0's composite the game's draws into it go to an RGBA16F
+// clone, cleared transparent (g_hud: never twinned, eye 0 only), and the present shows that. st.rt is restored after
+// each redirected draw.
+static NvnTexture g_eye_out, g_hud;
+static bool g_eye_out_ok, g_hud_ok, st_redirected, st_hud_alpha, st_blend_forced;
+static NvnTexture *g_hud_win;  // the window texture whose draws go to g_hud this frame
 static uint8_t st_blend_saved[8];
 static bool st_mask_forced;
 static uint32_t st_mask_saved;
 static RtState st_rt_saved;
 static uint64_t g_eye_out_frame[2];  // renderer_exec_frame() of each eye's latest composite (+1; 0 none)
+static uint64_t g_eye_out_n[2], g_eye_posted[2];  // composites so far / the latest one the eye post hook saw
+static NvnTexture *st_last_depth;    // the latest twinned depth target drawn into (the scene's, at the composite)
+static float st_last_zr[2];
+static TexBackend *g_eye_depth[2];   // per eye output: that eye's scene depth (stereo_eye_post)
+static float g_eye_zr[2][2];
+static void clone_target(NvnTexture *dst, bool *ok, const NvnTexture *win, uint32_t fmt, const char *label) {
+    if (*ok && dst->width == win->width && dst->height == win->height && dst->format == fmt) return;
+    if (*ok && dst->backend) backend_texture_destroyed(dst);
+    *dst = *win;
+    dst->format = fmt;
+    dst->backend = NULL, dst->addr = 0, dst->pool = NULL, dst->pool_offset = 0, dst->pool_refs = 0;
+    snprintf(dst->label, sizeof dst->label, "%s", label);
+    *ok = true;
+    LOG("[stereo] %s %ux%u fmt %#x (the window image's size)\n", label, win->width, win->height, fmt);
+}
 static void stereo_composite(void) {
     NvnTexture *win = st.rt.color[0];
-    if (!g_eye_out_ok || g_eye_out.width != win->width || g_eye_out.height != win->height || g_eye_out.format != win->format) {
-        if (g_eye_out_ok && g_eye_out.backend) backend_texture_destroyed(&g_eye_out);
-        g_eye_out = *win;
-        g_eye_out.backend = NULL, g_eye_out.addr = 0, g_eye_out.pool = NULL, g_eye_out.pool_offset = 0, g_eye_out.pool_refs = 0;
-        snprintf(g_eye_out.label, sizeof g_eye_out.label, "stereo eye output");
-        g_eye_out_ok = true;
-        LOG("[stereo] eye output %ux%u fmt %#x (the window image's)\n", win->width, win->height, win->format);
-    }
-    if (g_eye == 0) {  // the window image: transparent under the HUD
+    clone_target(&g_eye_out, &g_eye_out_ok, win, win->format, "stereo eye output");
+    if (g_eye == 0) {  // the HUD clone: transparent under the HUD
+        clone_target(&g_hud, &g_hud_ok, win, 0x29, "stereo HUD");  // (0x29: RGBA16F, the window's float range plus alpha)
         vk_end_pass();
-        TexBackend *wb = vk_tex(win, true);
+        TexBackend *hb = vk_tex(&g_hud, true);
+        hb->presented = true;  // (never twinned: eye 1 draws no HUD)
         VkCommandBuffer cb = vk_cmd();
         vk_full_barrier(cb);
         VkClearColorValue z = {{0, 0, 0, 0}};
         VkImageSubresourceRange rg = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        rec_CmdClearColorImage(cb, wb->image, VK_IMAGE_LAYOUT_GENERAL, &z, 1, &rg);
+        rec_CmdClearColorImage(cb, hb->image, VK_IMAGE_LAYOUT_GENERAL, &z, 1, &rg);
         vk_full_barrier(cb);
+        g_hud_win = win;
         st_hud_alpha = true;
     }
     st_rt_saved = st.rt;
@@ -6649,8 +6663,20 @@ static void stereo_composite(void) {
     memset(&st.rt.cview[0], 0, sizeof st.rt.cview[0]);
     st.rt_dirty = true;
     g_eye_out_frame[g_eye] = renderer_exec_frame() + 1;
+    g_eye_out_n[g_eye]++;
+    stereo_note_composite(g_eye);  // (the poses this output was rendered with go with it into the layer)
+    g_eye_depth[g_eye] = st_last_depth ? vk_tex(st_last_depth, true) : NULL;
+    memcpy(g_eye_zr[g_eye], st_last_zr, sizeof st_last_zr);
     static uint64_t n[2];
     if (n[g_eye]++ % 600 == 0) LOG("[stereo] eye %d composite #%llu (frame %llu)\n", g_eye, (unsigned long long)n[g_eye], (unsigned long long)renderer_exec_frame());
+}
+static void stereo_hud_redirect(void) {  // (eye 0, after the composite) a draw into the window image goes to the HUD clone
+    st_rt_saved = st.rt;
+    st_redirected = true;
+    st.rt.color[0] = &g_hud;
+    st.rt.has_cview[0] = 0;
+    memset(&st.rt.cview[0], 0, sizeof st.rt.cview[0]);
+    st.rt_dirty = true;
 }
 static void draw(CmdRec *r, bool indexed) {
     PROF_T0();
@@ -6698,7 +6724,9 @@ static void draw_(CmdRec *r, bool indexed) {
         }
     }
     if (g_eye >= 0) {  // (stereo executor)
+        if (st.rt.depth && vk_tex_twinned(st.rt.depth)) st_last_depth = st.rt.depth, memcpy(st_last_zr, st.depth_range[0], sizeof st_last_zr);
         if (wx_composite && !wx_mirror) stereo_composite();
+        else if (g_eye == 0 && st_hud_alpha && g_hud_win && st.rt.ncolor && st.rt.color[0] == g_hud_win) stereo_hud_redirect();
         if (eye1_skip_rt()) return;
     }
     if (g_interp_log) {  // (frame interpolation, runtime/nvn/interp.c: the draw's identity across frames - renderer.m's key)
@@ -6737,7 +6765,7 @@ static void draw_(CmdRec *r, bool indexed) {
         if (last_hash == 0xa2177dbb72197bd9ull && pot_level_active()) { SKIP(SK_HIDDEN); return; }
         if (g_debug_frame && getenv("LARECOMP_LOG_FSHASH")) LOG("[fshash] fs=%llx hash %016llx\n", (unsigned long long)fs, (unsigned long long)last_hash);
         g_cur_fs_hash = last_hash;
-        if (g_eye == 0 && st_hud_alpha && st.rt.ncolor && st.rt.color[0] && renderer_texture_presented(st.rt.color[0])) {
+        if (g_eye == 0 && st_hud_alpha && st.rt.ncolor && st.rt.color[0] == &g_hud) {
             // (stereo) the HUD over a transparent clear: blended draws accumulate coverage in alpha (src_a + dst_a * (1 - src_a));
             // the game assumed an opaque destination
             if (st.color_state[0] & 1) {
@@ -8210,6 +8238,8 @@ float g_vk_scene_uv[4];
 
 // Inside the window image's rendering (device.c vk_frame_begin): the game image into (vx, vy, vw, vh).
 void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, float vw, float vh, const float pv[8]) {
+    if (st_hud_alpha && g_hud_ok && g_hud.backend) b = g_hud.backend;  // (stereo: the HUD clone, alpha and all)
+    g_hud_win = NULL;
     if (!b || !b->image || (b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT)) return;
     // Dynamic: the image occupies the top-left part of the texture; FSR maps that part to its whole output, otherwise
     // the present samples the part
@@ -8537,10 +8567,15 @@ static void exec_list(uint64_t handle, int depth) {
             if (g_eye == 1 && !vk_tex_twinned((NvnTexture *)(uintptr_t)dst->tex)) { st_skipped[1]++; break; }  // (stereo: shared)
             if (g_eye == 0 && r->op != CMD_COPY_BUFFER_TO_TEXTURE && !vk_tex_twinned((NvnTexture *)(uintptr_t)dst->tex) &&
                 vk_tex_twinned((NvnTexture *)(uintptr_t)t[0].tex)) {
-                static int n;  // (a shared target made from a twin: eye 1 sees eye 0's)
-                if (n++ < 8) LOG("[stereo] copy from a twinned %ux%u into a shared %ux%u (eye 1 gets eye 0's)\n",
-                                 ((NvnTexture *)(uintptr_t)t[0].tex)->width, ((NvnTexture *)(uintptr_t)t[0].tex)->height,
-                                 ((NvnTexture *)(uintptr_t)dst->tex)->width, ((NvnTexture *)(uintptr_t)dst->tex)->height);
+                // (a shared target made from a twin: eye 1 would see eye 0's) the destination is twinned from now on, so
+                // eye 1 runs this copy into its own image (filled with eye 0's first: vk_stereo_twin_add)
+                NvnTexture *s_ = (NvnTexture *)(uintptr_t)t[0].tex, *d_ = (NvnTexture *)(uintptr_t)dst->tex;
+                vk_tex(d_, true);
+                bool added = vk_stereo_twin_add(d_);
+                static int n;
+                if (n++ < 32) LOG("[stereo] copy from a twinned %ux%u into a shared %ux%u fmt %#x (frame %llu): %s\n", s_->width, s_->height,
+                                  d_->width, d_->height, d_->format, (unsigned long long)renderer_exec_frame(),
+                                  added ? "twinned from now on" : "not twinnable: eye 1 gets eye 0's");
             }
             if (r->op == CMD_COPY_TEXTURE_TO_TEXTURE) copy_texture(&t[0], &t[1], r->x[6]);
             else if (r->op == CMD_DOWNSAMPLE) copy_texture(&t[0], &t[1], 1);
@@ -8698,6 +8733,15 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
         TexBackend *b = g_eye_out.backend;
         if (eye == 1) b = b->twin;
         if (!b || !b->image || !g_eye_out_frame[eye]) continue;
+        if (g_eye_posted[eye] != g_eye_out_n[eye]) {  // (a new output: the eye post hook, once)
+            g_eye_posted[eye] = g_eye_out_n[eye];
+            StereoEyePost ep = {.eye = eye, .cb = cb, .color = b, .depth = g_eye_depth[eye], .width = b->width, .height = b->height,
+                                .ax = b->scalable && b->ax > 0 ? b->sx / b->ax : 1, .ay = b->scalable && b->ay > 0 ? b->sy / b->ay : 1,
+                                .zn = g_eye_zr[eye][0], .zf = g_eye_zr[eye][1]};
+            ep.have_matrices = stereo_eye_matrices(eye, ep.V, ep.P);
+            if (!ep.have_matrices) for (int i = 0; i < 16; i++) ep.V[i] = ep.P[i] = i % 5 == 0;
+            stereo_eye_post(&ep);
+        }
         VkImage img;
         VkImageView view;
         VkFormat fmt;
@@ -8705,22 +8749,7 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
         if (!eye_target(eye, &img, &view, &fmt, &ext)) continue;
         vk_full_barrier(cb);
         float fx = b->scalable && b->ax > 0 ? b->sx / b->ax : 1, fy = b->scalable && b->ay > 0 ? b->sy / b->ay : 1;
-        {   // (edge treatment instead of the present draw: runtime/nvn/vulkan/edge.c)
-            TexBackend *db = wx_depth ? (TexBackend *)wx_depth->backend : NULL;
-            if (db && eye == 1) db = db->twin;
-            EdgeEye ein = {.eye = eye};
-            if (edge_mode() != EDGE_BLACK && db && db->image && edge_cameras(eye, ein.V, ein.P, &ein.pivot_dist)) {
-                static const VkComponentMapping id = {0};
-                ein.depth = vk_image_view(db, VK_IMAGE_VIEW_TYPE_2D, db->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
-                ein.color = raw_view(b);
-                ein.color_crop[0] = fx, ein.color_crop[1] = fy;
-                ein.depth_crop[0] = db->scalable && db->ax > 0 ? db->sx / db->ax : 1;
-                ein.depth_crop[1] = db->scalable && db->ay > 0 ? db->sy / db->ay : 1;
-                ein.origin_lower_left = renderer_origin_lower_left();
-                ein.zn = wx_zn, ein.zf = wx_zf, ein.depth_minus1 = nvn_depth_mode() == 0;
-                if (edge_eye(cb, &ein, view, fmt, ext.width, ext.height)) { drawn |= 1 << eye; continue; }
-            }
-        }
+        if (edge_eye(cb, eye, view, fmt, ext.width, ext.height)) { drawn |= 1 << eye; continue; }  // (the edge pass instead of the present draw)
         VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = view,
                                         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                         .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
@@ -8747,8 +8776,12 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
         rec_CmdEndRendering(cb);
         drawn |= 1 << eye;
     }
+    if (drawn == 3) stereo_set_views();  // (the layer: the poses these outputs were rendered with)
     return drawn;
 }
+
+// The eye post hook's default (stereo.h): nothing. The edge lane defines the real one.
+__attribute__((weak)) void stereo_eye_post(const StereoEyePost *e) { (void)e; }
 
 // (device.c, LARECOMP_STEREO_DUMP_AT=<frame>,...: the eye outputs as PNGs, <dir>/stereo_<frame>_eye<n>.png)
 void vk_stereo_dump(const char *dir, uint64_t frame) {
@@ -8759,6 +8792,10 @@ void vk_stereo_dump(const char *dir, uint64_t frame) {
         if (!b) continue;
         snprintf(p, sizeof p, "%s/stereo_%05llu_eye%d.png", dir, (unsigned long long)frame, e);
         renderer_save_texture_tex(b, p);
+    }
+    if (g_hud_ok && g_hud.backend) {
+        snprintf(p, sizeof p, "%s/stereo_%05llu_hud.png", dir, (unsigned long long)frame);
+        renderer_save_texture_tex(g_hud.backend, p);
     }
 }
 

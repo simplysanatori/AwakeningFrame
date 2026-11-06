@@ -18,6 +18,7 @@
 #include "../../platform.h"
 #include "../../rt.h"
 #include "record.h"
+#include "stereo.h"
 #include "vk.h"
 
 // ------------------------------------------------------------------------------------------------ settings
@@ -173,6 +174,8 @@ static const char *main_fs =
     "float ign(vec2 p, float s) { return fract(52.9829189 * fract(dot(p + 5.588238 * s, vec2(0.06711056, 0.00583715)))); }\n"
     "void main() {\n"
     "  vec2 p = gl_FragCoord.xy / u.sz.xy;\n"
+    "  int quad = 3;\n"
+    "  if (u.mi.z > 8.5) { quad = int(p.x * 2.0) + 2 * int(p.y * 2.0); p = fract(p * 2.0); }\n"  // (debug 9: 2x2 mosaic)
     "  vec2 q = qmap(p);\n"
     "  vec4 s = texture(ct, q * u.cc.xy);\n"
     "  float d = dsample(q);\n"
@@ -198,7 +201,11 @@ static const char *main_fs =
     "  if (u.fl.z > 2.5) { a = 1.0 - fade; c = s.rgb * a; }\n"  // (passthrough: premultiplied)
     "  float n = ign(gl_FragCoord.xy, u.fl.w) + ign(gl_FragCoord.xy + 17.0, u.fl.w + 3.0) - 1.0;\n"  // (triangular)
     "  c += n / 255.0;\n"
-    "  if (u.mi.z > 0.5) {\n"
+    "  if (u.mi.z > 8.5) {\n"
+    "    if (quad == 0) c = s.rgb;\n"
+    "    else if (quad == 1) c = geo ? vec3(clamp(r / (4.0 * u.up.w), 0.0, 1.0), fract(d * 64.0), d) : vec3(1.0, 0.0, d);\n"
+    "    else if (quad == 2) c = vec3(cover, fog, edge);\n"
+    "  } else if (u.mi.z > 0.5) {\n"
     "    int m = int(u.mi.z + 0.5);\n"
     "    if (m == 1) c = vec3(geo ? 0.2 + 0.8 * (1.0 - d) : 0.0, 0.0, geo ? 0.0 : 1.0);\n"
     "    else if (m == 2) c = vec3(cover);\n"
@@ -415,19 +422,55 @@ static void ts_resolve(void) {
 }
 
 // ------------------------------------------------------------------------------------------------ the eye
-static struct { float V[2][16], P[2][16], pd; bool have; } cams;
-void edge_note_cameras(const float V[2][16], const float P[2][16], float pivot_dist) {
-    memcpy(cams.V, V, sizeof cams.V), memcpy(cams.P, P, sizeof cams.P), cams.pd = pivot_dist, cams.have = true;
-}
-bool edge_cameras(int eye, float V[16], float P[16], float *pivot_dist) {
-    if (!cams.have || eye < 0 || eye > 1) return false;
-    memcpy(V, cams.V[eye], 64), memcpy(P, cams.P[eye], 64), *pivot_dist = cams.pd;
-    return true;
+// What the eye post hook noted for each eye: the latest new output's images and cameras.
+static struct {
+    bool have;
+    TexBackend *color, *depth;
+    float ax, ay, V[16], P[16], zn, zf;
+} noted[2];
+
+void stereo_eye_post(const StereoEyePost *e) {
+    if (e->eye < 0 || e->eye > 1) return;
+    if (!cfg.init) cfg_init();
+    if (cfg.mode == EDGE_BLACK) return;
+    __typeof__(noted[0]) *n = &noted[e->eye];
+    n->have = e->depth && e->have_matrices;
+    n->color = e->color, n->depth = e->depth, n->ax = e->ax, n->ay = e->ay, n->zn = e->zn, n->zf = e->zf;
+    memcpy(n->V, e->V, 64), memcpy(n->P, e->P, 64);
+    static bool said;
+    if (!said && (!e->depth || !e->have_matrices)) LOG("[edge] eye %d: no %s noted: the edge pass waits for it\n", e->eye, e->depth ? "matrices" : "depth"), said = true;
 }
 
-bool edge_eye(VkCommandBuffer cb, const EdgeEye *in, VkImageView target, VkFormat fmt, uint32_t w, uint32_t h) {
+typedef struct {
+    int eye;
+    VkImageView color, depth;
+    float color_crop[2], depth_crop[2], V[16], P[16], zn, zf, pivot_dist;
+    bool origin_lower_left, depth_minus1;
+} EdgeEye;
+
+extern uint32_t nvn_depth_mode(void);
+bool renderer_origin_lower_left(void);
+
+bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uint32_t w, uint32_t h) {
     if (!cfg.init) cfg_init();
-    if (cfg.mode == EDGE_BLACK || !in->depth || !in->color) return false;
+    if (cfg.mode == EDGE_BLACK || eye < 0 || eye > 1 || !noted[eye].have) return false;
+    EdgeEye ein = {.eye = eye};
+    const EdgeEye *in = &ein;
+    {
+        __typeof__(noted[0]) *n = &noted[eye];
+        if (!n->color->image || !n->depth->image) return false;
+        static const VkComponentMapping id = {0};
+        VkFormat cf = n->color->format == VK_FORMAT_R8G8B8A8_SRGB ? VK_FORMAT_R8G8B8A8_UNORM
+                    : n->color->format == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_B8G8R8A8_UNORM : n->color->format;
+        ein.color = vk_image_view(n->color, VK_IMAGE_VIEW_TYPE_2D, cf, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
+        ein.depth = vk_image_view(n->depth, VK_IMAGE_VIEW_TYPE_2D, n->depth->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
+        ein.color_crop[0] = ein.depth_crop[0] = n->ax, ein.color_crop[1] = ein.depth_crop[1] = n->ay;
+        memcpy(ein.V, n->V, 64), memcpy(ein.P, n->P, 64);
+        ein.zn = n->zn, ein.zf = n->zf, ein.pivot_dist = 0;
+        ein.origin_lower_left = renderer_origin_lower_left();
+        ein.depth_minus1 = nvn_depth_mode() == 0;
+    }
+    if (!ein.color || !ein.depth) return false;
     if (!init()) return false;
     VkPipeline mp = main_pipe(fmt);
     uint32_t mw = (w + 7) / 8, mh = (h + 7) / 8;
