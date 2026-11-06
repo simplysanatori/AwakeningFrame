@@ -2,6 +2,7 @@
 #include "vr_settings.h"
 
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -29,14 +30,17 @@ static const char *const k_cull[] = {"fit", "wide", "stock"};
 // absent one leaves the row at "Applies After Restart", and nothing breaks). Names are this tab's proposal; connect them
 // to what the lanes ended up calling theirs (rig: runtime/xr/xr_rig.h, edge: edge.c, fov, diet, vr_cull.c, xr_input.c,
 // stereo.c) - either by providing these names or by changing the calls in vr_settings_changed below.
-// The rig reads g_settings.vr.height_cm / tilt_deg / size_pct itself when it starts (height and tilt have no environment
-// variable; size also goes through LARECOMP_VR_SCALE).
+// Height, size and tilt belong to the rig (runtime/xr/xr_rig.h, vr_rig.ini): the three xr_rig_set_* hooks are provided by
+// runtime/xr/xr_rig_settings.c (XR builds only), the tab reads the live values back through xr_rig_get_user, and
+// larecomp.ini no longer keeps them (the old vr_table_* keys are read and ignored).
 #define WEAK __attribute__((weak))
+#include "xr/xr_rig.h"  // XrRigUser, the rig's ranges (the functions below are weak: a flat build has none)
+extern void xr_rig_get_user(XrRigUser *u) WEAK;
 extern void stereo_set_follow(int mode) WEAK;             // VRS_FOLLOW_*: stereo.c cfg.follow
 extern void xr_rig_set_height_cm(float cm) WEAK;          // table height: cm above / below the default (negative: lower)
 extern void xr_rig_set_size_pct(float pct) WEAK;          // table size: percent of the default scale
 extern void xr_rig_set_tilt_deg(float deg) WEAK;          // table tilt: degrees from the default view (positive: toward the player)
-extern void xr_rig_recentre(void) WEAK;                   // put the table in front of the player again
+extern void xr_rig_recentre(void) WEAK;                   // put the table in front of the player again (xr_rig.c)
 extern void edge_set_mode(int mode) WEAK;                 // VRS_EDGE_*: edge.c cfg.mode
 extern void fov_set_level(int level) WEAK;                // VRS_FOV_*: the foveation lane
 extern void diet_set_dynres(int on) WEAK;                 // the diet lane's dynamic eye resolution
@@ -60,9 +64,8 @@ bool vr_settings_parse(const char *key, const char *val) {
     if (!strcmp(key, "refresh")) VR.refresh = atoi(val) == 90 ? VRS_REFRESH_90 : VRS_REFRESH_120;
     else if (!strcmp(key, "layout")) VR.layout = pick(k_layout, VRS_N_LAYOUT, val, VRS_LAYOUT_SWITCH);
     else if (!strcmp(key, "follow")) VR.follow = pick(k_follow, VRS_N_FOLLOW, val, VRS_FOLLOW_SMOOTH);
-    else if (!strcmp(key, "table_height")) VR.height_cm = clampi(atoi(val), -50, 50);
-    else if (!strcmp(key, "table_size")) VR.size_pct = clampi(atoi(val), 50, 200);
-    else if (!strcmp(key, "table_tilt")) VR.tilt_deg = clampi(atoi(val), -30, 30);
+    else if (!strcmp(key, "table_height") || !strcmp(key, "table_size") || !strcmp(key, "table_tilt"))
+        ;  // old keys: the rig keeps these now (vr_rig.ini); read and dropped
     else if (!strcmp(key, "edge")) VR.edge = pick(k_edge, VRS_N_EDGE, val, VRS_EDGE_FOG);
     else if (!strcmp(key, "foveation")) VR.foveation = pick(k_fov, VRS_N_FOV, val, VRS_FOV_MEDIUM);
     else if (!strcmp(key, "dynamic_resolution")) VR.dynres = atoi(val) != 0;
@@ -77,7 +80,6 @@ void vr_settings_save(FILE *f) {
     fprintf(f, "vr_refresh = %d\n", VR.refresh == VRS_REFRESH_90 ? 90 : 120);
     fprintf(f, "vr_layout = %s\n", k_layout[VR.layout]);
     fprintf(f, "vr_follow = %s\n", k_follow[VR.follow]);
-    fprintf(f, "vr_table_height = %d\nvr_table_size = %d\nvr_table_tilt = %d\n", VR.height_cm, VR.size_pct, VR.tilt_deg);
     fprintf(f, "vr_edge = %s\n", k_edge[VR.edge]);
     fprintf(f, "vr_foveation = %s\n", k_fov[VR.foveation]);
     fprintf(f, "vr_dynamic_resolution = %d\n", VR.dynres);
@@ -89,7 +91,9 @@ void vr_settings_save(FILE *f) {
 static bool g_given[VRO_COUNT];  // the variable was in the environment before settings were applied
 static const char *const k_env[VRO_COUNT] = {
     [VRO_REFRESH] = "LARECOMP_XR_HZ", [VRO_LAYOUT] = "LARECOMP_XR_LAYOUT", [VRO_FOLLOW] = "LARECOMP_VR_FOLLOW",
-    [VRO_HEIGHT] = "LARECOMP_VR_TABLE", [VRO_SIZE] = "LARECOMP_VR_SCALE", [VRO_TILT] = "LARECOMP_VR_PITCH",
+    // (height, size and tilt: the rig's, vr_rig.ini; LARECOMP_VR_TABLE / _PITCH / _SCALE are its base and the player's values
+    // come on top, so the environment does not grey these rows)
+    [VRO_HEIGHT] = "", [VRO_SIZE] = "", [VRO_TILT] = "",
     [VRO_RECENTRE] = "", [VRO_EDGE] = "LARECOMP_VR_EDGE", [VRO_FOVEATION] = "LARECOMP_VR_FOVEATION",
     [VRO_DYNRES] = "LARECOMP_VR_DYNRES", [VRO_CULL] = "LARECOMP_VR_CULL", [VRO_HUD_DIST] = "LARECOMP_XR_QUAD",
     [VRO_HUD_WIDTH] = "LARECOMP_XR_QUAD"};
@@ -123,10 +127,6 @@ void vr_settings_apply_env(void) {
     if (!g_given[VRO_REFRESH] && VR.refresh == VRS_REFRESH_90) put("LARECOMP_XR_HZ", "90");
     if (!g_given[VRO_LAYOUT] && VR.layout != VRS_LAYOUT_SWITCH) put("LARECOMP_XR_LAYOUT", k_layout[VR.layout]);
     if (!g_given[VRO_FOLLOW] && VR.follow != VRS_FOLLOW_SMOOTH) put("LARECOMP_VR_FOLLOW", k_follow[VR.follow]);
-    if (!g_given[VRO_SIZE] && VR.size_pct != 100) {  // 0.067 m per game unit (stereo.c)
-        snprintf(b, sizeof b, "%.5f", 0.067 * VR.size_pct / 100.0);
-        put("LARECOMP_VR_SCALE", b);
-    }
     if (!g_given[VRO_EDGE] && VR.edge != VRS_EDGE_FOG) put("LARECOMP_VR_EDGE", k_edge[VR.edge]);
     if (!g_given[VRO_FOVEATION] && VR.foveation != VRS_FOV_MEDIUM) put("LARECOMP_VR_FOVEATION", k_fov[VR.foveation]);
     if (!g_given[VRO_DYNRES] && VR.dynres) put("LARECOMP_VR_DYNRES", "1");  // off by default (owner), so only On is passed on
@@ -138,6 +138,17 @@ void vr_settings_apply_env(void) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// The rig's live height / size / tilt into the rows' values (the tab calls this each time it draws, so a change made with
+// the controller shows). Without the rig (a flat build) the rows keep their defaults.
+void vr_settings_sync_rig(void) {
+    if (!xr_rig_get_user) return;
+    XrRigUser u;
+    xr_rig_get_user(&u);
+    VR.height_cm = clampi((int)lroundf(u.height * 100.0f), (int)lroundf(XR_RIG_HEIGHT_MIN * 100.0f), (int)lroundf(XR_RIG_HEIGHT_MAX * 100.0f));
+    VR.size_pct = clampi((int)lroundf(u.size * 100.0f), (int)lroundf(XR_RIG_SIZE_MIN * 100.0f), (int)lroundf(XR_RIG_SIZE_MAX * 100.0f));
+    VR.tilt_deg = clampi((int)lroundf(u.tilt), (int)XR_RIG_TILT_MIN, (int)XR_RIG_TILT_MAX);
+}
+
 bool vr_opt_live(VrOpt o) {
     switch (o) {
     case VRO_REFRESH: return false;  // SteamVR's per-app rate is set by the launch wrapper: a relaunch

@@ -97,6 +97,11 @@ Height, size and tilt are saved (about a second after the last change) to `vr_ri
 `LARECOMP_SETTINGS`' file when that is set (test runs), or `LARECOMP_VR_RIG=<path>`; `LARECOMP_VR_RIG_SAVE=0` reads
 it but never writes it. The yaw is not saved (each session starts facing the game's own up).
 
+The VR settings tab's Height, Size and Tilt rows and Recentre Table are this API: `runtime/xr/xr_rig_settings.c` provides
+the tab's hooks (`xr_rig_set_height_cm`, `_size_pct`, `_tilt_deg`; units converted, the other fields kept) and the tab
+reads `xr_rig_get_user` each time it draws, so the rig is the single source of truth (`larecomp.ini` keeps none of them;
+docs/af/VR_SETTINGS.md).
+
 ## Switches
 
 | Variable | Meaning |
