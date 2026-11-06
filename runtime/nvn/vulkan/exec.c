@@ -1496,6 +1496,13 @@ void vk_exec_init(void) {
     // they were measured: Mali (Arm's driver, Mesa's PanVK) and Adreno (Turnip). LARECOMP_VK_STATIC_STACKS=1
     // LARECOMP_VK_STRUCTURE=1 turn them on elsewhere, =0 off anywhere.
     maxwell_glsl_structured = g_vk.props.vendorID == 0x13B5 || g_vk.props.vendorID == 0x5143;  // (Arm, Qualcomm)
+    // VR: the tiled lights' culling sees one wide frustum per tile, not the game camera's tiles (translate.c
+    // light_tiles_fix; the eyes look tiles up through their own projections). LARECOMP_VR_LIGHT_TILES=0: the game's.
+    {
+        const char *lt = getenv("LARECOMP_VR_LIGHT_TILES");
+        maxwell_vr_light_tiles = stereo_wanted() && !(lt && atoi(lt) == 0);
+        if (stereo_wanted()) LOG("[vk] VR light tiles: %s\n", maxwell_vr_light_tiles ? "one wide frustum per tile" : "the game's (LARECOMP_VR_LIGHT_TILES=0)");
+    }
     const char *se = getenv("LARECOMP_VK_STRUCTURE");
     LOG("[vk] structured shaders %s (%s)\n", (se ? atoi(se) != 0 : maxwell_glsl_structured) ? "on" : "off",
         se ? "LARECOMP_VK_STRUCTURE" : "default for this GPU");
