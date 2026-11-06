@@ -1834,7 +1834,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                 os.sy = os.ay = sy = (double)eh / t->height;
                 double u = fmin(sx, sy);
                 {   // (LARECOMP_VR_DYNRES=1) drawn at a factor of the eye size, scaled up into the eye images
-                    // (output_scale.c); budget: 10 ms at 60 fps (120 Hz), 87% of 33.3 at 30 (90 Hz). 10, not the
+                    // (output_scale.c); budget: 10 ms at 60 fps (120 Hz, or 60 throttled), 87% of 33.3 at 30 (90 Hz). 10, not the
                     // 14.5 that fits the frame: SteamVR's xrEndFrame waits behind the queue's backlog, and above ~11 ms
                     // of GPU a game frame its frames came late, re-shown (docs/af/STEREO.md, Frame end).
                     // LARECOMP_VR_HEADROOM=0: the old 14.5 ms.
