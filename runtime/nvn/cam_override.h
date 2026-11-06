@@ -44,6 +44,10 @@ bool cam_override_patch(const void *guest, uint64_t size, void *out);
 // Changes whenever the substitutes may change (a new latch, a new configuration): a substitute made for a buffer stays
 // right while this, the eye and the buffer's bytes stay the same.
 uint32_t cam_override_epoch(void);
+// (stereo camera check, exec.c) bumped each time a bound 320-byte range at the latched camera's address held another
+// camera, so the draw kept the game's own camera there
+extern volatile uint32_t g_cam_stale;
+bool cam_override_latched(uint64_t frame);  // a camera is latched for this frame
 
 // Per-draw probe info (LARECOMP_FREECAM_LOG): filled by exec.c on every draw while logging.
 typedef struct {
