@@ -113,3 +113,65 @@ at the same factor. The VR tab's Dynamic Resolution row sets `LARECOMP_VR_DYNRES
 costs sharpness there. Indoors it drops to the floor on the way in from the field and climbs back slowly. One extra step
 at a level change: a load's light frames measured 8 ms, a raise, and the next half second's 20 ms lowered it again
 (during the fade).
+
+## CPU / GPU overlap in VR (on by default)
+
+Turnip has no `VK_EXT_external_memory_host`, so the guest heap reaches shaders as copies (exec.c `gmir_on`), and the
+overlap (the game's frame fence waited one frame late, exec.c `overlap_on`) used to turn itself off there: every frame
+the game thread waited for its own frame's translation and then its GPU work (`nvnSyncWait` -> `rq_wait_item` ->
+`renderer_wait_seq`), so game CPU + translation + GPU ran in series (gpu wait 6-9 ms a frame at 120 Hz, busy 18-22 ms).
+In the VR mode (`stereo_wanted`) it is now on with copies:
+
+- Nothing of the game's memory is read in place: every range is copied at translation, and the game's SyncWait still
+  waits for translation (both eyes: a list's fences are signalled after eye 1), so the deferral cannot give the GPU, or
+  eye 0, the next frame's data. The storage snapshots (`snap_storage`) are therefore off with copies
+  (`LARECOMP_OVERLAP_SNAP=1` brings them back): with them on, the write watch took the copies' merges into guest memory
+  for CPU writes and copied BowWow's skinning outputs ("-> copy (CPU writes keep coming on its own pages)").
+- A deferred SyncWait merges the completed submissions' GPU stores into guest memory (`gmir_writeback`); the CPU sees
+  GPU results (skinning read back, counters) one frame later, as with the overlap on any other GPU.
+- Flat mode keeps the full wait: on the Frame it already runs at 60 (GPU 5-6 ms); `LARECOMP_GPU_OVERLAP=1` cut its busy
+  time 8.5 -> 5.4 ms at Mabe with no fps to gain, and it was not checked by eye there. `LARECOMP_GPU_OVERLAP=0` turns
+  the VR overlap off.
+
+The pacer (pace.c, `pace_xr_frame_ms`): in the VR mode at 100 Hz and up a 30 fps hold ends when the GPU fits 90% of the
+two-refresh frame (15.0 ms at 120 Hz; 84%, 14.0, once a return failed), whatever started the hold - the desktop's
+13 / 10 ms limits for holds started by late frames leave room for a window image VR doesn't have, and kept the forest at
+30 for good. The CPU limits scale with the frame (unchanged at 120 Hz); the 90 Hz lock is untouched.
+
+Measured (xrmock 1728x1728, diet + foveation medium with the gaze mocked at the centre, `LARECOMP_LOG_PACE=1`; before
+-> after; gpu = the pacer's GPU time per game frame, rcpu = render thread CPU, busy = game thread):
+
+| spot | Hz | dynres | fps | gpu ms | rcpu ms | busy ms | gpu wait ms |
+|---|---|---|---|---|---|---|---|
+| Mabe | 120 | off | 30 -> 30 | 17.1 -> 17.0 | 12.5 -> 12.1 | 22.0 -> 10.1 | 9.4 -> 0.1 |
+| forest | 120 | off | 30 -> 30 | 16.2 -> 16.1 | 10.9 -> 10.8 | 20.2 -> 9.1 | 9.3 -> 0.0 |
+| house | 120 | off | 60 -> 60 | 7.2 -> 7.2 | 2.9 -> 2.8 | 7.9 -> 2.4 | 5.4 -> 0.0 |
+| Tail Cave | 120 | off | 60 -> 60 | 10.0 -> 9.8 | 3.9 -> 3.9 | 10.9 -> 3.7 | 7.2 -> 0.0 |
+| Mabe | 120 | on | 30 -> 60 | 15.2 -> 15.6 | 12.5 -> 11.8 | 20.2 -> 12.2 | 7.6 -> 0.0 |
+| forest | 120 | on | 30 -> 60 | 14.3 -> 14.3 | 11.0 -> 10.3 | 18.3 -> 10.6 | 7.4 -> 0.0 |
+| house | 120 | on | 60 -> 60 | 6.6 -> 6.6 | 2.8 -> 2.8 | 7.3 -> 2.5 | 4.8 -> 0.0 |
+| Tail Cave | 120 | on | 60 -> 60 | 9.5 -> 9.3 | 3.9 -> 3.9 | 10.4 -> 3.7 | 6.8 -> 0.0 |
+| Mabe | 90 | off | 30 -> 30 | 17.0 -> 17.0 | 12.5 -> 12.1 | 21.9 -> 10.1 | 9.3 -> 0.1 |
+| forest | 90 | off | 30 -> 30 | 16.2 -> 16.1 | 10.9 -> 10.5 | 20.2 -> 9.0 | 9.3 -> 0.0 |
+| house | 90 | off | 30 -> 30 | 8.8 -> 8.8 | 3.2 -> 3.3 | 2.8 -> 2.9 | 0.1 -> 0.0 |
+| Tail Cave | 90 | off | 30 -> 30 | 9.8 -> 9.8 | 4.4 -> 4.5 | 4.1 -> 4.2 | 0.1 -> 0.1 |
+
+At 90 Hz dynamic resolution keeps the full size (29 ms budget), so its rows equal these. At 120 Hz with dynres, Mabe at
+the 1400 floor shows 296-299 of 300 sets in 5 s; the forest is held for ~5 s after the warp from Mabe (late frames
+during the load), then released ("enough headroom ... gpu 14.3 ms") and stays at 60 (started there: 60.0 fps for 70 s).
+Without dynres outdoors still doesn't fit 60 (GPU 16-17 ms) and is held at 30 at 120 Hz. At 60 the render thread's
+~11-12 ms of translation is what the game thread still waits for (queue wait ~4.5 ms at Mabe): the next serial part.
+`LARECOMP_VR_DYNRES_MS=13.5` changed nothing: outdoors the eye width is at the 1400 floor either way.
+
+Far drawing (lane/ring, `LARECOMP_VR_CULL_EXTENT=52,42 LARECOMP_VR_RING=4`) at 90 Hz, overlap off -> on:
+
+| spot | ring | fps | gpu ms | rcpu ms | busy ms |
+|---|---|---|---|---|---|
+| Mabe | 4 | 23.0 -> 30.0 (150 of 150 sets / 5 s) | 22.3 -> 22.6 | 21.6 -> 20.8 | 32.0 -> 21.7 |
+| forest | 4 | 20.0 -> 28.4 (140-146 of 150) | 26.4 -> 26.9 | 27.8 -> 27.9 | 38.4 -> 29.0 |
+| Mabe | 4, cast 12 | 30.0 (150 of 150) | 22.6 | 20.9 | 21.7 |
+| forest | 4, cast 12 | 29.1 (140-147 of 150) | 27.4 | 27.4 | 28.1 |
+| house / Tail Cave | 4 | 30 / 30 | 8.7 / 9.2 | 3.5 / 6.3 | 2.8 / 4.4 |
+
+With the overlap the GPU and the render thread run side by side: Mabe holds 30 with the far world drawn; the forest is
+render-CPU bound (27-28 ms of translation, queue wait ~9.5 ms) and drops a few frames.
