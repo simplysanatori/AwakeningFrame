@@ -6614,7 +6614,10 @@ static void draw_(CmdRec *r, bool indexed);
 // (stereo) the scene's composite into the window image goes to the eye output instead (per eye: it is twinned); the
 // window image keeps the HUD, cleared transparent at the composite (eye 0). st.rt is restored after the draw.
 static NvnTexture g_eye_out;
-static bool g_eye_out_ok, st_redirected, st_hud_alpha;
+static bool g_eye_out_ok, st_redirected, st_hud_alpha, st_blend_forced;
+static uint8_t st_blend_saved[8];
+static bool st_mask_forced;
+static uint32_t st_mask_saved;
 static RtState st_rt_saved;
 static uint64_t g_eye_out_frame[2];  // renderer_exec_frame() of each eye's latest composite (+1; 0 none)
 static void stereo_composite(void) {
@@ -6653,6 +6656,8 @@ static void draw(CmdRec *r, bool indexed) {
     wx_composite = wx_mirror = false;
     draw_(r, indexed);
     if (st_redirected) { st_redirected = false; vk_end_pass(); st.rt = st_rt_saved; st.rt_dirty = true; }
+    if (st_blend_forced) { st_blend_forced = false; memcpy(st.blend[0], st_blend_saved, 8); }
+    if (st_mask_forced) { st_mask_forced = false; st.channel_mask = st_mask_saved; }
     if (wx_composite && g_eye <= 0) weather_encode();
     PROF_ADD(prof_draw);
 }
@@ -6731,6 +6736,28 @@ static void draw_(CmdRec *r, bool indexed) {
         if (last_hash == 0xa2177dbb72197bd9ull && pot_level_active()) { SKIP(SK_HIDDEN); return; }
         if (g_debug_frame && getenv("LARECOMP_LOG_FSHASH")) LOG("[fshash] fs=%llx hash %016llx\n", (unsigned long long)fs, (unsigned long long)last_hash);
         g_cur_fs_hash = last_hash;
+        if (g_eye == 0 && st_hud_alpha && st.rt.ncolor && st.rt.color[0] && renderer_texture_presented(st.rt.color[0])) {
+            // (stereo) the HUD over a transparent clear: blended draws accumulate coverage in alpha (src_a + dst_a * (1 - src_a));
+            // the game assumed an opaque destination
+            if (st.color_state[0] & 1) {
+                memcpy(st_blend_saved, st.blend[0], 8);
+                st_blend_forced = true;
+                st.blend[0][3] = 2, st.blend[0][4] = 6;  // (alpha: ONE, ONE_MINUS_SRC_ALPHA)
+            } else {  // unblended (full-screen fills after the composite): colour only, the alpha stays as it was
+                st_mask_saved = st.channel_mask;
+                st_mask_forced = true;
+                st.channel_mask &= ~0x8u;
+                static uint64_t seen[32];
+                static int nseen;
+                bool known = false;
+                for (int i = 0; i < nseen; i++) known |= seen[i] == last_hash;
+                if (!known && nseen < 32) {
+                    seen[nseen++] = last_hash;
+                    LOG("[stereo] unblended draw into the HUD after the composite: fs %016llx viewport %.0f,%.0f %.0fx%.0f (alpha write masked)\n",
+                        (unsigned long long)last_hash, st.viewport[0][0], st.viewport[0][1], st.viewport[0][2], st.viewport[0][3]);
+                }
+            }
+        }
         extern void widescreen_backdrop_seen(uint64_t hash);
         if (last_hash) widescreen_backdrop_seen(last_hash);
         extern void widescreen_scene_ubo(const float *u, uint64_t size);  // (the camera's view-projection)
