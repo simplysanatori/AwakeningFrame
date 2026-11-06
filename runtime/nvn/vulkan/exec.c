@@ -39,6 +39,12 @@ static uint64_t st_skipped[2], st_ran1;  // (stats) eye 1: skipped / run draws+c
 static bool st_mixed_logged;
 static bool eye1_skip_rt(void);           // (below the state) eye 1 and no twinned attachment
 static void gw_save(uint64_t addr, uint64_t size);  // eye 0: the old bytes of a guest write
+// (stereo) the list's fence syncs, signalled once both eyes ran (stereo_execute). Signalled in eye 0 (as before), a
+// flush later in eye 0 or 1 let the game see its fence done and write the next frame's uniforms while this frame's
+// draws still read them: eye 0 got the next frame's scene blocks, which the camera patch did not match (the game's own
+// camera in eye 0 = one eye flat while the camera moves).
+static uint64_t st_fence[64];
+static int st_fence_n;
 
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 // (the guest heap for shaders in chunks: with the heap import below)
@@ -8560,6 +8566,11 @@ static void exec_list(uint64_t handle, int depth) {
             if (fence_flush < 0) fence_flush = getenv("LARECOMP_FENCE_FLUSH") ? 1 : 0;
             if (fence_flush) renderer_flush();
             extern void nvn_sync_set_seq(uint64_t guest, uint64_t seq);
+            if (g_eye >= 0) {  // (stereo: signalled after eye 1, stereo_execute; eye 0 must not let the game write early)
+                if (g_eye == 0 && r->x[1] && st_fence_n < (int)(sizeof st_fence / sizeof *st_fence)) st_fence[st_fence_n++] = r->x[1];
+                else if (g_eye == 0 && r->x[1]) nvn_sync_set_seq(r->x[1], renderer_fence_seq());
+                break;
+            }
             if (r->x[1]) nvn_sync_set_seq(r->x[1], renderer_fence_seq());
             break;
         }
@@ -8782,6 +8793,12 @@ static void stereo_execute(uint64_t handle) {
     cam_override_set_eye(0);
     st.rt_dirty = true;
     gw_n = 0, gw_used = 0;
+    if (st_fence_n) {  // (the list's fences: done once both eyes' work is, the submission after this)
+        extern void nvn_sync_set_seq(uint64_t guest, uint64_t seq);
+        uint64_t seq = renderer_fence_seq();
+        for (int i = 0; i < st_fence_n; i++) nvn_sync_set_seq(st_fence[i], seq);
+        st_fence_n = 0;
+    }
 }
 
 // (device.c vk_frame_end, VR mode, between xr_set_begin and xr_set_submit, outside any rendering) each eye's output
