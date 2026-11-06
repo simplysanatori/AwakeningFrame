@@ -642,6 +642,7 @@ static int64_t gLastWaitRet = 0;
 static float *gIntervals, *gBeginEnd;
 static int gNIntervals = 0, gNEnd = 0, gLate = 0, gSkippedRefreshes = 0, gEnded = 0;
 static double gMargins[2] = {1e9, -1e9};
+static int gSetCount = 0, gActionCount = 0, gSyncs = 0, gHaptics[2] = {0, 0}, gHapticStops = 0;
 static int gPoseSets = 0, gPoseSameTime = 0, gPoseEarlier = 0, gPoseLater = 0, gPoseSplit = 0, gPoseUnknown = 0, gPoseAge[6];
 
 static int cmpf(const void* a, const void* b) { float x = *(const float*)a, y = *(const float*)b; return x < y ? -1 : x > y; }
@@ -668,6 +669,7 @@ static void summary(void) {
             gPoseSets, gPoseSameTime, gPoseEarlier, gPoseLater, gPoseSplit, gPoseUnknown);
     fprintf(stderr, "xrmock: projection layers by refreshes from the locate to the display time: later %d, 0: %d, 1: %d, 2: %d, 3: %d, more %d\n", gPoseAge[0], gPoseAge[1],
             gPoseAge[2], gPoseAge[3], gPoseAge[4], gPoseAge[5]);
+    fprintf(stderr, "xrmock: input: %d action sets, %d actions, %d syncs, haptic pulses left %d right %d, %d stops\n", gSetCount, gActionCount, gSyncs, gHaptics[0], gHaptics[1], gHapticStops);
     if (gReleases)
         fprintf(stderr, "xrmock: releases checked for finished GPU work %d, %d before it finished (worst %.1f ms); queue drain <0.5 ms %d, 0.5-1 %d, 1-2 %d, 2-4 %d, >4 %d\n",
                 gReleases, gBusyReleases, gBusyMaxMs, gWaitHist[0], gWaitHist[1], gWaitHist[2], gWaitHist[3], gWaitHist[4]);
@@ -966,18 +968,210 @@ static XrResult XRAPI_CALL mPathToString(XrInstance i, XrPath p, uint32_t cap, u
         }
     return XR_ERROR_PATH_INVALID;
 }
-static XrResult XRAPI_CALL mCreateActionSet(XrInstance i, const XrActionSetCreateInfo* ci, XrActionSet* o) { (void)i; (void)ci; *o = (XrActionSet)(uintptr_t)3; return XR_SUCCESS; }
-static int gActions = 0;
-static XrResult XRAPI_CALL mCreateAction(XrActionSet s, const XrActionCreateInfo* ci, XrAction* o) { (void)s; (void)ci; *o = (XrAction)(uintptr_t)(200 + gActions++); return XR_SUCCESS; }
-static XrResult XRAPI_CALL mSuggest(XrInstance i, const XrInteractionProfileSuggestedBinding* b) { (void)i; (void)b; return XR_SUCCESS; }
-static XrResult XRAPI_CALL mAttach(XrSession s, const XrSessionActionSetsAttachInfo* a) { (void)s; (void)a; return XR_SUCCESS; }
-static XrResult XRAPI_CALL mSync(XrSession s, const XrActionsSyncInfo* a) { (void)s; (void)a; return XR_SUCCESS; }
-static XrResult XRAPI_CALL mGetBool(XrSession s, const XrActionStateGetInfo* g, XrActionStateBoolean* o) { (void)s; (void)g; o->isActive = XR_FALSE; o->currentState = XR_FALSE; return XR_SUCCESS; }
-static XrResult XRAPI_CALL mGetFloat(XrSession s, const XrActionStateGetInfo* g, XrActionStateFloat* o) { (void)s; (void)g; o->isActive = XR_FALSE; o->currentState = 0; return XR_SUCCESS; }
-static XrResult XRAPI_CALL mGetVec2(XrSession s, const XrActionStateGetInfo* g, XrActionStateVector2f* o) { (void)s; (void)g; o->isActive = XR_FALSE; o->currentState.x = o->currentState.y = 0; return XR_SUCCESS; }
+// Actions: created, bound and attached with the OpenXR rules (nothing changes after the attach, a bound path has to be
+// an input of the profile), synced, and scripted: MOCK_XR_INPUT="t0-t1:path[=v[,v]];..." holds that input path from t0
+// to t1 seconds after xrBeginSession (a button: no value or 1; a float: =0.8; a thumbstick: =x,y). An action reports
+// the scripted input on any path it is bound to, as of the last xrSyncActions. Haptic pulses go to the trace.
+typedef struct { char name[64]; XrActionType type; int set; XrPath bind[24]; int nbind; XrBool32 b; float f, x, y; } MAction;
+typedef struct { char name[64]; int attached; } MSet;
+typedef struct { double t0, t1; char path[128]; float v[2]; int nv; } MScript;
+static MAction gAct[96];
+static MSet gSets[8];
+static int gAttachedAll = 0;
+static MScript gScript[64];
+static int gScriptCount = 0, gScriptLoaded = 0;
+static const char* const kFrameInputs[] = {
+    "a/click", "b/click", "x/click", "y/click", "menu/click", "view/click", "dpad_up/click", "dpad_down/click", "dpad_left/click", "dpad_right/click",
+    "thumbstick", "thumbstick/click", "trigger/value", "squeeze/value", "grip/value", "bumper/click", "aim/pose", "grip/pose", "haptic"};
+
+static const char* pathStr(XrPath p) {
+    for (int k = 0; k < gPathCount; k++)
+        if (gPaths[k] == p) return gPathStr[k];
+    return NULL;
+}
+static void loadScript(void) {
+    if (gScriptLoaded) return;
+    gScriptLoaded = 1;
+    const char* e = getenv("MOCK_XR_INPUT");
+    if (!e) return;
+    char* copy = strdup(e);
+    char* save = NULL;
+    for (char* tok = strtok_r(copy, ";", &save); tok && gScriptCount < 64; tok = strtok_r(NULL, ";", &save)) {
+        MScript* m = &gScript[gScriptCount];
+        char path[128] = "";
+        char vals[64] = "";
+        double t0, t1;
+        char* eq = strchr(tok, '=');
+        if (eq) { snprintf(vals, sizeof vals, "%s", eq + 1); *eq = 0; }
+        if (sscanf(tok, "%lf-%lf:%127s", &t0, &t1, path) != 3) { fprintf(stderr, "xrmock: MOCK_XR_INPUT: cannot read '%s'\n", tok); continue; }
+        m->t0 = t0, m->t1 = t1, m->nv = 0;
+        snprintf(m->path, sizeof m->path, "%s", path);
+        if (vals[0]) m->nv = sscanf(vals, "%f,%f", &m->v[0], &m->v[1]);
+        else m->v[0] = 1, m->nv = 1;
+        gScriptCount++;
+    }
+    free(copy);
+}
+static XrResult XRAPI_CALL mCreateActionSet(XrInstance i, const XrActionSetCreateInfo* ci, XrActionSet* o) {
+    (void)i;
+    if (!ci->actionSetName[0]) return XR_ERROR_NAME_INVALID;
+    for (int k = 0; k < gSetCount; k++) if (!strcmp(gSets[k].name, ci->actionSetName)) return XR_ERROR_NAME_DUPLICATED;
+    if (gSetCount >= 8) return XR_ERROR_LIMIT_REACHED;
+    snprintf(gSets[gSetCount].name, sizeof gSets[0].name, "%s", ci->actionSetName);
+    *o = (XrActionSet)(uintptr_t)(3 + gSetCount);
+    trace("createActionSet %s", ci->actionSetName);
+    gSetCount++;
+    return XR_SUCCESS;
+}
+static XrResult XRAPI_CALL mCreateAction(XrActionSet s, const XrActionCreateInfo* ci, XrAction* o) {
+    int set = (int)(uintptr_t)s - 3;
+    if (set < 0 || set >= gSetCount) return XR_ERROR_HANDLE_INVALID;
+    if (gSets[set].attached) return XR_ERROR_ACTIONSETS_ALREADY_ATTACHED;
+    if (gActionCount >= 96) return XR_ERROR_LIMIT_REACHED;
+    for (int k = 0; k < gActionCount; k++)
+        if (gAct[k].set == set && !strcmp(gAct[k].name, ci->actionName)) return XR_ERROR_NAME_DUPLICATED;
+    MAction* a = &gAct[gActionCount];
+    memset(a, 0, sizeof *a);
+    snprintf(a->name, sizeof a->name, "%s", ci->actionName);
+    a->type = ci->actionType, a->set = set;
+    *o = (XrAction)(uintptr_t)(200 + gActionCount++);
+    return XR_SUCCESS;
+}
+static MAction* actionOf(XrAction h) {
+    int k = (int)((uintptr_t)h - 200);
+    return k >= 0 && k < gActionCount ? &gAct[k] : NULL;
+}
+static XrResult XRAPI_CALL mSuggest(XrInstance i, const XrInteractionProfileSuggestedBinding* b) {
+    (void)i;
+    const char* prof = pathStr(b->interactionProfile);
+    if (!prof) return XR_ERROR_PATH_INVALID;
+    int checked = !strcmp(prof, "/interaction_profiles/valve/frame_controller");
+    for (uint32_t k = 0; k < b->countSuggestedBindings; k++) {
+        const char* ps = pathStr(b->suggestedBindings[k].binding);
+        MAction* a = actionOf(b->suggestedBindings[k].action);
+        if (!a || !ps) { xrmock_error("suggestBindings %s: unknown action or path", prof); return XR_ERROR_HANDLE_INVALID; }
+        if (gSets[a->set].attached) return XR_ERROR_ACTIONSETS_ALREADY_ATTACHED;
+        if (checked) {  // (the Frame profile: only the inputs SteamVR's profile has)
+            int ok = 0;
+            const char* in = !strncmp(ps, "/user/hand/left/input/", 22) ? ps + 22 : !strncmp(ps, "/user/hand/right/input/", 23) ? ps + 23 : NULL;
+            if (!in && (!strcmp(ps, "/user/hand/left/output/haptic") || !strcmp(ps, "/user/hand/right/output/haptic"))) in = "haptic";
+            if (in) for (unsigned c = 0; c < sizeof kFrameInputs / sizeof *kFrameInputs; c++) if (!strcmp(in, kFrameInputs[c])) ok = 1;
+            if (!ok) { xrmock_error("suggestBindings %s: %s is not an input of the profile", prof, ps); return XR_ERROR_PATH_UNSUPPORTED; }
+        }
+        if (a->nbind < 24) a->bind[a->nbind++] = b->suggestedBindings[k].binding;
+    }
+    trace("suggestBindings %s n=%u", prof, b->countSuggestedBindings);
+    return XR_SUCCESS;
+}
+static XrResult XRAPI_CALL mAttach(XrSession s, const XrSessionActionSetsAttachInfo* a) {
+    (void)s;
+    if (gAttachedAll) return XR_ERROR_ACTIONSETS_ALREADY_ATTACHED;
+    for (uint32_t k = 0; k < a->countActionSets; k++) {
+        int set = (int)(uintptr_t)a->actionSets[k] - 3;
+        if (set < 0 || set >= gSetCount) return XR_ERROR_HANDLE_INVALID;
+        gSets[set].attached = 1;
+    }
+    gAttachedAll = 1;
+    trace("attachActionSets sets=%u actions=%d", a->countActionSets, gActionCount);
+    return XR_SUCCESS;
+}
+static int scriptState(const MAction* a, double t, float* v, int* nv) {  // a scripted input on one of its paths held at t
+    for (int k = 0; k < gScriptCount; k++) {
+        const MScript* m = &gScript[k];
+        if (t < m->t0 || t >= m->t1) continue;
+        for (int j = 0; j < a->nbind; j++) {
+            const char* ps = pathStr(a->bind[j]);
+            if (ps && !strcmp(ps, m->path)) { v[0] = m->v[0], v[1] = m->nv > 1 ? m->v[1] : 0, *nv = m->nv; return 1; }
+        }
+    }
+    return 0;
+}
+static XrResult XRAPI_CALL mSync(XrSession s, const XrActionsSyncInfo* in) {
+    (void)s;
+    if (!gAttachedAll) { xrmock_error("xrSyncActions before xrAttachSessionActionSets"); return XR_ERROR_ACTIONSET_NOT_ATTACHED; }
+    if (gSessionState != XR_SESSION_STATE_FOCUSED) return XR_SESSION_NOT_FOCUSED;
+    loadScript();
+    double t = (double)(nowNs() - gT0) / 1e9;
+    for (uint32_t k = 0; k < in->countActiveActionSets; k++) {
+        int set = (int)(uintptr_t)in->activeActionSets[k].actionSet - 3;
+        if (set < 0 || set >= gSetCount || !gSets[set].attached) { xrmock_error("xrSyncActions: action set not attached"); return XR_ERROR_ACTIONSET_NOT_ATTACHED; }
+        for (int i = 0; i < gActionCount; i++) {
+            MAction* a = &gAct[i];
+            if (a->set != set) continue;
+            float v[2] = {0, 0};
+            int nv = 0, on = scriptState(a, t, v, &nv);
+            XrBool32 b = on && v[0] > 0.5f;
+            float f = on ? v[0] : 0, x = on ? v[0] : 0, y = on && nv > 1 ? v[1] : 0;
+            if (a->type == XR_ACTION_TYPE_VECTOR2F_INPUT && on && nv < 2) x = v[0], y = 0;
+            if ((b != a->b || f != a->f || x != a->x || y != a->y) && (a->type == XR_ACTION_TYPE_BOOLEAN_INPUT || a->type == XR_ACTION_TYPE_FLOAT_INPUT || a->type == XR_ACTION_TYPE_VECTOR2F_INPUT))
+                trace("input %s = %.2f %.2f,%.2f", a->name, a->type == XR_ACTION_TYPE_BOOLEAN_INPUT ? (float)b : f, x, y);
+            a->b = b, a->f = f, a->x = x, a->y = y;
+        }
+    }
+    gSyncs++;
+    return XR_SUCCESS;
+}
+static MAction* stateAction(const XrActionStateGetInfo* g, XrActionType want) {
+    MAction* a = actionOf(g->action);
+    if (!a) return NULL;
+    if (!gSets[a->set].attached) { xrmock_error("xrGetActionState for an action of a set that is not attached"); return NULL; }
+    if (a->type != want) { xrmock_error("xrGetActionState of %s with the wrong type", a->name); return NULL; }
+    if (!gSyncs) warnf("xrGetActionState before the first xrSyncActions");
+    return a;
+}
+static XrResult XRAPI_CALL mGetBool(XrSession s, const XrActionStateGetInfo* g, XrActionStateBoolean* o) {
+    (void)s;
+    MAction* a = stateAction(g, XR_ACTION_TYPE_BOOLEAN_INPUT);
+    if (!a) return XR_ERROR_ACTION_TYPE_MISMATCH;
+    o->isActive = a->nbind > 0 && gSyncs > 0;
+    o->currentState = o->isActive ? a->b : XR_FALSE;
+    o->changedSinceLastSync = XR_FALSE, o->lastChangeTime = 0;
+    return XR_SUCCESS;
+}
+static XrResult XRAPI_CALL mGetFloat(XrSession s, const XrActionStateGetInfo* g, XrActionStateFloat* o) {
+    (void)s;
+    MAction* a = stateAction(g, XR_ACTION_TYPE_FLOAT_INPUT);
+    if (!a) return XR_ERROR_ACTION_TYPE_MISMATCH;
+    o->isActive = a->nbind > 0 && gSyncs > 0;
+    o->currentState = o->isActive ? a->f : 0;
+    o->changedSinceLastSync = XR_FALSE, o->lastChangeTime = 0;
+    return XR_SUCCESS;
+}
+static XrResult XRAPI_CALL mGetVec2(XrSession s, const XrActionStateGetInfo* g, XrActionStateVector2f* o) {
+    (void)s;
+    MAction* a = stateAction(g, XR_ACTION_TYPE_VECTOR2F_INPUT);
+    if (!a) return XR_ERROR_ACTION_TYPE_MISMATCH;
+    o->isActive = a->nbind > 0 && gSyncs > 0;
+    o->currentState.x = o->isActive ? a->x : 0, o->currentState.y = o->isActive ? a->y : 0;
+    o->changedSinceLastSync = XR_FALSE, o->lastChangeTime = 0;
+    return XR_SUCCESS;
+}
 static XrResult XRAPI_CALL mGetPose(XrSession s, const XrActionStateGetInfo* g, XrActionStatePose* o) { (void)s; (void)g; o->isActive = XR_TRUE; return XR_SUCCESS; }
-static XrResult XRAPI_CALL mHaptic(XrSession s, const XrHapticActionInfo* h, const XrHapticBaseHeader* b) { (void)s; (void)h; (void)b; return XR_SUCCESS; }
-static XrResult XRAPI_CALL mHapticStop(XrSession s, const XrHapticActionInfo* h) { (void)s; (void)h; return XR_SUCCESS; }
+static int handOf(XrPath p) {
+    const char* ps = pathStr(p);
+    return ps && strstr(ps, "left") ? 0 : ps && strstr(ps, "right") ? 1 : -1;
+}
+static XrResult XRAPI_CALL mHaptic(XrSession s, const XrHapticActionInfo* h, const XrHapticBaseHeader* b) {
+    (void)s;
+    MAction* a = actionOf(h->action);
+    if (!a || a->type != XR_ACTION_TYPE_VIBRATION_OUTPUT) { xrmock_error("xrApplyHapticFeedback with an action that is not a vibration output"); return XR_ERROR_ACTION_TYPE_MISMATCH; }
+    if (!gAttachedAll) { xrmock_error("xrApplyHapticFeedback before the action sets are attached"); return XR_ERROR_ACTIONSET_NOT_ATTACHED; }
+    if (b->type != XR_TYPE_HAPTIC_VIBRATION) return XR_ERROR_VALIDATION_FAILURE;
+    const XrHapticVibration* v = (const XrHapticVibration*)b;
+    int hand = handOf(h->subactionPath);
+    if (v->amplitude < 0 || v->amplitude > 1) xrmock_error("haptic amplitude %.2f outside 0..1", v->amplitude);
+    if (hand >= 0) gHaptics[hand]++;
+    trace("haptic hand=%s amplitude=%.2f duration_ms=%.0f frequency=%.0f", hand == 0 ? "left" : hand == 1 ? "right" : "?", v->amplitude, (double)v->duration / 1e6, v->frequency);
+    return XR_SUCCESS;
+}
+static XrResult XRAPI_CALL mHapticStop(XrSession s, const XrHapticActionInfo* h) {
+    (void)s;
+    int hand = handOf(h->subactionPath);
+    gHapticStops++;
+    trace("hapticStop hand=%s", hand == 0 ? "left" : hand == 1 ? "right" : "?");
+    return XR_SUCCESS;
+}
+static XrResult XRAPI_CALL mDestroyActionSet(XrActionSet s) { (void)s; return XR_SUCCESS; }
 static XrResult XRAPI_CALL mGetProfile(XrSession s, XrPath p, XrInteractionProfileState* o) { (void)s; (void)p; o->interactionProfile = XR_NULL_PATH; return XR_SUCCESS; }
 
 // ---- refresh rate, perf, time conversion ----------------------------------
@@ -1009,7 +1203,7 @@ static const Entry kTable[] = {
     E("xrCreateActionSet", mCreateActionSet), E("xrCreateAction", mCreateAction), E("xrSuggestInteractionProfileBindings", mSuggest),
     E("xrAttachSessionActionSets", mAttach), E("xrSyncActions", mSync), E("xrGetActionStateBoolean", mGetBool), E("xrGetActionStateFloat", mGetFloat),
     E("xrGetActionStateVector2f", mGetVec2), E("xrGetActionStatePose", mGetPose), E("xrApplyHapticFeedback", mHaptic), E("xrStopHapticFeedback", mHapticStop),
-    E("xrGetCurrentInteractionProfile", mGetProfile), E("xrRequestDisplayRefreshRateFB", mReqRefresh), E("xrEnumerateDisplayRefreshRatesFB", mEnumRefresh),
+    E("xrGetCurrentInteractionProfile", mGetProfile), E("xrDestroyActionSet", mDestroyActionSet), E("xrRequestDisplayRefreshRateFB", mReqRefresh), E("xrEnumerateDisplayRefreshRatesFB", mEnumRefresh),
     E("xrGetDisplayRefreshRateFB", mGetRefresh), E("xrPerfSettingsSetPerformanceLevelEXT", mPerfLevel), E("xrConvertTimespecTimeToTimeKHR", mTimespecToTime),
     E("xrConvertTimeToTimespecTimeKHR", mTimeToTimespec),
 };
