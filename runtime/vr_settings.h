@@ -3,7 +3,7 @@
 // environment: at startup vr_settings_apply_env sets that variable from the saved value (only when the value is not the
 // default and the variable is not already set: an environment variable always wins, and the tab shows the row greyed
 // out). A change made in the menu reaches the running VR code through the hooks in vr_settings.c (weak symbols: a lane
-// that has not landed yet leaves its row at "Applies After Restart"). docs/af/VR_SETTINGS.md.
+// that is absent leaves its row at "Applies After Restart"; Height, Size and Tilt are the rig's, vr_rig.ini). docs/af/VR_SETTINGS.md.
 #pragma once
 #include <stdbool.h>
 #include <stdio.h>
@@ -20,9 +20,9 @@ typedef struct {
     int refresh;       // VRS_REFRESH_*: the headset's refresh and the game's rate (120 Hz: 60 FPS, 90 Hz: 30 FPS); a relaunch
     int layout;        // VRS_LAYOUT_*
     int follow;        // VRS_FOLLOW_*
-    int height_cm;     // the table's height, centimetres from where the table starts (rig lane)
-    int size_pct;      // the table's size, percent of the default (LARECOMP_VR_SCALE 0.067 m per game unit)
-    int tilt_deg;      // the table's tilt, degrees from the default view (rig lane)
+    int height_cm;     // the table's height, cm from the default (the rig's: not saved here, read back by vr_settings_sync_rig)
+    int size_pct;      // the table's size, percent of the default (0.067 m per game unit); the rig's, not saved here
+    int tilt_deg;      // the table's tilt, degrees from the default view; the rig's, not saved here
     int edge;          // VRS_EDGE_*
     int foveation;     // VRS_FOV_*
     bool dynres;       // dynamic resolution of the eye images (diet lane)
@@ -64,6 +64,8 @@ bool vr_opt_overridden(VrOpt o);
 bool vr_opt_live(VrOpt o);
 // A change made in the menu (g_settings.vr already holds the new value): to the running VR code.
 void vr_settings_changed(VrOpt o);
+// The tab's Height / Size / Tilt rows show the rig's live values (xr_rig_get_user, weak: a flat build keeps the defaults).
+void vr_settings_sync_rig(void);
 // The Recentre Table button.
 void vr_settings_recentre(void);
 

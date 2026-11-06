@@ -165,6 +165,16 @@ static bool level_is_interior(void) {
     return lv[0] && strcmp(lv, "Field") != 0;
 }
 
+// (the VR rig, runtime/xr/xr_rig.c) 1: the level in play is the overworld ("Field"), 0: another level, -1: not in play
+int game_level_overworld(void) {
+    extern int game_in_play(void);
+    if (!game_in_play()) return -1;
+    uint64_t ps = LD64(GA(PLAYER_STATUS_PTR));
+    if (!ps) return -1;
+    const char *lv = (const char *)(uintptr_t)ps;
+    return lv[0] ? !strcmp(lv, "Field") : -1;
+}
+
 bool widescreen_frame_boxed(uint64_t frame) {
     static bool last;
     static uint64_t interior_until;  // keep boxing briefly after leaving: the first (dark) frames still show stale sides
