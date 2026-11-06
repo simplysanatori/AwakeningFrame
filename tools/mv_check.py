@@ -85,7 +85,7 @@ for idx, name, frame in spots:
             n = img(NOISE, frame, f'eye{e}')
             if n is not None and n.size == a.size: nz = share(a, n)[0]; ms = masked(a, b, n)
         # with a second base run the verdict is the share outside the pixels that moved between base runs
-        cell[e] = f'{p:.2f}%' + (f' | {ms[0]:.2f}% outside noise ({ms[1]:.0f}% masked)' if ms else '')
+        cell[e] = f'{p:.2f}%' + (f' / {ms[0]:.2f}% outside noise ({ms[1]:.0f}% masked)' if ms else '')
         if ms:
             noise_cols[e] = f'{nz:.2f}%'
             if ms[0] > LIMIT: why.append(f'eye{e} {ms[0]:.2f}% > {LIMIT:.2f}% (outside the noise mask)')
