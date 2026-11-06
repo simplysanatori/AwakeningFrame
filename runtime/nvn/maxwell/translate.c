@@ -26,6 +26,7 @@ uint64_t maxwell_gmem_base, maxwell_gmem_size;
 int maxwell_frag_subgroups = 1;
 uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; shader.h)
 bool maxwell_gmem_lazy;
+bool maxwell_gmem_whole;
 bool maxwell_gmem_fs_miss;
 bool maxwell_glsl_stack_vars = true;
 bool maxwell_glsl_structured;  // static stacks + structured control flow by default (exec.c: Mali, Adreno)
@@ -1985,7 +1986,7 @@ static const char *glsl_sampler_type(const ShaderTexture *t) {
 // coverage with early tests would write depth for samples it drops: the renderer uses this shader's module without
 // the execution mode for those pipelines, vulkan/exec.c fs_late.)
 static bool glsl_early_tests(const Ctx *c) {
-    return c->glsl && c->stage == STAGE_FRAGMENT && c->info->uses_gmem && maxwell_gmem_chunk_shift && maxwell_gmem_lazy &&
+    return c->glsl && c->stage == STAGE_FRAGMENT && c->info->uses_gmem && maxwell_gmem_chunk_shift && maxwell_gmem_lazy && !maxwell_gmem_whole &&
            !maxwell_gmem_fs_miss && !c->info->uses_discard && !c->omap_depth && !c->uses_gmem_store;
 }
 
@@ -2001,7 +2002,7 @@ static void push_promote(Ctx *c, Str *body) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("LARECOMP_VK_PUSH_CB"); on = e ? atoi(e) != 0 : maxwell_glsl_push; }
     if (!on || (c->stage != STAGE_FRAGMENT && c->stage != STAGE_VERTEX) || !body->buf ||
-        (maxwell_gmem_lazy && c->info->uses_gmem)) return;
+        (maxwell_gmem_lazy && !maxwell_gmem_whole && c->info->uses_gmem)) return;  // (GDirect's push constants)
     // LARECOMP_VK_PUSH_VS=0: none in vertex shaders (an A/B of the vertex words: the fragment budget stays 48 words)
     static int vs_on = -1;
     if (vs_on < 0) { const char *e = getenv("LARECOMP_VK_PUSH_VS"); vs_on = !e || atoi(e); }
@@ -2136,7 +2137,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         }
     } else if (info->uses_gmem) {  // chunks imported lazily: a table of device addresses, buffer references (shader.h)
         int ws = (int)maxwell_gmem_chunk_shift - 2, cs = GMEM_CHUNK_SET(stage);
-        bool direct = stage != STAGE_COMPUTE;  // (compute: its storage buffers are in gfast_ already)
+        bool direct = stage != STAGE_COMPUTE && !maxwell_gmem_whole;  // (compute: its storage buffers are in gfast_ already)
         sp(&s, "layout(std140, set = %d, binding = %d) uniform GChunks { uvec4 gchunk[%d]; };\n", cs, GMEM_CHUNK_BINDING, GMEM_CHUNKS_MAX);
         sp(&s, "layout(buffer_reference, std430, buffer_reference_align = 4) %sbuffer GW { uint w[]; };\n", c->uses_gmem_store ? "" : "readonly ");
         // Misses are counted with atomics on GMiss: a side effect, which in a fragment shader turns early depth / stencil
@@ -2147,7 +2148,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         // the bound storage buffers' chunks (gmem_chunk_bind), pointers in uniform buffers, the chunks other shaders
         // missed (cache/gmem_chunks.txt). LARECOMP_VK_GMEM_FS_MISS=1 (maxwell_gmem_fs_miss): every shader counts, no
         // early tests (as before; to find a chunk only such a shader reaches).
-        bool count = stage != STAGE_FRAGMENT || maxwell_gmem_fs_miss || c->uses_gmem_store || glsl_early_tests(c);
+        bool count = !maxwell_gmem_whole && (stage != STAGE_FRAGMENT || maxwell_gmem_fs_miss || c->uses_gmem_store || glsl_early_tests(c));
         if (count) {
             sp(&s, "layout(std430, set = %d, binding = %d) buffer GMiss { uint n[%d]; uint w[%d]; } gmiss_;\n", cs, GMEM_MISS_BINDING,
                GMEM_CHUNKS_MAX, GMEM_CHUNKS_MAX);
