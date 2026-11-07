@@ -164,7 +164,7 @@ following), a door into a house (blinks, the room anchored at its centre), a hea
 the scroll), a fall into a hole (the table holds), and Bottle Grotto 05D's side view (an upright wall facing the
 player; snap turns and tilt ignored).
 
-Checked under xrmock (2026-11-06, rig2 lane; scripted both-stick and left-grip clicks, start values set by
+Checked under xrmock (scripted both-stick and left-grip clicks, start values set by
 `LARECOMP_VR_TILT/HEIGHT/DISTANCE/SIZE/YAW`): a 1 s hold of both sticks makes one short reset; 1.5 s still only one;
 3 s makes the short reset at 0.1 s and the full one 2 s from the press, once; left grip + right stick click does the
 same (1 s: short only, 3 s: both). The full reset logged `tilt 17 -> 30, height +0.24 -> +0.00, distance 1.20 -> 1.20,

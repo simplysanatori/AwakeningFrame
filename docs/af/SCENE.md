@@ -1,4 +1,4 @@
-# The world around the table (AwakeningFrame lane "scene")
+# The world around the table
 
 The VR tab's **Surroundings** row draws the overworld past the table instead of leaving it black. Code:
 `runtime/nvn/vr_cull.c` (the culling box, the modes), `runtime/nvn/vulkan/exec.c` (ring routing, the coarse shading of
@@ -82,7 +82,7 @@ nearest drawn world's colour, smoothly spread. It fades with the share of drawn 
 `LARECOMP_VR_SCENE_EDGE_REACH` of the eye's height (0.18); past that the void stays as it was. Indoors nothing changes
 (the dark around a room is the game's look).
 
-Limits: the picture is still (nothing outside animates; the owner's call); it covers what eye 0 saw at the capture;
+Limits: the picture is still (nothing outside animates, by design); it covers what eye 0 saw at the capture;
 characters in it stay where they were (only where the live scene is empty); no visit is needed: it is taken from
 whatever is resident.
 

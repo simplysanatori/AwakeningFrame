@@ -99,3 +99,205 @@
   - One change per pull request.
   - Say what changed, why, and how it was tested (platform, GPU, seeds, screenshots).
   - No personal paths, names or other personal information in code, comments, commits or pull requests.
+
+## AwakeningFrame (Steam Frame VR port)
+
+This section holds the technical detail moved out of the README, for developers and coding agents. It covers the
+`steam-frame` branch, which adds a VR mode for the Valve Steam Frame. LAS Recomp's notes above still apply.
+
+Further reading:
+
+- [docs/TECHNICAL.md](docs/TECHNICAL.md): how the Steam Frame port works.
+- [docs/af/](docs/af/): the design notes for each part (stereo, rig, edge, surroundings, passes, settings, tooling).
+- [docs/af/BUILD-frame.md](docs/af/BUILD-frame.md) and [docs/af/INSTALL.md](docs/af/INSTALL.md): building and installing on the Frame.
+- [docs/CONTROLS.md](docs/CONTROLS.md): every control and layout.
+- [docs/USER_GUIDE.md](docs/USER_GUIDE.md): the user-facing detail (install details, full controls, settings, files, troubleshooting).
+- [README.upstream.md](README.upstream.md): LAS Recomp's README. Leave it untouched.
+
+### What this adds to LAS Recomp
+
+LAS Recomp runs in a window on Windows, macOS and Linux. AwakeningFrame adds a VR mode and the Frame side, on the
+`steam-frame` branch:
+
+- A Linux Arm64 build for the Frame (Adreno 750, Mesa Turnip), with an OpenXR session in SteamVR on the game's own
+  Vulkan renderer.
+- Stereo in one pass: the game's draws go to both eyes at once with Vulkan multiview, each eye with its own camera.
+  Shadow maps and other work that doesn't depend on the eye are drawn once and shared.
+- The HUD and menus on a separate floating panel with a transparent background, and a controller laser pointer for
+  LAS Recomp's menu.
+- The diorama rig: where the table sits, how it follows Link (room by room or smoothly), side views stood upright, and
+  a blink for every sudden change.
+- The Frame controllers mapped to a Switch Pro Controller by position, with rumble on both controllers.
+- Eye-tracked foveated rendering (VRS), dynamic eye resolution, and a VR mode that skips passes the headset doesn't need.
+- Shader preparation at every start, not only from the start screen.
+- A VR tab in LAS Recomp's menu whose rows apply while the game runs.
+- An optional table edge (fade or passthrough) and experimental Surroundings.
+- Scripts to extract the player's game, build and install it, add it to Steam with SteamVR's per-app settings, and
+  remove it again; a release tarball that Frametanium and FrameDrop install.
+
+### Status
+
+Version 0.1.0 is a pre-release. The player-facing known issues are in
+[docs/USER_GUIDE.md](docs/USER_GUIDE.md#known-issues). The open problems behind them:
+
+- **Doubling.** Fast head turns and fast-moving objects can look doubled. Part of it is the cadence: 60 FPS on a
+  120 Hz display shows each frame twice, so a tracked object judders. The rest is SteamVR re-showing a frame whose
+  `xrEndFrame` missed vsync behind the game's GPU work ([STEREO](docs/af/STEREO.md) "Frame end"). Headroom
+  (`LARECOMP_VR_HEADROOM`) cut it a lot; `AF_THROTTLE=1` tests whether SteamVR making the second refresh itself
+  removes the rest.
+- **Surroundings flicker** on the headset in Low Quality, Backdrop and Full ([SCENE](docs/af/SCENE.md)). It is
+  experimental and off by default.
+- **Edge flicker.** The Fade and Passthrough edges can flicker ([EDGE](docs/af/EDGE.md)).
+- **30 FPS in the busy overworld** when the GPU frame goes over budget.
+
+### Where things live
+
+| Area | Code | Notes |
+|---|---|---|
+| OpenXR session, frame loop, pacing, input, laser, rig | `runtime/xr/` (`xr_session.c`, `xr_loop.c`, `xr_input.c`, `xr_pointer.c`, `xr_rig.c`, `xr_rig_settings.c`, `hz_filter.h`) | [STEREO](docs/af/STEREO.md), [RIG](docs/af/RIG.md), [CONTROLS](docs/af/CONTROLS.md) |
+| Stereo executor, multiview | `runtime/nvn/vulkan/stereo.c`, `stereo.h` | [STEREO](docs/af/STEREO.md), [PASSES](docs/af/PASSES.md) |
+| Table edge (fade, passthrough) | `runtime/nvn/vulkan/edge.c` | [EDGE](docs/af/EDGE.md) |
+| Surroundings (Low Quality, Backdrop, Full) | `runtime/nvn/vulkan/scene.c` | [SCENE](docs/af/SCENE.md), [STREAM](docs/af/STREAM.md) |
+| Eye-tracked foveation (VRS) | `runtime/nvn/vulkan/foveation.c` | [STEREO](docs/af/STEREO.md) "Foveation" |
+| VR tab | `runtime/ui/vr_tab.mm`, `runtime/vr_settings.c` | [VR_SETTINGS](docs/af/VR_SETTINGS.md) |
+| Shader warm-up | `tools/warm_shaders.sh` | [WARM](docs/af/WARM.md) |
+| Free camera probe | `runtime/nvn/cam_override.c` | [FREECAM](docs/af/FREECAM.md) |
+| Build, install, release | `Makefile`, `install.sh`, `uninstall.sh`, `steam-frame/` | [BUILD-frame](docs/af/BUILD-frame.md), [INSTALL](docs/af/INSTALL.md) |
+
+
+### Environment switches
+
+A `NAME=value` line in `~/Games/AwakeningFrame/session.env` is read at launch and wins
+over the VR tab (its row greys out). The VR tab's rows map onto `LARECOMP_VR_*` / `LARECOMP_XR_*` variables
+([VR_SETTINGS](docs/af/VR_SETTINGS.md) has the list). The ones that matter most:
+
+| Variable | Meaning |
+|---|---|
+| `LARECOMP_XR=1` | VR mode (the launcher sets it; `awakeningframe.sh --flat` or `AF_FLAT=1` runs the flat window) |
+| `LARECOMP_XR_HZ`, `AF_REFRESH_HZ` | refresh rate (120 default; 90) |
+| `LARECOMP_MV=0` | per-eye passes instead of multiview |
+| `LARECOMP_VK_HEAP_DMABUF=0/1` | the guest heap as driver memory (`LAZY`, `GRANULE_MB` tune it) |
+| `LARECOMP_VR_EDGE=off/fade/passthrough` | Table Edge |
+| `LARECOMP_VR_SCENE=off/low/backdrop/full` | Surroundings |
+| `LARECOMP_VR_FOVEATION`, `LARECOMP_VR_DYNRES`, `LARECOMP_VR_HEADROOM` | foveation level, dynamic resolution, its frame budget |
+| `LARECOMP_VR_HEIGHT/DISTANCE/SIZE/TILT/YAW` | the rig's start values |
+| `LARECOMP_XR_INFLIGHT=<n>` | cap GPU submissions in flight (experiment) |
+| `AF_THROTTLE=1` | sets SteamVR's `framesToThrottle`: SteamVR paces the game to every other refresh and makes the second one itself |
+| `AF_VRTIMING=0` | no compositor timing log |
+| `LARECOMP_WARP_ON_LOAD`, `LARECOMP_WARP_AT` | warp to a spot for tests |
+
+Every other switch is documented where it is read (grep `getenv("LARECOMP_` and the docs/af tables).
+
+
+### Test tooling
+
+([TOOLING](docs/af/TOOLING.md), [TOUR](docs/af/TOUR.md)).
+- `tools/xrmock/`: a mock OpenXR runtime. Scripted head poses and controllers (`MOCK_XR_INPUT`), eye-image
+  captures, an image-vs-pose probe and a compositor GPU model. Point `XR_RUNTIME_JSON` at its `runtime.json`.
+- `tools/vr_tour.sh` (`--quick`, `--hz "90 120"`): a tour of the game's spots with timing and eye images.
+  `tools/mv_check.sh`: multiview and per-eye eye images agree.
+- `tools/vrtiming.py`: reads SteamVR's compositor timing on the headset.
+- `steam-frame/test-install.sh`, `steam-frame/test-release.sh`: install, update and uninstall against scratch folders
+  and stand-ins for Steam and SteamVR. `steam-frame/test/` holds a Frametanium sandbox and a mock of Steam's CEF port.
+- `steam-frame/privacy-check.sh`: scans what this branch added (or a folder or archive) for personal data. Run it
+  before every push and release.
+
+
+### Sharing the headset
+
+The Frame is also the player's console. Never build or run the game while
+`~/.cache/headset-in-use` exists (the launcher creates it); the build scripts and tours refuse with exit 75. Run one
+game instance at a time, keep runs short, use `nice` and at most two build jobs, and watch free memory: the game and
+a build together can be killed by the OOM killer. Use a scratch save (`LARECOMP_SAVE_DIR`).
+
+
+### Performance internals
+
+- Multiview records and submits the game's commands once for both eyes ([STEREO](docs/af/STEREO.md),
+  [PASSES](docs/af/PASSES.md)). Eye-independent passes such as shadow maps run once.
+- The guest heap can be driver memory (`LARECOMP_VK_HEAP_DMABUF`, made lazily in 2 MB granules), which saves copies but
+  costs memory; turn it off if the Frame runs short.
+- Dynamic resolution keeps a 10 ms GPU budget at 120 Hz (`LARECOMP_VR_HEADROOM`) so SteamVR's `xrEndFrame` does not
+  wait past vsync. The display period filter (`runtime/xr/hz_filter.h`) ignores one-frame blips, so the game does not
+  fall into a 30 FPS hold by mistake.
+- Foveation reads `XR_EXT_eye_gaze_interaction` and drives `VK_KHR_fragment_shading_rate`; without gaze it draws at full rate.
+- Shaders are prepared at every start from the recorded list; `tools/warm_shaders.sh` fills the caches ahead
+  ([WARM](docs/af/WARM.md)).
+
+### Build from source
+
+You need a terminal on the Frame (SSH, or Konsole in desktop mode) and Steam running.
+
+1. Get the repository:
+
+   ```sh
+   git clone -b steam-frame https://github.com/simplysanatori/AwakeningFrame.git ~/Games/AwakeningFrame/src
+   cd ~/Games/AwakeningFrame/src
+   ```
+
+2. Extract your game, once. `build-hactool.sh` builds [hactool](https://github.com/SciresM/hactool) into `~/Games/AwakeningFrame/tools-bin`. `prepare-game.sh` checks the package and writes `exefs` and `romfs` to `~/.local/share/lasrecomp/extracted`:
+
+   ```sh
+   steam-frame/build-hactool.sh
+   steam-frame/prepare-game.sh /path/to/LinksAwakening.nsp /path/to/prod.keys
+   ```
+
+   It refuses updates, DLC and compressed `.nsz` or `.xcz` files. A retail NSP carries its own ticket; for a dump without one, add your `title.keys` as a third argument. If you already have the extracted `exefs` and `romfs` folders, give their folder instead: `steam-frame/prepare-game.sh /path/to/folder`.
+
+3. Set up the Python tools the game code generator uses:
+
+   ```sh
+   python3 -m venv tools/venv && tools/venv/bin/pip install lz4 capstone unicorn
+   ```
+
+4. Build and install:
+
+   ```sh
+   ./install.sh
+   ```
+
+   The first time, it recompiles the game code from your files, which takes a few minutes, and then builds the program. It installs it to `~/Games/AwakeningFrame/app` and adds **AwakeningFrame** to your library, as a release does. The script talks to Steam through its local debugging port, which SteamOS has on by default.
+
+To update, pull the repository and run `./install.sh` again. To remove it, run `./uninstall.sh`. `./uninstall.sh --purge` also removes the logs and the data folder, which holds your game files and saves.
+
+A release never replaces a build from source. If `~/Games/AwakeningFrame/app` holds one, Frametanium puts the release in `~/Games/AwakeningFrame/release` and leaves the library entry alone. To switch the entry to the release, run `install.sh --replace-source` from `~/.local/share/frametanium/apps/awakeningframe`.
+
+To build by hand, see [docs/af/BUILD-frame.md](docs/af/BUILD-frame.md): `steam-frame/fetch-vma.sh` and `tools/fetch_openxr.sh` fetch the headers SteamOS doesn't have, then `make gen` recompiles the game code from your files and `make` builds the program, both with `DEPS=$PWD/build/linux/aarch64/deps`. With ccache: `make -j6 DEPS=$PWD/build/linux/aarch64/deps CC="ccache clang" CXX="ccache clang++"`. Skip `make gen` when `build/lasgame.so` is current.
+
+Errors from a source build:
+
+- **`install.sh` says there is no game code and no game files.** Run `steam-frame/prepare-game.sh` first (step 2).
+- **`install.sh` says `tools/venv` is missing.** Run the command in step 3.
+
+`steam-frame/build.sh <version>` makes the release tarball, the FrameDrop zip and manifest, and `SHA256SUMS` in
+`steam-frame/release/`. It refuses to pack game data, keys, generated code or paths of the build machine.
+`steam-frame/privacy-check.sh` checks the branch's history, a folder or a release tarball for personal data before
+publishing.
+
+### Credits in detail
+
+- [LAS Recomp](https://github.com/peiikai/LASRecomp) by peiikai and its contributors: the recompilation, the Vulkan
+  renderer, the start screen, the randomizer and everything else the game runs on.
+- [LASRecomp-Android-Plus](https://github.com/Nycolazs/LASRecomp-Android-Plus) by Nycolazs, for its Turnip and Adreno fixes.
+- [GalaxyFrame](https://github.com/simplysanatori/GalaxyFrame), my Super Mario Galaxy VR port for the Frame, for the
+  OpenXR approach, the frame pacing and the foveation.
+- [LAS-Randomizer](https://github.com/Owen-Splat/LAS-Randomizer) by Owen_Splat, Glan and ProfessorLaw, which LAS Recomp's
+  randomizer is built on.
+- [hactool](https://github.com/SciresM/hactool) by SciresM, which extracts the game.
+- The [OpenXR SDK](https://github.com/KhronosGroup/OpenXR-SDK) from Khronos, [Dear ImGui](https://github.com/ocornut/imgui),
+  [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator), [SMAA](https://github.com/iryoku/smaa),
+  AMD FidelityFX Super Resolution 1, [SDL 3](https://libsdl.org), [FFmpeg](https://ffmpeg.org), [Kenney](https://kenney.nl)'s
+  input prompts and the Baloo 2, BIZ UDPGothic and DejaVu Sans fonts.
+
+- Nintendo, for the game. Own your copy.
+
+Upstream's full credits, with every contributor, are in its README, kept here as [README.upstream.md](README.upstream.md). [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) has the full list with licences.
+
+The Legend of Zelda, Link's Awakening and their logos are trademarks of Nintendo. This is an unofficial fan project. It
+is not affiliated with or endorsed by Nintendo, Valve or the LAS Recomp authors.
+
+### Licence in detail
+
+LAS Recomp and AwakeningFrame's changes are under the MIT licence ([LICENSE](LICENSE)). Third-party parts keep their own
+licences: see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). No Nintendo game data, keys or generated game code are
+included.
