@@ -14,7 +14,7 @@ gamepad keeps working alongside the Frame controllers.
 | **B** (right controller, right) | A | Talk, read, lift, open |
 | **X** (right controller, left) | Y | The item on Y |
 | **Y** (right controller, top) | X | The item on X |
-| Right grip | A | Talk, read, lift, open |
+| Right grip | R | Shield (hold), the same as the right bumper |
 | Left bumper | L | Pegasus Boots, once found |
 | Right bumper | R | Shield (hold) |
 | Left trigger | ZL | Not used in play |

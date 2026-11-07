@@ -128,7 +128,7 @@ The game sees a Switch Pro Controller. The Frame controllers map to it by positi
 | **B** (right) | A | Talk, read, lift, open |
 | **X** (left) | Y | The item on Y |
 | **Y** (top) | X | The item on X |
-| Right grip | A | Talk, read, lift, open |
+| Right grip | R | Shield (hold), the same as the right bumper |
 | Left bumper | L | Pegasus Boots |
 | Right bumper | R | Shield (hold) |
 | Left trigger, right trigger | ZL, ZR | Not used in play |

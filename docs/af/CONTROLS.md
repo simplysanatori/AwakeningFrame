@@ -16,7 +16,7 @@ Plus, Minus) name the Frame control that does it:
 | right right button (B) | A (the Switch's right button) | talk, read, lift, open, roll |
 | right left button (X) | Y (the Switch's left button) | the item on Y |
 | right top button (Y) | X (the Switch's top button) | the item on X |
-| right grip | A | as A: talk, lift, open |
+| right grip | R | as the right bumper: shield (hold); either one presses R |
 | left bumper | L | Pegasus Boots (once found) |
 | right bumper | R | shield (hold) |
 | left trigger | ZL | not used in play |
