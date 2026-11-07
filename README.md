@@ -112,6 +112,7 @@ If you would like more Steam Frame ports, you can also [buy me a coffee](https:/
 - [LAS Recomp](https://github.com/peiikai/LASRecomp) by peiikai and contributors: the recompilation this is built on
 - [LASRecomp-Android-Plus](https://github.com/Nycolazs/LASRecomp-Android-Plus) by Nycolazs: Turnip and Adreno fixes
 - [hactool](https://github.com/SciresM/hactool) by SciresM: game extraction
+- Library art by Jorolesvaldo, Supreme Ricardo and Celthium on [SteamGridDB](https://www.steamgriddb.com) ([sources](steam-frame/art/SOURCES.md))
 
 Full list: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Unofficial fan project, not affiliated with Nintendo, Valve or the LAS Recomp authors.
 
