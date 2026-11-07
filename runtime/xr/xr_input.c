@@ -27,8 +27,8 @@ typedef enum { C_A, C_B, C_X, C_Y, C_MENU, C_VIEW, C_DUP, C_DDOWN, C_DLEFT, C_DR
                C_TRIG_L, C_TRIG_R, C_GRIP_L, C_GRIP_R, C_COUNT } Ctl;
 typedef struct { Ctl ctl; int host; } MapEnt;
 // The default ("switch"): a Switch Pro controller, control for control, so the game's own prompts (L, R, ZL, ZR, A...) name the
-// Frame control that does it: bumpers = L / R, triggers = ZL / ZR, Menu = Plus, View = Minus, the grips: right = A, left = the
-// rig's modifier (not a game button). The face buttons are the four buttons of the Switch's diamond *by position* (the Frame's
+// Frame control that does it: bumpers = L / R, triggers = ZL / ZR, Menu = Plus, View = Minus, the grips: right = R as well (the
+// same Switch button as the right bumper: either one presses it), left = the rig's modifier (not a game button). The face buttons are the four buttons of the Switch's diamond *by position* (the Frame's
 // bottom button = the Switch's bottom one, B) unless the player's "Buttons match labels" is on (then the Frame's A is A:
 // face_host below); the Frame's A B X Y are taken to be laid out as an Xbox pad's (A bottom, B right, X left, Y top).
 static const MapEnt k_map_switch[] = {
@@ -37,7 +37,7 @@ static const MapEnt k_map_switch[] = {
     {C_DLEFT, SDL_GAMEPAD_BUTTON_DPAD_LEFT}, {C_DRIGHT, SDL_GAMEPAD_BUTTON_DPAD_RIGHT},
     {C_BUMP_L, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER}, {C_BUMP_R, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER},
     {C_TRIG_L, PADB_ZL}, {C_TRIG_R, PADB_ZR},
-    {C_GRIP_R, SDL_GAMEPAD_BUTTON_EAST},
+    {C_GRIP_R, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER},
     {C_CLICK_L, SDL_GAMEPAD_BUTTON_LEFT_STICK}, {C_CLICK_R, SDL_GAMEPAD_BUTTON_RIGHT_STICK},
 };
 // LARECOMP_XR_LAYOUT=comfort: the sword on the right trigger, the shield on the left, the Pegasus Boots on the right bumper,
