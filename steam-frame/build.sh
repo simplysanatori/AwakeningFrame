@@ -89,7 +89,9 @@ cp third_party/fonts/Baloo2/OFL.txt "$S/Baloo2-OFL.txt"
 cp third_party/fonts/BIZUDPGothic/OFL.txt "$S/BIZUDPGothic-OFL.txt"
 cp third_party/fonts/DejaVu/LICENSE "$S/DejaVu-LICENSE.txt"
 cp docs/icon/icon_1024.png "$S/icon.png"
-cp install.sh uninstall.sh LICENSE THIRD_PARTY_NOTICES.md README.md "$S/"
+cp install.sh uninstall.sh LICENSE THIRD_PARTY_NOTICES.md README.md AGENTS.md "$S/"
+mkdir -p "$S/docs"   # (what README.md links to)
+cp docs/USER_GUIDE.md docs/CHANGELOG.md docs/CONTROLS.md docs/TECHNICAL.md "$S/docs/"
 cp tools/vrtiming.py "$S/"
 cp steam-frame/awakeningframe.sh steam-frame/setup-game.sh steam-frame/prepare-game.sh steam-frame/steam-cef.py \
    steam-frame/set-art.py "$S/steam-frame/"
