@@ -10,9 +10,12 @@
 # compiler (zig/, tools/fetch_zig.sh) shipped with it. hactool (steam-frame/build-hactool.sh) extracts the player's
 # NSP or XCI with their own keys. Before packing, the staged files are checked: no game files, game code, shader caches,
 # logs or keys, no RUNPATH or path of this machine in the binaries, and steam-frame/privacy-check.sh on the archive.
-# Builds with clang (ccache when there is one) against build/linux/aarch64/deps (the OpenXR and VMA headers:
-# tools/fetch_openxr.sh, steam-frame/fetch-vma.sh). Waits for nothing: run it when the headset is not in use.
-#   AF_NO_BUILD=1      package the build/lasrecomp that is there (no make)
+# The program is built by .github/workflows/portable.yml (steam-frame/portable-deps.sh: SDL3 + FFmpeg); this only packs.
+# Run it when the headset is not in use.
+#   AF_PORTABLE_DIR=D  (required) the lasrecomp and lib/ that .github/workflows/portable.yml built on glibc 2.39 (its
+#                      artifact): D/lasrecomp is packed instead of build/lasrecomp, D/lib/* go in lib/ with RUNPATH
+#                      $ORIGIN. A release never carries a program built on the maker's own, newer, SteamOS. The staged
+#                      tree must pass steam-frame/tools/check-bundle.sh (glibc <= 2.39, only allowlisted system libraries).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
@@ -26,16 +29,12 @@ ZIPNAME=AwakeningFrame-$VERSION-framedrop-linux-arm64.zip
 mkdir -p "$OUTDIR" "$PKG"
 
 # ---- the program, without the game code (that is its own library, never part of a release)
-if [ -z "${AF_NO_BUILD:-}" ]; then
-    [ -f "$DEPS/include/openxr/openxr.h" ] || tools/fetch_openxr.sh
-    [ -f "$DEPS/include/vma/vk_mem_alloc.h" ] || steam-frame/fetch-vma.sh
-    MK=(make -j6 DEPS="$DEPS")
-    command -v ccache > /dev/null && MK+=(CC="ccache clang" CXX="ccache clang++")
-    nice -n 10 "${MK[@]}" build/lasrecomp
-fi
-grep -aq LARECOMP_XR_HZ build/lasrecomp || { echo "build/lasrecomp has no VR mode" >&2; exit 1; }
-grep -aqF -- --build-game-code build/lasrecomp || { echo "build/lasrecomp has no --build-game-code" >&2; exit 1; }
-if [ "$(nm build/lasrecomp | grep -c ' f_70' || true)" != 0 ]; then echo "build/lasrecomp has game code linked in" >&2; exit 1; fi
+PORT=${AF_PORTABLE_DIR:?AF_PORTABLE_DIR: the portable build (artifact of .github/workflows/portable.yml) is required}
+[ -x "$PORT/lasrecomp" ] && ls "$PORT"/lib/libSDL3.so.0 > /dev/null || { echo "$PORT has no lasrecomp and lib/" >&2; exit 1; }
+BIN=$PORT/lasrecomp
+grep -aq LARECOMP_XR_HZ "$BIN" || { echo "$BIN has no VR mode" >&2; exit 1; }
+grep -aqF -- --build-game-code "$BIN" || { echo "$BIN has no --build-game-code" >&2; exit 1; }
+if [ "$(nm "$BIN" | grep -c ' f_70' || true)" != 0 ]; then echo "$BIN has game code linked in" >&2; exit 1; fi
 
 # ---- the game code generator (PyInstaller, its own venv) and the compiler (zig, pinned)
 V=$PKG/gen-venv
@@ -52,9 +51,9 @@ fi
 # ---- stage: the top level of the archive (Frametanium runs its install.sh there)
 S=$PKG/stage
 rm -rf "$S" && mkdir -p "$S/steam-frame/art" "$S/gamelib-src" "$S/runtime/game_addresses"
-cp build/lasrecomp "$S/lasrecomp"
+cp "$BIN" "$S/lasrecomp"
 strip --strip-debug "$S/lasrecomp"      # (symbols stay: crash backtraces name functions; debug info names this machine's folders)
-# The build's rpath points into this tree (DEPS: only headers and the mock runtime's OpenXR loader); the Frame's own
+# The build's rpath points into the build machine's tree; the libraries are found through RUNPATH $ORIGIN/lib instead.
 # libraries are used. patchelf drops the entry but leaves its text in .dynstr: blanked too (all but a last "lib",
 # which another name could share), so no path of this machine is left in the binary.
 RP=$(readelf -d "$S/lasrecomp" | sed -n 's/.*(RUNPATH).*\[\(.*\)\]/\1/p; s/.*(RPATH).*\[\(.*\)\]/\1/p')
@@ -77,6 +76,13 @@ open(path, "wb").write(data)
 print("blanked the old rpath in .dynstr (%d)" % n)
 PY
 fi
+# the libraries it carries (SDL3, FFmpeg; the same soname files they were built with), found through RUNPATH $ORIGIN/lib; each
+# one finds its siblings in its own folder
+mkdir -p "$S/lib"
+cp "$PORT"/lib/*.so* "$S/lib/"
+for l in "$S"/lib/*.so*; do patchelf --set-rpath '$ORIGIN' "$l"; done
+strip --strip-unneeded "$S"/lib/*.so*
+patchelf --set-rpath '$ORIGIN/lib' "$S/lasrecomp"
 cp -a "$PKG/helper/lasgen" "$S/lasgen"
 cp -a build/zig "$S/zig"
 cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h tools/gamelib_entry.c runtime/hle/hle_symbols.txt "$S/gamelib-src/"
@@ -111,10 +117,12 @@ while IFS= read -r -d '' f; do
             bad "not for a release: $n" ;;
     esac
 done < <(find "$S" -mindepth 1 -print0)
-for b in "$S/lasrecomp" "$S/hactool"; do
-    readelf -d "$b" | grep -E 'RPATH|RUNPATH' > /dev/null && bad "$(basename "$b") has an rpath"
-done
+readelf -d "$S/hactool" | grep -E 'RPATH|RUNPATH' > /dev/null && bad "hactool has an rpath"
+readelf -d "$S/lasrecomp" | grep -F 'RUNPATH' | grep -qF '[$ORIGIN/lib]' || bad "lasrecomp's RUNPATH is not \$ORIGIN/lib"
 readelf -d "$S/lasrecomp" | grep "NEEDED" | grep "libSDL3" > /dev/null || bad "lasrecomp's library list was damaged"
+# nothing but glibc <= 2.39 and the libraries on steam-frame/tools/host-libs.allow (all of SteamOS Stable, Beta, Preview)
+steam-frame/tools/check-bundle.sh "$S" > "$PKG/check-bundle.txt" 2>&1 || { tail -n 20 "$PKG/check-bundle.txt" >&2; bad "check-bundle failed"; }
+tail -n 2 "$PKG/check-bundle.txt"
 # (only a program that knows the flag, else it would start the game; in an empty scratch data root, from an empty folder)
 if grep -aqF -- --game-code-status "$S/lasrecomp"; then
     E=$(mktemp -d)

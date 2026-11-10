@@ -155,7 +155,8 @@ done
 chmod +x "$DEST/lasrecomp"
 if [ -n "$UNPACKED" ]; then
   # what builds the game code on this machine: the generator, the compiler, the headers; each folder swapped whole
-  for d in lasgen zig gamelib-src; do
+  for d in lasgen zig gamelib-src lib; do   # (lib: the SDL3 and FFmpeg libraries lasrecomp finds through its RUNPATH)
+    [ -d "$FROM/$d" ] || continue
     rm -rf "$DEST/.$d.new"
     cp -a "$FROM/$d" "$DEST/.$d.new"
     rm -rf "$DEST/.$d.old"

@@ -1,0 +1,50 @@
+# The Steam Frame program (build/lasrecomp) with glibc 2.39 as its newest C library symbols, plus the SDL3 and FFmpeg
+# libraries it carries in lib/. ubuntu-24.04-arm has glibc 2.39, the oldest SteamOS the Frame ships; steam-frame/build.sh
+# (AF_PORTABLE_DIR) packs what this uploads and steam-frame/tools/check-bundle.sh proves the result. Nothing is published.
+name: Portable build
+on:
+  push:
+    branches: ['portable']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld make pkg-config cmake ninja-build patchelf \
+            libvulkan-dev libshaderc-dev libshaderc1 \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev libxtst-dev \
+            libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libgl-dev libdrm-dev libgbm-dev \
+            libpulse-dev libasound2-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev libibus-1.0-dev
+      - name: Libraries cache
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: build/linux/aarch64/deps
+          key: portable-deps-${{ hashFiles('steam-frame/portable-deps.sh', 'tools/fetch_openxr.sh', 'steam-frame/fetch-vma.sh') }}
+      - name: SDL3, FFmpeg, OpenXR and VMA headers
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: steam-frame/portable-deps.sh
+      - name: Build lasrecomp
+        run: |
+          make -j"$(nproc)" build/lasrecomp DEPS="$PWD/build/linux/aarch64/deps" SHADERC=-l:libshaderc_shared.so.1
+          objdump -p build/lasrecomp | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1
+      - name: Collect
+        run: |
+          mkdir -p out/lib
+          cp build/lasrecomp out/lasrecomp
+          D=build/linux/aarch64/deps/lib
+          for l in libSDL3 libavformat libavcodec libavutil libswscale; do
+            for f in "$D/$l".so.*; do [ -L "$f" ] || cp "$f" out/lib/; done
+          done
+          for f in out/lib/*; do n=$(objdump -p "$f" | awk '$1 == "SONAME" { print $2 }'); [ "$n" = "$(basename "$f")" ] || mv "$f" "out/lib/$n"; done
+          ls -l out out/lib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lasrecomp-portable-arm64
+          path: out
