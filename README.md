@@ -2,7 +2,7 @@
 
 The Legend of Zelda: Link's Awakening in VR, as a tabletop diorama, running natively on the Valve Steam Frame.
 It is a port of [LAS Recomp](https://github.com/peiikai/LASRecomp) by peiikai, the static recompilation of the 2019 Switch game.
-Version 0.1.0 is a pre-release: see the [known issues](docs/USER_GUIDE.md#known-issues).
+Version 0.1.1 is a pre-release: see the [known issues](docs/USER_GUIDE.md#known-issues).
 
 ## Features
 
@@ -28,12 +28,12 @@ Nothing is streamed from a PC.
 
 1. Put your NSP or XCI and `prod.keys` in `~/Downloads`.
 
-2. Download `awakeningframe-0.1.0-linux-arm64.tar.gz` and `SHA256SUMS` from [Releases](https://github.com/simplysanatori/AwakeningFrame/releases) to `~/Downloads`. In a terminal, check and install:
+2. Download `awakeningframe-0.1.1-linux-arm64.tar.gz` and `SHA256SUMS` from [Releases](https://github.com/simplysanatori/AwakeningFrame/releases) to `~/Downloads`. In a terminal, check and install:
 
    ```sh
    cd ~/Downloads
    sha256sum -c --ignore-missing SHA256SUMS
-   mkdir af && tar -xzf awakeningframe-0.1.0-linux-arm64.tar.gz -C af
+   mkdir af && tar -xzf awakeningframe-0.1.1-linux-arm64.tar.gz -C af
    af/install.sh
    ```
 
@@ -44,7 +44,7 @@ Nothing is streamed from a PC.
 Other installers (you still need step 1):
 
 - [Frametanium](https://github.com/Cogential/frametanium): add `simplysanatori/AwakeningFrame`.
-- [FrameDrop](https://framedropvr.com): [Install with FrameDrop](https://framedropvr.com/install?manifest=https%3A%2F%2Fgithub.com%2Fsimplysanatori%2FAwakeningFrame%2Freleases%2Fdownload%2Fv0.1.0%2Fawakeningframe.framedrop.json).
+- [FrameDrop](https://framedropvr.com): [Install with FrameDrop](https://framedropvr.com/install?manifest=https%3A%2F%2Fgithub.com%2Fsimplysanatori%2FAwakeningFrame%2Freleases%2Fdownload%2Fv0.1.1%2Fawakeningframe.framedrop.json).
 
 ## First run
 

@@ -137,7 +137,7 @@ LAS Recomp runs in a window on Windows, macOS and Linux. AwakeningFrame adds a V
 
 ### Status
 
-Version 0.1.0 is a pre-release. The player-facing known issues are in
+Version 0.1.1 is a pre-release. The player-facing known issues are in
 [docs/USER_GUIDE.md](docs/USER_GUIDE.md#known-issues). The open problems behind them:
 
 - **Doubling.** Fast head turns and fast-moving objects can look doubled. Part of it is the cadence: 60 FPS on a

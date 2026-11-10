@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1 (November 2026)
+
+- Runs on every SteamOS build the Steam Frame ships (Stable, Beta and Preview). SDL3 and the video libraries are packed with it instead of taken from the system, and it is built for the oldest C library in use.
+
 ## 0.1.0 (November 2026)
 
 First pre-release. Link's Awakening as a VR tabletop diorama, running natively on the Steam Frame. Based on peiikai's LAS Recomp.
