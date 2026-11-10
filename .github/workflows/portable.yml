@@ -32,7 +32,8 @@ jobs:
         run: steam-frame/portable-deps.sh
       - name: Build lasrecomp
         run: |
-          make -j"$(nproc)" build/lasrecomp DEPS="$PWD/build/linux/aarch64/deps" SHADERC=-l:libshaderc_shared.so.1
+          SC=$(find /usr/lib -name 'libshaderc_shared.so.1' | head -n 1); echo "shaderc: $SC"
+          make -j"$(nproc)" build/lasrecomp DEPS="$PWD/build/linux/aarch64/deps" SHADERC="$SC"
           objdump -p build/lasrecomp | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1
       - name: Collect
         run: |

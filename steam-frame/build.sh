@@ -54,7 +54,7 @@ rm -rf "$S" && mkdir -p "$S/steam-frame/art" "$S/gamelib-src" "$S/runtime/game_a
 cp "$BIN" "$S/lasrecomp"
 strip --strip-debug "$S/lasrecomp"      # (symbols stay: crash backtraces name functions; debug info names this machine's folders)
 # The build's rpath points into the build machine's tree; the libraries are found through RUNPATH $ORIGIN/lib instead.
-# libraries are used. patchelf drops the entry but leaves its text in .dynstr: blanked too (all but a last "lib",
+# patchelf drops the entry but leaves its text in .dynstr: blanked too (all but a last "lib",
 # which another name could share), so no path of this machine is left in the binary.
 RP=$(readelf -d "$S/lasrecomp" | sed -n 's/.*(RUNPATH).*\[\(.*\)\]/\1/p; s/.*(RPATH).*\[\(.*\)\]/\1/p')
 patchelf --remove-rpath "$S/lasrecomp"
