@@ -32,8 +32,12 @@ jobs:
         run: steam-frame/portable-deps.sh
       - name: Build lasrecomp
         run: |
-          SC=$(find /usr/lib -name 'libshaderc_shared.so.1' | head -n 1); echo "shaderc: $SC"
-          make -j"$(nproc)" build/lasrecomp DEPS="$PWD/build/linux/aarch64/deps" SHADERC="$SC"
+          # Ubuntu names its shaderc libshaderc.so.1; SteamOS has libshaderc_shared.so.1 with the same C API. Link against a
+          # stub with that soname and the functions shaders.c calls: the program then needs the system's own at run time.
+          mkdir -p build/stub
+          for f in $(grep -rhoE 'shaderc_[a-z_0-9]+\(' runtime --include=*.c --include=*.cpp | tr -d '(' | sort -u); do echo "void $f(void) {}"; done > build/stub/shaderc.c
+          clang -shared -fPIC -o build/stub/libshaderc_shared.so.1 -Wl,-soname,libshaderc_shared.so.1 build/stub/shaderc.c
+          make -j"$(nproc)" build/lasrecomp DEPS="$PWD/build/linux/aarch64/deps" SHADERC="$PWD/build/stub/libshaderc_shared.so.1"
           objdump -p build/lasrecomp | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1
       - name: Collect
         run: |
