@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- After a crash, the next start asks whether to send a report about it. **See What's Sent** shows the whole report, **Send Report** sends it to me through Sentry, and **Don't Send** (the default) sends nothing. Nothing is sent unless you choose to, and then only that one report. Your user name and home folder are left out.
+
 ## 0.1.1 (November 2026)
 
 - Runs on every SteamOS build the Steam Frame ships (Stable, Beta and Preview). SDL3 and the video libraries are packed with it instead of taken from the system, and it is built for the oldest C library in use.

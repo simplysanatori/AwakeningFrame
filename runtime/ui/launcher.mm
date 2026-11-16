@@ -34,6 +34,7 @@
 #include "imgui_impl_vulkan.h"
 #endif
 #include "imgui_impl_sdl3.h"
+#include "crash_report.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -1365,6 +1366,74 @@ static void data_folder_popup(float s) {
     ImGui::EndPopup();
 }
 
+// AwakeningFrame: the last run ended with an error (runtime/crash_report.c). Send a report of it? Asked once, in front
+// of everything; Don't Send is the default and B / Esc too. Started with --play, the game goes on after the answer
+// (main.c sets g_crash_report_then_play).
+extern "C" {
+bool g_crash_report_then_play;
+}
+static void crash_report_popup(float s) {
+    static bool opened;
+    static int view, shown = -1;  // view: 0 the question, 1 See What's Sent
+    if (!crash_report_pending()) return;
+    if (!opened) opened = true, ImGui::OpenPopup("##crashreport");
+    float sc = s * 720.0f / 1080.0f;
+    ImVec2 ds = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos(ImVec2(ds.x * 0.5f, ds.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal("##crashreport", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar |
+                                ImGuiWindowFlags_NoMove))
+        return;
+    char msg[160];
+    int st = crash_report_state(msg, sizeof msg);
+    bool focus = shown != view * 10 + st;  // (the first button of each step selected, for the controller)
+    shown = view * 10 + st;
+    ImVec2 bw(300 * sc, 0);
+    ImGui::PushFont(g_font_small);
+    ImGui::PushFont(g_font_menu);
+    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", L("AwakeningFrame closed because of an error"));
+    ImGui::PopFont();
+    ImGui::PushTextWrapPos(1000 * sc);
+    bool esc = ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+    bool close = false;
+    if (view == 1) {
+        ImGui::BeginChild("##sent", ImVec2(1000 * sc, 520 * sc), ImGuiChildFlags_Borders);
+        ImGui::TextUnformatted(crash_report_text());
+        ImGui::EndChild();
+        ImGui::Spacing();
+        if (focus) ImGui::SetKeyboardFocusHere();
+        if (ImGui::Button(L("Back"), bw) || esc) view = 0;
+    } else if (st == 1) {
+        ImGui::TextUnformatted(L("Sending..."));
+    } else if (st >= 2) {
+        if (st == 2) ImGui::TextUnformatted(L("Sent. Thank you!"));
+        else ImGui::TextColored(plastic_col(plastic_theme().warn), "%s %s", L("The report wasn't sent."), msg);
+        ImGui::Spacing();
+        if (focus) ImGui::SetKeyboardFocusHere();
+        close = ImGui::Button(L("OK"), bw) || esc;
+    } else {
+        ImGui::TextDisabled("%s", crash_report_reason());
+        ImGui::Spacing();
+        ImGui::TextUnformatted(L("You can send a report about it to the developer. It holds what went wrong, the "
+                                 "version, your system and graphics chip, and the end of the log. Your user name and home "
+                                 "folder are left out. Nothing is sent unless you choose Send Report."));
+        ImGui::Spacing();
+        if (focus) ImGui::SetKeyboardFocusHere();
+        close = ImGui::Button(L("Don't Send"), bw) || esc;
+        ImGui::SameLine();
+        if (ImGui::Button(L("See What's Sent"), bw)) view = 1;
+        ImGui::SameLine();
+        if (ImGui::Button(L("Send Report"), bw)) crash_report_send();
+    }
+    ImGui::PopTextWrapPos();
+    ImGui::PopFont();
+    if (close) {
+        crash_report_done();
+        ImGui::CloseCurrentPopup();
+        if (g_crash_report_then_play) g_play_pending = true;
+    }
+    ImGui::EndPopup();
+}
+
 static bool g_files_deleted;  // set here: the start screen goes back to setting the game files up
 // Settings > Game files, as the other tabs: option rows on the left, the selected row's description on the right
 static void prelaunch_tab(float sc) {
@@ -2237,6 +2306,7 @@ extern "C" void launcher_run(const char *root) {
                 bool in_settings = page == SETTINGS;
                 if (in_settings) menu_style_begin(ds.y / 1080.0f), plastic_widgets(true), pieces = true;
                 data_folder_popup(s);
+                crash_report_popup(s);
                 if (in_settings) plastic_widgets(false), menu_style_end();
             }
             ImGui::End();

@@ -97,6 +97,11 @@ The program links at run time to libraries SteamOS already has:
 (Apache 2.0), the Vulkan loader and Mesa's Turnip driver. None of them is
 included in this repository.
 
+Crash reports, when the player chooses Send Report, go to
+[Sentry](https://sentry.io) through SteamOS's own `curl`. No Sentry code is
+in the repository or the program: `runtime/crash_report.c` writes the
+report in Sentry's envelope format itself.
+
 A build from source compiles the game code with the system's clang. A
 release compiles it with the Zig it carries, as upstream's release builds do
 (README.upstream.md lists those with their licenses).

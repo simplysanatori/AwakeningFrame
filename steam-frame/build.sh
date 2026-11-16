@@ -27,6 +27,7 @@ PKG=$ROOT/build/pkg
 NAME=awakeningframe-$VERSION-linux-arm64
 ZIPNAME=AwakeningFrame-$VERSION-framedrop-linux-arm64.zip
 mkdir -p "$OUTDIR" "$PKG"
+. steam-frame/sentry-dsn.sh   # (crash reports: AF_SENTRY_DSN, or ~/.config/awakeningframe-dev/sentry-dsn)
 
 # ---- the program, without the game code (that is its own library, never part of a release)
 PORT=${AF_PORTABLE_DIR:?AF_PORTABLE_DIR: the portable build (artifact of .github/workflows/portable.yml) is required}
@@ -159,6 +160,13 @@ steam-frame/privacy-check.sh "$SCAN" > "$PKG/privacy-check.txt" 2>&1 || bad "pri
 EMAIL=$(git config user.email 2> /dev/null || true)
 [ -n "$EMAIL" ] && grep -rlaiF -e "$EMAIL" "$S" > /dev/null 2>&1 && bad "the git e-mail address is in the files"
 [ "$fail" = 0 ] || { echo "not packed: fix the above" >&2; exit 1; }
+
+# ---- crash reports: the Sentry DSN next to the program (runtime/crash_report.c reads it when the program has none
+# built in; after the checks, which would take its key@host for an e-mail address), and the symbols for Sentry
+[ -n "$AF_SENTRY_DSN" ] && printf '%s\n' "$AF_SENTRY_DSN" > "$S/sentry-dsn"
+if [ -n "${SENTRY_AUTH_TOKEN:-}" ]; then
+    steam-frame/upload-symbols.sh "$BIN" || echo "warning: the symbols were not uploaded (steam-frame/upload-symbols.sh)" >&2
+fi
 
 # ---- pack
 TAR=$OUTDIR/$NAME.tar.gz

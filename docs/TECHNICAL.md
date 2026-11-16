@@ -180,6 +180,73 @@ switch between the two 90 Hz choices is live. Height, distance, size and tilt be
 the rig and are saved in `vr_rig.ini`. The full list is in
 [af/VR_SETTINGS.md](af/VR_SETTINGS.md).
 
+## Crash reports
+
+Nothing is sent unless the player chooses to send that one report. There is
+no telemetry and no Sentry SDK; the code is `runtime/crash_report.c` (Linux
+only: elsewhere its functions do nothing).
+
+- **The record.** Every fatal error goes through `rt_fatal_trace`
+  (`dispatch.c`): a crash signal (`rt_fault_report`) or a `FATAL`. Before the
+  crash dialog it calls `crash_report_record`, which writes
+  `crash-reports/last-crash.txt` in the data folder: the release and
+  environment, VR or flat, the pid, the time, the plain-words reason
+  (`rt_crash_headline`, the crash dialog's headline from `crash_explain.c`),
+  the fatal line, the stack (`backtrace()` from the crash's own pc on, each
+  frame named as in the log: `f_<guest address>` in the game code), and each
+  module a frame is in with its base, size and GNU build ID (read from the
+  loaded module's note, `dl_iterate_phdr`). Like the rest of the crash path
+  it is not async-signal-safe; a second fault inside it records nothing more.
+- **The next start.** `crash_report_init` (`main.c`, after `rt_paths_init`
+  and after the `--game-code-status` / `--build-game-code` exits, so the
+  wrapper's check does not use it up) reads the record and deletes it: it is
+  asked about once. With a DSN the report is built: the record, the system
+  (`plat_system_info`), the GPU and driver from the crashed run's
+  `[vk] using` / `[vk] driver` lines, and that run's last 2,000 log lines
+  (`lasrecomp-backup-<time>-<pid>.log`, found by the pid). `scrub` replaces
+  the home folder with `~`, the user name with `<user>` and the host name with
+  `<host>` everywhere (not SteamOS's own `steamos` or `deck`), and IPv4, IPv6
+  and MAC addresses in the log with `<ip>` and `<mac>`. Without a DSN
+  nothing is asked.
+- **The question.** The Frame starts with `--play`, which skips the start
+  screen; with a report pending `main.c` shows it this once
+  (`g_crash_report_then_play`), and `crash_report_popup` (`launcher.mm`) asks
+  in front of everything, in VR on the panel with the laser: **Don't Send**
+  (selected; B and Esc too), **See What's Sent** (the whole text, exactly
+  what is sent) and **Send Report**. After the answer the game starts as it
+  would have. LARECOMP_NO_LAUNCHER and scripted test runs are never asked.
+- **Send Report.** One Sentry envelope, posted by the system's
+  `/usr/bin/curl` (as the start screen's update check; HTTPS only, the
+  system's certificates), on a thread of its own: a `fatal` event with
+  release `awakeningframe@<VERSION>` and environment `production` when a
+  `VERSION` file is next to the program (a release), else
+  `awakeningframe@<commit>` and `development`; tags `report: crash`, `mode`
+  (`vr` / `flat`), `reason`, `gpu`, `driver`, `os`; the stack as an exception
+  (oldest frame first) with `debug_meta` of the modules (code and debug IDs
+  from the build IDs, so uploaded symbols match); and `report.txt` and
+  `lasrecomp.log` as attachments. No user, an empty `user.geo` and
+  `sdk.settings.infer_ip: never`, so Sentry keeps no IP and derives no place
+  (the project is also set not to store IP addresses). curl's exit code
+  becomes the message (no connection, refused).
+- **The DSN** is never in the repository. `AF_SENTRY_DSN` (the environment
+  or `make AF_SENTRY_DSN=...`), else the one line of
+  `~/.config/awakeningframe-dev/sentry-dsn`, is compiled in (`Makefile`).
+  The release's program is built by CI without one, so
+  `steam-frame/build.sh` (through `steam-frame/sentry-dsn.sh`, the same two
+  sources) writes it to `sentry-dsn` next to the program, after the privacy
+  checks; `install.sh` copies it; the program reads it when it has none built
+  in.
+- **Symbols.** The program links with `--build-id`.
+  `steam-frame/upload-symbols.sh <unstripped lasrecomp>` uploads it
+  (`sentry-cli` or `sentry`, `debug-files upload --type elf`);
+  `steam-frame/build.sh` runs it on the CI artifact when `SENTRY_AUTH_TOKEN`
+  is set, with `SENTRY_ORG` and `SENTRY_PROJECT` from the environment. The
+  token is never written anywhere. The game code is built on each Frame, so
+  it has no symbols to upload; its frames carry their `f_<address>` names.
+- **Test.** `AF_SENTRY_TEST_CRASH=1` (in `session.env`) crashes the game on
+  purpose (SIGSEGV on a thread of its own) 10 seconds after it starts; the
+  next start asks.
+
 ## Development tools
 
 - `tools/xrmock/`: a mock OpenXR runtime for running the VR mode without a

@@ -88,7 +88,7 @@ OSFLAGS  := -Wno-format  # (%llx for uint64_t, which is unsigned long here: the 
 SHADERC  ?= $(shell pkg-config --libs shaderc 2>/dev/null || echo -lshaderc)
 # -rdynamic: crash backtraces name host functions (runtime/platform/linux.c). DEPS: an rpath to its lib/ too, so the
 # game finds those libraries when run (the AppImage's own is set by tools/linux/package.sh)
-LDFLAGS  := -fuse-ld=lld -rdynamic $(if $(DEPS),-L$(DEPS)/lib -Wl$(comma)-rpath$(comma)$(abspath $(DEPS))/lib) \
+LDFLAGS  := -fuse-ld=lld -rdynamic -Wl,--build-id $(if $(DEPS),-L$(DEPS)/lib -Wl$(comma)-rpath$(comma)$(abspath $(DEPS))/lib) \
             -lSDL3 -lavformat -lavcodec -lavutil -lswscale -lvulkan $(SHADERC) -lpthread -ldl -lm
 BACKEND_SRC := $(wildcard runtime/nvn/vulkan/*.c) $(wildcard runtime/nvn/vulkan/*.cpp)
 # The VR mode (runtime/xr, LARECOMP_XR=1) when DEPS has the OpenXR headers (tools/fetch_openxr.sh); the OpenXR loader
@@ -184,6 +184,18 @@ $(B)/rt/gamebuild.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"' -DGAMELIB_BASE_ID
 $(B)/rt/%.o: runtime/%.c $(RT_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(RTFLAGS) -c $< -o $@
+
+# AwakeningFrame crash reports (runtime/crash_report.c): the Sentry project Send Report sends to. AF_SENTRY_DSN (the
+# environment or make AF_SENTRY_DSN=...), else the one line of ~/.config/awakeningframe-dev/sentry-dsn on this machine.
+# Never in the repository: without one the build has no Send Report. The commit names a development build's release.
+AF_SENTRY_DSN ?= $(shell head -n 1 "$(HOME)/.config/awakeningframe-dev/sentry-dsn" 2>/dev/null | tr -d '[:space:]')
+AF_GIT_SHA := $(shell git rev-parse --short=9 HEAD 2>/dev/null)
+# (a stamp named after both: either changing builds the file again)
+AF_STAMP := $(B)/inc/af_build.$(shell printf '%s %s' '$(AF_SENTRY_DSN)' '$(AF_GIT_SHA)' | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-12)
+$(AF_STAMP):
+	@mkdir -p $(dir $@) && rm -f $(B)/inc/af_build.* && touch $@
+$(B)/rt/crash_report.o: $(AF_STAMP)
+$(B)/rt/crash_report.o: RTFLAGS += -DAF_SENTRY_DSN='"$(AF_SENTRY_DSN)"' -DAF_GIT_SHA='"$(AF_GIT_SHA)"'
 
 # SMAA (third_party/smaa, MIT): the reference shader as a C string for runtime/nvn/smaa_data.c (both backends build
 # their passes from it); the non-ASCII bytes in its comments become '?', and its CRLF line ends plain LF (a CR left in

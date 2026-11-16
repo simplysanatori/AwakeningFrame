@@ -168,6 +168,8 @@ if [ -n "$UNPACKED" ]; then
   rm -f "$DEST/lasgame.so" "$DEST/lasgame.so.id"
   cp "$FROM"/*-LICENSE.txt "$FROM/LICENSE" "$FROM/THIRD_PARTY_NOTICES.md" "$DEST/" 2> /dev/null || true
   cp "$FROM/install.sh" "$FROM/uninstall.sh" "$FROM/VERSION" "$DEST/"
+  # (crash reports: where Send Report sends to, when the release has one: runtime/crash_report.c)
+  if [ -f "$FROM/sentry-dsn" ]; then cp "$FROM/sentry-dsn" "$DEST/"; else rm -f "$DEST/sentry-dsn"; fi
 fi
 # The bundled fonts, next to the program (the game looks for them by name there; without DejaVuSans.ttf it stops with
 # "no font for the game's text"). From a release: top-level *.ttf; from a source tree: third_party/fonts/*/.

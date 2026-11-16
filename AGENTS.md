@@ -163,6 +163,7 @@ Version 0.1.1 is a pre-release. The player-facing known issues are in
 | Shader warm-up | `tools/warm_shaders.sh` | [WARM](docs/af/WARM.md) |
 | Free camera probe | `runtime/nvn/cam_override.c` | [FREECAM](docs/af/FREECAM.md) |
 | Build, install, release | `Makefile`, `install.sh`, `uninstall.sh`, `steam-frame/` | [BUILD-frame](docs/af/BUILD-frame.md), [INSTALL](docs/af/INSTALL.md) |
+| Crash reports (Send Report, Sentry) | `runtime/crash_report.c`, `crash_report_popup` in `runtime/ui/launcher.mm`, `steam-frame/sentry-dsn.sh`, `upload-symbols.sh` | [TECHNICAL](docs/TECHNICAL.md#crash-reports) |
 
 
 ### Environment switches
@@ -185,6 +186,7 @@ over the VR tab (its row greys out). The VR tab's rows map onto `LARECOMP_VR_*` 
 | `AF_THROTTLE=1` | sets SteamVR's `framesToThrottle`: SteamVR paces the game to every other refresh and makes the second one itself |
 | `AF_VRTIMING=0` | no compositor timing log |
 | `LARECOMP_WARP_ON_LOAD`, `LARECOMP_WARP_AT` | warp to a spot for tests |
+| `AF_SENTRY_TEST_CRASH=1` | crash on purpose 10 s after the game starts, to test crash reports |
 
 Every other switch is documented where it is read (grep `getenv("LARECOMP_` and the docs/af tables).
 

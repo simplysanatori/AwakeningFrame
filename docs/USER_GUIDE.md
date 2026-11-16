@@ -147,6 +147,7 @@ How it works inside is in [TECHNICAL.md](TECHNICAL.md).
 | Game files, game code, saves, settings, shader caches | `~/.local/share/lasrecomp` (`extracted/`, `extracted/lasgame.so`, `larecomp.ini`, `vr_rig.ini`, `cache/`) |
 | Logs | `~/Games/AwakeningFrame/logs`: `run-<time>.log` (the launch and the game's output), `lasrecomp-<time>.log` (the game's log) and timing logs, for the last 12 launches |
 | One launch's settings | `~/Games/AwakeningFrame/session.env`, `NAME=value` lines read at start |
+| A crash not asked about yet | `~/.local/share/lasrecomp/crash-reports/last-crash.txt`, removed at the next start |
 | hactool | `~/Games/AwakeningFrame/app/hactool` (a release), `~/Games/AwakeningFrame/tools-bin/hactool` (from source) |
 
 ## Troubleshooting
@@ -160,6 +161,20 @@ How it works inside is in [TECHNICAL.md](TECHNICAL.md).
 - **To check something without the headset,** run `~/Games/AwakeningFrame/app/awakeningframe.sh --flat`. It opens the game in an ordinary window.
 
 ## Reporting a problem
+
+### After a crash
+
+If AwakeningFrame closed because of an error, the next time you start it asks whether to send a report about it, before the game starts:
+
+- **Don't Send** sends nothing. It is selected first, and B does the same.
+- **See What's Sent** shows the whole report.
+- **Send Report** sends it to me through [Sentry](https://sentry.io), a crash reporting service, so I'm told about it and can fix it.
+
+It only asks once for each crash, and nothing is sent unless you choose Send Report, and then only that one report. AwakeningFrame sends nothing in the background.
+
+A report holds what went wrong, AwakeningFrame's version, VR or flat, SteamOS's version, your graphics chip and driver, where in the program it stopped (memory addresses and the names of the program's files, with their build IDs) and the last 2,000 lines of the game's log. Your home folder is shown as `~` and your user name as `<user>`. IP and MAC addresses in the log are shown as `<ip>` and `<mac>`. Sentry sees the address a report comes from, like any website does; I've set it not to store IP addresses.
+
+### Anything else
 
 Open an [issue](https://github.com/simplysanatori/AwakeningFrame/issues) with what you did, what you expected and what happened. Attach the newest `run-<time>.log` and `lasrecomp-<time>.log` from `~/Games/AwakeningFrame/logs`.
 

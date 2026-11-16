@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "crash_report.h"
 #include "game_addresses.h"
 #include "gamebuild.h"
 #include "gamelib.h"
@@ -352,6 +353,14 @@ int main(int argc, char **argv) {
         return ready ? 0 : 1;
     }
 #endif
+    // AwakeningFrame: the last run ended with an error and this build can send a report of it (crash_report.c): the
+    // start screen this once, for the question, then on to the game as asked (launcher.mm crash_report_popup)
+    crash_report_init();
+    if (crash_report_pending() && !no_launcher && !getenv("LARECOMP_INPUT") && skip_launcher) {
+        extern bool g_crash_report_then_play;  // runtime/ui/launcher.mm
+        g_crash_report_then_play = true;
+        skip_launcher = false;
+    }
     if (getenv("LARECOMP_MENU_SFX_TEST")) {  // (test: the menu sounds loaded now, each logged)
         extern void menu_sfx_set_game_dir(const char *dir);
         extern void menu_sfx_load_now(void);
@@ -367,6 +376,7 @@ int main(int argc, char **argv) {
             extern void launcher_run(const char *root);
             launcher_run(root);
         }
+        crash_report_test_arm();
         boot(root);
         int kind = ui_run();  // window and input on the main thread; returns when a reboot is requested
         teardown();
