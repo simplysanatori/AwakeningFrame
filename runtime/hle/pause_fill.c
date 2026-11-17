@@ -29,6 +29,10 @@ bool pause_fill_frame(uint64_t frame) { return g_frame != ~0ull && frame >= g_fr
 
 // (render thread) a composite sampling a w x h texture: the pause screen's blurred scene?
 bool pause_fill_backdrop(int w, int h) {
+    // (not in the VR mode: the window there is the 16:9 HUD panel, with nothing to fill. Its target has the eyes' shape
+    // only because the HUD is drawn at the eyes' render scale, and the present crops the 16:9 box out of it - a pane
+    // moved out to the target's edges would lose its border)
+    if (xr_wanted && xr_wanted()) return false;
     if (w != 192 || h != 108 || g_settings.aspect != ASPECT_UNLOCKED || ENV("LARECOMP_NO_PAUSE_FILL") || !game_in_play())
         return false;
     g_frame = renderer_exec_frame();
