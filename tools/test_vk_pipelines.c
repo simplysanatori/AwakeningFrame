@@ -4,7 +4,8 @@
 // (vertex inputs per attr_kind, colour targets per rt_kind, D32S8 depth, the same dynamic state).
 // The Khronos validation layer is on when available; any message counts as a failure.
 //
-// usage: test_vk_pipelines <translate.c> <count> <seed>     (tools/test_vk_pipelines.sh builds and runs it)
+// usage: test_vk_pipelines <translate.c> <count> <seed>     (tools/test_vk_pipelines.sh builds and runs it;
+// TT_GMEM_CHUNK_SHIFT, TT_GMEM_LAZY, TT_GMEM_WHOLE, TT_GMEM_MIRROR choose how guest memory reaches the shaders)
 #define main test_translate_main
 #include "test_translate.c"
 #undef main
@@ -99,27 +100,38 @@ static const VkDynamicState DYN[] = {
     VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE, VK_DYNAMIC_STATE_STENCIL_OP, VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE,
     VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE};
 
-typedef struct { VkBindingInfo b[96]; int n; VkDescriptorSetLayout sl[2]; VkPipelineLayout pl; } Layout;
+typedef struct { VkBindingInfo b[96]; int n, ns; VkDescriptorSetLayout sl[3]; VkPipelineLayout pl; } Layout;
 
+// nsets: 2 for a vertex + fragment pair, 1 for a compute program; one set more when the program holds the guest memory's chunk
+// table and windows (translate.c GMEM_CHUNK_SET: the next set, shared by the stages that use it)
 static bool make_layout(Layout *l, const uint32_t *const *spv, const size_t *nw, int nmod, int nsets) {
     l->n = 0;
     for (int i = 0; i < nmod; i++) l->n += vk_reflect(spv[i], nw[i], l->b + l->n, 96 - l->n);
+    l->ns = nsets;
     for (int i = 0; i < l->n; i++) {  // the binding numbers the renderer fills (exec.c stage_set)
         VkBindingInfo *b = &l->b[i];
-        bool ok = b->binding >= 32 ? b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+        bool chunk = (int)b->set == nsets && b->binding < 64 && (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        if (chunk) l->ns = nsets + 1;
+        bool ok = chunk || ((int)b->set < nsets && (b->binding >= 32 ? b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
                 : b->binding == 17 || b->binding == GFAST_BUFFER_INDEX ? b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
-                : b->binding <= GMAP_BUFFER_INDEX ? b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : false;  // (the guest memory tables)
-        if (!ok || (int)b->set >= nsets) { fprintf(stderr, "unexpected binding set %u binding %u type %d\n", b->set, b->binding, b->type); return false; }
+                : b->binding <= GMAP_BUFFER_INDEX ? b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : false));  // (the guest memory tables)
+        if (!ok) { fprintf(stderr, "unexpected binding set %u binding %u type %d\n", b->set, b->binding, b->type); return false; }
     }
-    VkShaderStageFlags st[2] = {nsets == 1 ? VK_SHADER_STAGE_COMPUTE_BIT : VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT};
-    for (int s = 0; s < nsets; s++) l->sl[s] = vk_set_layout(l->b, l->n, (uint32_t)s, st[s]);
-    VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = (uint32_t)nsets, .pSetLayouts = l->sl};
+    VkShaderStageFlags st[3] = {nsets == 1 ? VK_SHADER_STAGE_COMPUTE_BIT : VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT,
+                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT};
+    if (nsets == 1) st[1] = VK_SHADER_STAGE_COMPUTE_BIT;
+    for (int s = 0; s < l->ns; s++) l->sl[s] = vk_set_layout(l->b, l->n, (uint32_t)s, st[s]);
+    // the push constants (translate.c push_promote, LARECOMP_VK_PUSH_CB): exec.c gives each stage its own range of them; one range for both is a superset
+    VkPushConstantRange pc = {.stageFlags = nsets == 1 ? VK_SHADER_STAGE_COMPUTE_BIT : VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, .size = 256};
+    VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = (uint32_t)l->ns, .pSetLayouts = l->sl,
+                                     .pushConstantRangeCount = 1, .pPushConstantRanges = &pc};
     return vkCreatePipelineLayout(g_vk.dev, &ci, NULL, &l->pl) == VK_SUCCESS;
 }
 
 static void free_layout(Layout *l, int nsets) {
+    (void)nsets;
     vkDestroyPipelineLayout(g_vk.dev, l->pl, NULL);
-    for (int s = 0; s < nsets; s++) vkDestroyDescriptorSetLayout(g_vk.dev, l->sl[s], NULL);
+    for (int s = 0; s < l->ns; s++) vkDestroyDescriptorSetLayout(g_vk.dev, l->sl[s], NULL);
 }
 
 static long n_pairs, n_cs, n_skip, n_fail;
@@ -251,6 +263,11 @@ int main(int argc, char **argv) {
     rng_state = g_seed = strtoull(argv[3], NULL, 0);
     maxwell_gmem_base = 0x7240000000ull;
     maxwell_gmem_size = 0xD0000000ull;
+    // the ways the heap reaches shaders, as test_translate.c's TT_GMEM_* (exec.c decides them from the GPU)
+    if (getenv("TT_GMEM_CHUNK_SHIFT")) maxwell_gmem_chunk_shift = (uint32_t)atoi(getenv("TT_GMEM_CHUNK_SHIFT"));
+    maxwell_gmem_lazy = getenv("TT_GMEM_LAZY") && atoi(getenv("TT_GMEM_LAZY")) != 0;
+    maxwell_gmem_whole = maxwell_gmem_lazy && getenv("TT_GMEM_WHOLE") && atoi(getenv("TT_GMEM_WHOLE")) != 0;
+    maxwell_gmem_mirror = getenv("TT_GMEM_MIRROR") && atoi(getenv("TT_GMEM_MIRROR")) != 0;
     init_device();
     vk_shaders_init();
     for (long i = 0; i < count; i++) {

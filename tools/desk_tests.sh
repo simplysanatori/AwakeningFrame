@@ -36,7 +36,7 @@ done
 FF=$(pkg-config --cflags --libs libavformat libavcodec libavutil libswscale 2>/dev/null)
 
 # Left out: tools/test_room_crossing.py (needs the game files, LARECOMP_ROMFS), test_astc.sh (clones astcenc), the Windows
-# and macOS tests, tools/test_vk_pipelines.sh (a GPU test), and `tools/menu_strings.py check` (a report, not a test).
+# and macOS tests, and `tools/menu_strings.py check` (a report, not a test).
 # translate_glsl links with --allow-multiple-definition: the reference translator's rename list in test_translate.sh
 # misses symbols added since (the link fails without it), which this test does not use in glsl mode.
 # Known to fail on the unmodified 0.1.1 tree (stale tests; shown as KNOWN and not counted as a failure):
@@ -98,7 +98,6 @@ run_one() {   # name needs cmd
 export -f run_one; export OUT LIMIT
 printf '%s\n' "${T[@]}" | { [ -n "$ONLY" ] && grep -i -- "^[^|]*$ONLY[^|]*|" || cat; } > "$OUT/queue.tsv"
 [ -s "$OUT/queue.tsv" ] || { echo "desk_tests: no test matches '$ONLY' (--list)" >&2; exit 2; }
-# the shared build outputs (build/test_translate, build/test_cam_override) mean the two translate tests must not overlap
 xargs -a "$OUT/queue.tsv" -d '\n' -P "$JOBS" -I{} bash -c 'IFS="|" read -r n needs cmd <<< "$1"; run_one "$n" "$needs" "$cmd"' _ {}
 
 fails=0; pass=0; skip=0; known=0

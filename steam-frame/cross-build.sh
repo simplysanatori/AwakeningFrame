@@ -123,16 +123,26 @@ fi
 if [ ! -f "$P/lib/libavcodec.so" ]; then
     echo "== FFmpeg"
     unpack ffmpeg-9.0.2.tar.xz ffmpeg
-    (cd "$W/ffmpeg" && ./configure --prefix="$P" --enable-cross-compile --arch=aarch64 --target-os=linux \
-        --cc="clang --target=$TRIPLE --sysroot=$SYSROOT" --cxx="clang++ --target=$TRIPLE --sysroot=$SYSROOT" \
-        --ld="clang --target=$TRIPLE --sysroot=$SYSROOT -fuse-ld=lld" --ar=llvm-ar --ranlib=llvm-ranlib --nm=llvm-nm \
-        --strip=llvm-strip --pkg-config=false \
+    # (FFmpeg's libraries carry their configure line: the compilers are wrappers found by name and the prefix is a made-up one, installed
+    # through DESTDIR, so no path of this machine is in them)
+    mkdir -p "$W/bin"
+    for t in cc:clang cxx:clang++; do
+        printf '#!/bin/sh\nexec %s --target=%s --sysroot=%s "$@"\n' "${t#*:}" "$TRIPLE" "$SYSROOT" > "$W/bin/af-${t%%:*}"
+        chmod +x "$W/bin/af-${t%%:*}"
+    done
+    printf '#!/bin/sh\nexec clang --target=%s --sysroot=%s -fuse-ld=lld "$@"\n' "$TRIPLE" "$SYSROOT" > "$W/bin/af-ld"
+    chmod +x "$W/bin/af-ld"
+    rm -rf "$W/ffmpeg-dest"
+    (cd "$W/ffmpeg" && PATH=$W/bin:$PATH ./configure --prefix=/deps --enable-cross-compile --arch=aarch64 --target-os=linux \
+        --cc=af-cc --cxx=af-cxx --ld=af-ld --ar=llvm-ar --ranlib=llvm-ranlib --nm=llvm-nm --strip=llvm-strip --pkg-config=false \
         --enable-shared --disable-static --enable-pic \
         --disable-autodetect --disable-programs --disable-doc --disable-network --disable-avdevice --disable-avfilter \
         --disable-swresample --disable-everything \
         --enable-protocol=file --enable-demuxer=matroska,mov \
         --enable-decoder=vp9,vp8,vorbis,opus,h264,aac --enable-parser=vp9,vp8,vorbis,opus,h264,aac \
-        && nice -n 19 make -j"$JOBS" && make install) > "$W/ffmpeg.log" 2>&1 || { tail -n 30 "$W/ffmpeg.log" >&2; exit 1; }
+        && PATH=$W/bin:$PATH nice -n 19 make -j"$JOBS" && make install DESTDIR="$W/ffmpeg-dest") > "$W/ffmpeg.log" 2>&1 \
+        || { tail -n 30 "$W/ffmpeg.log" >&2; exit 1; }
+    cp -a "$W/ffmpeg-dest/deps/." "$P/"
 fi
 grep -qa 'GPL version 3\|--enable-gpl' "$P/lib/libavcodec.so" && { echo "FFmpeg is not LGPL" >&2; exit 1; }
 echo "deps: $(cd "$P/lib" && ls ./*.so | tr '\n' ' ')"
@@ -145,8 +155,9 @@ mkdir -p build/stub
 for f in $(grep -rhoE 'shaderc_[a-z_0-9]+\(' runtime --include=*.c --include=*.cpp | tr -d '(' | sort -u); do echo "void $f(void) {}"; done > build/stub/shaderc.c
 clang --target=$TRIPLE --sysroot="$SYSROOT" -fuse-ld=lld -shared -fPIC -o build/stub/libshaderc_shared.so.1 \
     -Wl,-soname,libshaderc_shared.so.1 build/stub/shaderc.c
+# (PATHMAP: the root filesystem's header paths in the debug info are named as "sysroot" too, as the checkout is ".")
 nice -n 19 make -j"$JOBS" ARCH=aarch64 SYSROOT="$SYSROOT" DEPS="$P" SHADERC="$ROOT/build/stub/libshaderc_shared.so.1" \
-    build/aarch64/lasrecomp > build/aarch64.log 2>&1 || { tail -n 30 build/aarch64.log >&2; exit 1; }
+    PATHMAP="-ffile-prefix-map=$ROOT=. -ffile-prefix-map=$SYSROOT=/sysroot" build/aarch64/lasrecomp > build/aarch64.log 2>&1 || { tail -n 30 build/aarch64.log >&2; exit 1; }
 
 # ---- collect, as portable.yml does
 rm -rf "$OUT" && mkdir -p "$OUT/lib"
