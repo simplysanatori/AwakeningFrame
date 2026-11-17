@@ -527,6 +527,16 @@ void xr_input_frame(void) {
     S.last_host = host, S.last_lx = lx, S.last_ly = ly;
     uint32_t game, menus;
     chord_filter(host, plat_now_ns(), &game, &menus);
+    // LAS Recomp's menus (ui/pad_nav.mm) confirm with the right button and go back with the bottom one, and since 0.6 the
+    // other way round while face_by_label is on (its "Confirm button: Bottom", which swaps a gamepad's A and B for the
+    // game too). Here that setting is Buttons Match Labels, and face_host above already puts A on the button the game's
+    // A is bound to: with the menus' swap on top A would go back and B confirm. So the two swap in what the menus get:
+    // A confirms there as it does in the game, as before 0.6.
+    if (g_settings.face_by_label) {
+        uint32_t s_ = menus >> SDL_GAMEPAD_BUTTON_SOUTH & 1, e_ = menus >> SDL_GAMEPAD_BUTTON_EAST & 1;
+        menus = (menus & ~(1u << SDL_GAMEPAD_BUTTON_SOUTH | 1u << SDL_GAMEPAD_BUTTON_EAST)) | e_ << SDL_GAMEPAD_BUTTON_SOUTH |
+                s_ << SDL_GAMEPAD_BUTTON_EAST;
+    }
     static uint32_t last_game, last_menus;
     if (S.log && (game != last_game || menus != last_menus)) LOG("[xr] input: to the game %#x, to the menus %#x\n", game, menus);
     last_game = game, last_menus = menus;
