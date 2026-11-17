@@ -531,12 +531,6 @@ static double ms_now(void) {
     return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
 }
 
-// Progress: the records gone through, times the share of the builds they queued that are done (a record queues one or
-// two builds, which finish later on the worker threads; records - builds pending went below 0 on a cold start).
-static int prep_share(int done, int fin0) {
-    int f = renderer_prepare_finished() - fin0, p = renderer_prepare_pending();
-    return f + p > 0 ? (int)((long long)done * f / (f + p)) : done;
-}
 static volatile bool prep_done_once;  // (a full, not cancelled run finished in this process: shader_prep_boot)
 static bool prep_run_locked(const char *romfs, void (*progress)(int done, int total), const volatile int *cancel);
 bool shader_prep_run(const char *romfs, void (*progress)(int done, int total), const volatile int *cancel) {
@@ -565,10 +559,7 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
     if (!renderer_prepare_begin()) { free(list); LOG("[shader] preparation: no GPU device yet\n"); return false; }
     uint64_t seen_game;
     char *seen = shader_seen_read(&seen_game);  // (the player's own list: after the shipped one)
-    int total = 0;
-    for (char *p = list; *p; p++) total += *p == '\n';
-    for (char *p = seen; p && *p; p++) total += *p == '\n';
-    if (progress) progress(0, total + 1);
+    if (progress) progress(0, 0);  // (the total once the game files are indexed)
     if (!idx_n) {
         idx_dir(romfs, 0);
         char main_nso[1100];  // (<game files>/exefs/main, next to romfs/)
@@ -599,47 +590,62 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
         shader_seen_prep_done(game, keep);
         free(keep);
     }
-    FILE **files = calloc((size_t)idx_nfiles + 1, sizeof *files);
-    int fin0 = renderer_prepare_finished();  // (builds done before this run)
-    int done = 0, prepared = 0, missing = 0, failed = 0, prepared_seen = 0, mv_prepared = 0, mv_skipped = 0;
-    // Multiview records (SR_MV / SR_MVP: the VR eye passes' pipelines and programs, vulkan/exec.c):
-    // with multiview on they go first, from both lists - in such a run they are what the eye passes draw, and the
-    // time budget (shader_prep_boot) may end the run before the player's own list; with it off they are left out
-    // (the renderer couldn't build them: no "failed" counts for them), and stay in the file.
+    // The records this run prepares, counted first so the count the start screen shows is real: lines that parse,
+    // the player's own ones not in the shipped list, and only those whose shaders are in the game files.
+    // Multiview records (SR_MV / SR_MVP: the VR eye passes' pipelines and programs, vulkan/exec.c): with multiview on
+    // they go first, from both lists - in such a run they are what the eye passes draw, and the time budget
+    // (shader_prep_boot) may end the run before the player's own list; with it off they are left out (the renderer
+    // couldn't build them: no "failed" counts for them), and stay in the file.
+    typedef struct { char *line; bool own, mv; } Work;
+    int nwork = 0, cap = 0, missing = 0, mv_skipped = 0;
+    Work *work = NULL;
     bool mv_on = renderer_prepare_multiview();
-    for (int pass = 0; pass < 4; pass++) {  // (multiview: the shipped list's, the player's), the shipped list, the player's
-        bool own = pass & 1, mv_pass = pass < 2;
-        if (mv_pass && !mv_on) continue;
-        for (const char *line = own ? seen : list, *next; line && *line && !(cancel && *cancel); line = next) {
-            next = strchr(line, '\n');
-            size_t l = next ? (size_t)(next - line) : strlen(line);
-            next = next ? next + 1 : line + l;
-            char one[2048];
-            if (l >= sizeof one) continue;
-            memcpy(one, line, l), one[l] = 0;
-            ShaderRec r;
-            if (!shader_rec_parse(one, &r)) continue;
-            bool mv = r.kind == 'G' && (r.flags & (SR_MV | SR_MVP));
-            if (mv != mv_pass) { mv_skipped += mv && !mv_on; continue; }
-            if (own && !getenv("LARECOMP_SHADER_LIST") && shader_seen_shipped(one)) continue;  // (prepared already)
-            const IdxEnt *ev = idx_find(r.vs), *ef = r.kind == 'G' ? idx_find(r.fs) : NULL;
-            ShaderBlob bv = {0}, bf = {0};
-            uint8_t *dv = ev ? blob_read(ev, &bv, files) : NULL, *df = ef ? blob_read(ef, &bf, files) : NULL;
-            if (!dv || (r.kind == 'G' && !df)) missing++;
-            else if (renderer_prepare(&r, &bv, &bf)) *(own ? &prepared_seen : &prepared) += 1, mv_prepared += mv;
-            else failed++;
-            free(dv);
-            free(df);
-            if (progress && (++done & 7) == 0) progress(prep_share(done, fin0), total + 1);
-        }
+    for (int own = 0; own < 2; own++)  // the shipped list, then the player's own
+    for (char *line = own ? seen : list, *next; line && *line; line = next) {
+        next = strchr(line, '\n');
+        if (next) *next++ = 0;
+        else next = line + strlen(line);
+        ShaderRec r;
+        if (!shader_rec_parse(line, &r)) continue;
+        bool mv = r.kind == 'G' && (r.flags & (SR_MV | SR_MVP));
+        if (mv && !mv_on) { mv_skipped++; continue; }
+        if (own && !getenv("LARECOMP_SHADER_LIST") && shader_seen_shipped(line)) continue;  // (prepared already)
+        if (!idx_find(r.vs) || (r.kind == 'G' && !idx_find(r.fs))) { missing++; continue; }
+        if (nwork == cap) work = realloc(work, (size_t)(cap = cap ? cap * 2 : 1024) * sizeof *work);
+        work[nwork++] = (Work){line, own != 0, mv};
+    }
+    // done - pending moves both ways a little (builds finish on other threads): the count shown only goes up, and
+    // never past the total
+    int total = nwork, shown = 0;
+#define PREP_REPORT(d) do { int d_ = (d); if (d_ > total) d_ = total; if (d_ > shown) shown = d_; \
+                            if (progress) progress(shown, total); } while (0)
+    PREP_REPORT(0);
+    FILE **files = calloc((size_t)idx_nfiles + 1, sizeof *files);
+    int done = 0, prepared = 0, failed = 0, prepared_seen = 0, mv_prepared = 0;
+    for (int pass = 0; pass < 2; pass++)  // the multiview records, then the rest
+    for (int i = 0; i < nwork && !(cancel && *cancel); i++) {
+        if (work[i].mv != (pass == 0)) continue;
+        ShaderRec r;
+        shader_rec_parse(work[i].line, &r);
+        const IdxEnt *ev = idx_find(r.vs), *ef = r.kind == 'G' ? idx_find(r.fs) : NULL;
+        ShaderBlob bv = {0}, bf = {0};
+        uint8_t *dv = blob_read(ev, &bv, files), *df = ef ? blob_read(ef, &bf, files) : NULL;
+        if (!dv || (r.kind == 'G' && !df)) missing++;
+        else if (renderer_prepare(&r, &bv, &bf)) *(work[i].own ? &prepared_seen : &prepared) += 1, mv_prepared += work[i].mv;
+        else failed++;
+        free(dv);
+        free(df);
+        if ((++done & 7) == 0) PREP_REPORT(done - renderer_prepare_pending());
     }
     while (!(cancel && *cancel) && renderer_prepare_pending()) {  // (the last builds)
-        if (progress) progress(prep_share(done, fin0), total + 1);
+        PREP_REPORT(done - renderer_prepare_pending());
         struct timespec ts = {0, 5000000};
         nanosleep(&ts, NULL);
     }
     if (!(cancel && *cancel)) renderer_prepare_end();
-    if (progress) progress(total + 1, total + 1);
+    PREP_REPORT(total);
+#undef PREP_REPORT
+    free(work);
     for (int i = 0; i < idx_nfiles; i++) if (files[i]) fclose(files[i]);
     free(files);
     free(list);
@@ -671,7 +677,6 @@ static volatile int boot_label_stop;
 static void boot_progress(int done, int total) {
     static int last = -1;
     int pct = total > 0 ? (int)((long long)done * 100 / total) : 0;
-    if (pct < last) pct = last;  // (the share of queued builds done can dip as a record queues more)
     if (last < 0 || pct / 10 != last / 10) LOG("[shader] preparing: %d %%\n", pct);
     last = pct;
     boot_pct = pct;

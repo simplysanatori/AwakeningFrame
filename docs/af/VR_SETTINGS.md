@@ -124,6 +124,6 @@ hook called; `vr_settings_test_tick`, called from hle/warp.c): keys `edge`, `fov
 `turn`, `panel_distance`, `panel_width`, `refresh`, `fps`, `label`, values as in the ini (`edge=fade`, `dynres=0`).
 
 ```
-LARECOMP_SHOW_VR_TAB=1 LARECOMP_SETTINGS=/tmp/vr.ini LARECOMP_MENU_TAB=10 ...   # the tab, flat; the ini is the scratch one
+LARECOMP_SHOW_VR_TAB=1 LARECOMP_SETTINGS=/tmp/vr.ini LARECOMP_MENU_TAB=12 ...   # the tab, flat; the ini is the scratch one
 tools/test_settings.py                                                             # the ini round trip (vr_* keys)
 ```

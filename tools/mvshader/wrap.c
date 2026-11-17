@@ -16,9 +16,19 @@ typedef struct {
     uint8_t push_cb[64];   // ShaderInfo.push_cb (npush of them)
 } HxOut;
 
+// The translator's switches that one of the two builds may not have (the reference is an older tree): weak, set where
+// they exist. The quad shuffles without fragment subgroups: maxwell_glsl_quad_deriv, maxwell_frag_subgroups before the
+// merge of LAS Recomp 0.6. The 0.6 switches as vk_exec_init sets them on Turnip: push constants on, recolour variants on.
+extern int maxwell_frag_subgroups __attribute__((weak));
+extern bool maxwell_glsl_quad_deriv __attribute__((weak)), maxwell_glsl_push_cb __attribute__((weak)),
+    maxwell_glsl_tint_branch __attribute__((weak));
+
 void hx_config(uint64_t gbase, uint64_t gsize, int frag_sg, int stack_vars, int structured, int push, int mirror) {
     maxwell_gmem_base = gbase, maxwell_gmem_size = gsize;
-    maxwell_frag_subgroups = frag_sg;
+    if (&maxwell_frag_subgroups) maxwell_frag_subgroups = frag_sg;
+    if (&maxwell_glsl_quad_deriv) maxwell_glsl_quad_deriv = !frag_sg;
+    if (&maxwell_glsl_push_cb) maxwell_glsl_push_cb = true;
+    if (&maxwell_glsl_tint_branch) maxwell_glsl_tint_branch = true;
     maxwell_glsl_stack_vars = stack_vars;
     maxwell_glsl_structured = structured;
     maxwell_glsl_push = push;

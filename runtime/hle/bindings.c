@@ -28,16 +28,19 @@ _Static_assert(PADB_LTRIGGER == SDL_GAMEPAD_BUTTON_COUNT, "trigger pseudo-button
     SDL_SCANCODE_KP_4, SDL_SCANCODE_KP_6}
 static const int16_t k_def_pad[BIND_PAD_COUNT] = DEF_PAD, k_def_key[BIND_KEY_COUNT] = DEF_KEY;
 int16_t g_bind_pad[BIND_PAD_COUNT] = DEF_PAD, g_bind_key[BIND_KEY_COUNT] = DEF_KEY;
+#define DEF_MENU {{SDL_GAMEPAD_BUTTON_GUIDE, -1}, {SDL_GAMEPAD_BUTTON_BACK, SDL_GAMEPAD_BUTTON_START}}
+static const int8_t k_def_menu[BIND_MENU_COUNT][2] = DEF_MENU;
+int8_t g_bind_menu[BIND_MENU_COUNT][2] = DEF_MENU;
 
-static const char *const k_ini[BIND_KEY_COUNT] = {
+static const char *const k_ini[BIND_SLOT_COUNT] = {
     "a", "b", "x", "y", "lstick", "rstick", "l", "r", "zl", "zr", "plus", "minus", "left", "up", "right", "down",
-    "ls_up", "ls_down", "ls_left", "ls_right", "rs_up", "rs_down", "rs_left", "rs_right",
+    "ls_up", "ls_down", "ls_left", "ls_right", "rs_up", "rs_down", "rs_left", "rs_right", "menu1", "menu2",
 };
-static const char *const k_names[BIND_KEY_COUNT] = {
+static const char *const k_names[BIND_SLOT_COUNT] = {
     "A", "B", "X", "Y", LN("Left stick press"), LN("Right stick press"), "L", "R", "ZL", "ZR", LN("Plus"),
     LN("Minus"), LN("D-pad Left"), LN("D-pad Up"), LN("D-pad Right"), LN("D-pad Down"), LN("Left stick Up"),
     LN("Left stick Down"), LN("Left stick Left"), LN("Left stick Right"), LN("Right stick Up"),
-    LN("Right stick Down"), LN("Right stick Left"), LN("Right stick Right"),
+    LN("Right stick Down"), LN("Right stick Left"), LN("Right stick Right"), LN("Open menu"), LN("Open menu"),
 };
 // controller buttons by position (larecomp.ini)
 static const char *const k_pad_ini[PADB_HOST_COUNT] = {
@@ -47,7 +50,7 @@ static const char *const k_pad_ini[PADB_HOST_COUNT] = {
 };
 
 int bind_slot_from_name(const char *name) {
-    for (int i = 0; i < BIND_KEY_COUNT; i++) if (!strcmp(name, k_ini[i])) return i;
+    for (int i = 0; i < BIND_SLOT_COUNT; i++) if (!strcmp(name, k_ini[i])) return i;
     return -1;
 }
 int bind_pad_from_name(const char *name) {
@@ -55,7 +58,13 @@ int bind_pad_from_name(const char *name) {
     return -1;
 }
 
-const char *bind_input_name(int slot) { return slot >= 0 && slot < BIND_KEY_COUNT ? k_names[slot] : "?"; }
+static const char *const k_ui_names[BIND_UI_COUNT] = {
+    LN("Confirm"), LN("Back"), LN("Option"), LN("Confirm text"),
+};
+const char *bind_input_name(int slot) {
+    if (slot >= BIND_UI_CONFIRM && slot < BIND_UI_END) return k_ui_names[slot - BIND_UI_CONFIRM];
+    return slot >= 0 && slot < BIND_SLOT_COUNT ? k_names[slot] : "?";
+}
 
 // fam: 0 Nintendo, 1 Xbox (and pads SDL labels like one), 2 PlayStation
 const char *bind_pad_label(int host, int fam) {
@@ -102,37 +111,143 @@ int bind_label_family(void) {
 static void result(int kind, int dev, int slot, int other);
 
 void bind_reset(int dev) {
-    if (dev == BIND_DEV_PAD) memcpy(g_bind_pad, k_def_pad, sizeof g_bind_pad);
+    if (dev == BIND_DEV_PAD) memcpy(g_bind_pad, k_def_pad, sizeof g_bind_pad), memcpy(g_bind_menu, k_def_menu, sizeof g_bind_menu);
     else memcpy(g_bind_key, k_def_key, sizeof g_bind_key);
     LOG("[input] %s bindings reset to the defaults\n", dev == BIND_DEV_PAD ? "controller" : "keyboard");
     result(5, dev, -1, -1);
 }
 
 bool bind_is_default(int dev) {
-    return dev == BIND_DEV_PAD ? !memcmp(g_bind_pad, k_def_pad, sizeof g_bind_pad) : !memcmp(g_bind_key, k_def_key, sizeof g_bind_key);
+    return dev == BIND_DEV_PAD ? !memcmp(g_bind_pad, k_def_pad, sizeof g_bind_pad) && !memcmp(g_bind_menu, k_def_menu, sizeof g_bind_menu)
+                               : !memcmp(g_bind_key, k_def_key, sizeof g_bind_key);
 }
 
 bool bind_is_default_slot(int dev, int slot) {
+    if (slot >= BIND_MENU_1) return !memcmp(g_bind_menu[slot - BIND_MENU_1], k_def_menu[slot - BIND_MENU_1], 2);
     return dev == BIND_DEV_PAD ? g_bind_pad[slot] == k_def_pad[slot] : g_bind_key[slot] == k_def_key[slot];
 }
 
-// (its own inverse: also turns a pressed button into the positional one stored)
+// (its own inverse: also turns a pressed button into the positional one stored). Confirm button "Bottom": the bottom
+// and right buttons swap on every pad, whatever its type or the Button icons setting (the player chose it, on a
+// Nintendo-style pad too; LAS Recomp's menus use the same rule, runtime/ui/pad_nav.mm). X / Y stay where the Switch
+// has them.
 static int label_swap(int host) {
-    extern int input_pad_family(void);  // runtime/hle/input.c
-    if (!g_settings.face_by_label || !input_pad_family()) return host;
+    if (!g_settings.face_by_label) return host;
     switch (host) {
     case SDL_GAMEPAD_BUTTON_SOUTH: return SDL_GAMEPAD_BUTTON_EAST;
     case SDL_GAMEPAD_BUTTON_EAST: return SDL_GAMEPAD_BUTTON_SOUTH;
-    case SDL_GAMEPAD_BUTTON_WEST: return SDL_GAMEPAD_BUTTON_NORTH;
-    case SDL_GAMEPAD_BUTTON_NORTH: return SDL_GAMEPAD_BUTTON_WEST;
     default: return host;
     }
 }
 int bind_pad_host(int slot) { return slot >= 0 && slot < BIND_PAD_COUNT ? label_swap(g_bind_pad[slot]) : -1; }
 int bind_prompt_host(int slot) { return bind_pad_host(slot); }
 
+// ------------------------------------------------------------------ the menu's shortcuts
+bool bind_menu_pressed(int button, uint32_t held) {
+    for (int i = 0; i < BIND_MENU_COUNT; i++) {
+        int a = g_bind_menu[i][0], b = g_bind_menu[i][1];
+        if (a < 0) continue;
+        if (b < 0 ? button == a : (button == a && (held >> b & 1)) || (button == b && (held >> a & 1))) return true;
+    }
+    return false;
+}
+
+bool bind_menu_single(int host) {
+    for (int i = 0; i < BIND_MENU_COUNT; i++)
+        if (g_bind_menu[i][0] == host && g_bind_menu[i][1] < 0) return true;
+    return false;
+}
+
+static bool game_button(int host) {
+    for (int i = 0; i < BIND_PAD_COUNT; i++)
+        if (bind_pad_host(i) == host) return true;
+    return false;
+}
+
+static void menu_assign(int i, int a, int b) {
+    if (b >= 0 && b < a) { int t = a; a = b, b = t; }  // (one order: Back + Start and Start + Back are the same)
+    int o = !i, other = -1;
+    if (g_bind_menu[o][0] == a && g_bind_menu[o][1] == b) {  // (the other shortcut already: they swap)
+        memcpy(g_bind_menu[o], g_bind_menu[i], 2);
+        other = BIND_MENU_1 + o;
+    }
+    g_bind_menu[i][0] = (int8_t)a, g_bind_menu[i][1] = (int8_t)b;
+    LOG("[input] controller Open menu %d -> %s%s%s%s\n", i + 1, k_pad_ini[a], b >= 0 ? "+" : "", b >= 0 ? k_pad_ini[b] : "",
+        other >= 0 ? " (swapped)" : "");
+    result(other >= 0 ? 2 : 1, BIND_DEV_PAD, BIND_MENU_1 + i, other);
+}
+
+bool bind_menu_clear(int i) {
+    if (g_bind_menu[!i][0] < 0) {  // (the last one: a player without a keyboard couldn't get back in)
+        result(7, BIND_DEV_PAD, BIND_MENU_1 + i, -1);
+        return false;
+    }
+    g_bind_menu[i][0] = g_bind_menu[i][1] = -1;
+    LOG("[input] controller Open menu %d cleared\n", i + 1);
+    result(8, BIND_DEV_PAD, BIND_MENU_1 + i, -1);
+    return true;
+}
+
+
+// ------------------------------------------------------------------ LAS Menu (our menus' buttons)
+bool g_bind_ui_custom;
+int8_t g_bind_ui[BIND_UI_COUNT];
+static const char *const k_ui_ini[BIND_UI_COUNT] = {"confirm", "back", "option", "ok"};
+// L / R and the D-pad stay the menus' tabs and moving: never a LAS Menu action (a capture waits on past them)
+static bool ui_nav_button(int host) {
+    return host == SDL_GAMEPAD_BUTTON_LEFT_SHOULDER || host == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER ||
+           (host >= SDL_GAMEPAD_BUTTON_DPAD_UP && host <= SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+}
+
+int bind_ui_convention(int act) {
+    bool sc = g_settings.face_by_label;  // (Confirm button Bottom, on every pad: runtime/ui/pad_nav.h)
+    switch (act) {
+    case BIND_UI_CONFIRM: return sc ? SDL_GAMEPAD_BUTTON_SOUTH : SDL_GAMEPAD_BUTTON_EAST;
+    case BIND_UI_BACK: return sc ? SDL_GAMEPAD_BUTTON_EAST : SDL_GAMEPAD_BUTTON_SOUTH;
+    case BIND_UI_OPTION: return SDL_GAMEPAD_BUTTON_NORTH;
+    case BIND_UI_OK: return SDL_GAMEPAD_BUTTON_START;
+    default: return -1;
+    }
+}
+int bind_ui_host(int act) {
+    if (act < BIND_UI_CONFIRM || act >= BIND_UI_END) return -1;
+    return g_bind_ui_custom ? g_bind_ui[act - BIND_UI_CONFIRM] : bind_ui_convention(act);
+}
+int bind_ui_action(int host) {
+    for (int a = BIND_UI_CONFIRM; a < BIND_UI_END; a++)
+        if (bind_ui_host(a) == host) return a;
+    return -1;
+}
+bool bind_ui_uses(int host) {
+    if (!g_bind_ui_custom) return false;
+    for (int i = 0; i < BIND_UI_COUNT; i++)
+        if (g_bind_ui[i] == host) return true;
+    return false;
+}
+void bind_ui_reset(void) {
+    g_bind_ui_custom = false;
+    LOG("[input] LAS Menu back to the controller conventions\n");
+    result(5, BIND_DEV_PAD, BIND_UI_CONFIRM, -1);
+}
+// Bind `host` to menu action `act`; the action already on it takes the old button (swap: every action keeps one)
+static void ui_assign(int act, int host) {
+    if (bind_menu_single(host)) { result(10, BIND_DEV_PAD, act, -1); return; }  // (it would close the menu instead)
+    if (!g_bind_ui_custom) {  // the first change: the Confirm button setting's buttons, then this one
+        for (int a = BIND_UI_CONFIRM; a < BIND_UI_END; a++) g_bind_ui[a - BIND_UI_CONFIRM] = (int8_t)bind_ui_convention(a);
+        g_bind_ui_custom = true;
+    }
+    int8_t *t = g_bind_ui, i = (int8_t)(act - BIND_UI_CONFIRM), other = -1;
+    for (int j = 0; j < BIND_UI_COUNT; j++)
+        if (j != i && t[j] == host) other = j, t[j] = t[i];
+    t[i] = (int8_t)host;
+    LOG("[input] LAS Menu %s -> %s%s%s%s\n", k_ui_ini[i], k_pad_ini[host], other >= 0 ? " (swapped with " : "",
+        other >= 0 ? k_ui_ini[other] : "", other >= 0 ? ")" : "");
+    result(other >= 0 ? 2 : 1, BIND_DEV_PAD, act, other >= 0 ? BIND_UI_CONFIRM + other : -1);
+}
+
 // ------------------------------------------------------------------ capture
 static _Atomic int cap_dev = -1, cap_slot = -1;
+static _Atomic int cap_first = -1;  // a menu shortcut's capture: the button held, waiting for a second (or its release)
 static _Atomic uint64_t cap_deadline;
 static _Atomic int res_kind, res_dev, res_slot, res_other, res_serial;
 
@@ -142,10 +257,17 @@ static void result(int kind, int dev, int slot, int other) {
 }
 
 void bind_capture_begin(int dev, int slot) {
-    if (slot < 0 || slot >= (dev == BIND_DEV_PAD ? BIND_PAD_COUNT : BIND_KEY_COUNT)) return;
+    bool menu = dev == BIND_DEV_PAD && (slot == BIND_MENU_1 || slot == BIND_MENU_2);
+    bool ui = dev == BIND_DEV_PAD && slot >= BIND_UI_CONFIRM && slot < BIND_UI_END;
+    if (!menu && !ui && (slot < 0 || slot >= (dev == BIND_DEV_PAD ? BIND_PAD_COUNT : BIND_KEY_COUNT))) return;
+    cap_first = -1;
     cap_deadline = SDL_GetTicks() + BIND_CAPTURE_MS;
     cap_slot = slot;
     cap_dev = dev;
+}
+
+void bind_ui_capture_begin(int act) {
+    bind_capture_begin(BIND_DEV_PAD, act);
 }
 
 void bind_capture_cancel(void) {
@@ -202,18 +324,40 @@ bool bind_capture_event(const SDL_Event *e) {
     case SDL_EVENT_KEY_UP: case SDL_EVENT_TEXT_INPUT:
         return true;
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
-        // Home / Guide opens the menu; a keyboard capture ignores the controller (it times out, or Esc)
+        if (dev == BIND_DEV_PAD && cap_slot >= BIND_UI_CONFIRM) {  // LAS Menu: any button (Home: refused below)
+            if (e->gbutton.button >= SDL_GAMEPAD_BUTTON_COUNT || ui_nav_button(e->gbutton.button)) return true;
+            int slot = cap_slot;
+            cap_dev = -1;
+            ui_assign(slot, e->gbutton.button);
+            return true;
+        }
+        if (dev == BIND_DEV_PAD && cap_slot >= BIND_MENU_1) {  // a menu shortcut: a second button makes it a pair
+            int btn = e->gbutton.button, first = cap_first;
+            if (btn >= SDL_GAMEPAD_BUTTON_COUNT) return true;
+            if (first < 0) { cap_first = btn; return true; }
+            if (btn != first) { cap_dev = -1; menu_assign(cap_slot - BIND_MENU_1, first, btn); }
+            return true;
+        }
+        // Home / Guide is kept for the menu and overlays; a keyboard capture ignores the controller (it times out, or Esc)
         if (dev != BIND_DEV_PAD || e->gbutton.button == SDL_GAMEPAD_BUTTON_GUIDE || e->gbutton.button >= SDL_GAMEPAD_BUTTON_COUNT) return true;
         cap_dev = -1;
         assign(dev, cap_slot, e->gbutton.button);
         return true;
     case SDL_EVENT_GAMEPAD_BUTTON_UP:
+        if (dev == BIND_DEV_PAD && cap_slot >= BIND_MENU_1 && cap_slot < BIND_UI_CONFIRM && e->gbutton.button == cap_first) {
+            cap_dev = -1;  // (let go alone)
+            if (game_button(cap_first)) result(6, dev, cap_slot, -1);  // (the menu would open instead of the game's button)
+            else if (bind_ui_uses(cap_first)) result(9, dev, cap_slot, -1);  // (our menus' button would close them)
+            else menu_assign(cap_slot - BIND_MENU_1, cap_first, -1);
+        }
         return true;
     case SDL_EVENT_GAMEPAD_AXIS_MOTION:
-        if (dev == BIND_DEV_PAD && e->gaxis.value > 16000 &&
+        if (dev == BIND_DEV_PAD && (cap_slot < BIND_MENU_1 || cap_slot >= BIND_UI_CONFIRM) && e->gaxis.value > 16000 &&
             (e->gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER || e->gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)) {
+            int slot = cap_slot, h = e->gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ? PADB_LTRIGGER : PADB_RTRIGGER;
             cap_dev = -1;
-            assign(dev, cap_slot, e->gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ? PADB_LTRIGGER : PADB_RTRIGGER);
+            if (slot >= BIND_UI_CONFIRM) ui_assign(slot, h);
+            else assign(dev, slot, h);
         }
         return true;  // (sticks: no menu movement while waiting)
     default:
@@ -223,8 +367,42 @@ bool bind_capture_event(const SDL_Event *e) {
 
 // ------------------------------------------------------------------ larecomp.ini
 bool bind_settings_load(const char *key, const char *val) {
+    if (!strncmp(key, "bind_ui_", 8)) {  // (all of them or none: a set missing one stays on the conventions)
+        static int8_t got[BIND_UI_COUNT];
+        static unsigned have;
+        for (int i = 0; i < BIND_UI_COUNT; i++) {
+            if (strcmp(key + 8, k_ui_ini[i])) continue;
+            int h = bind_pad_from_name(val);
+            if (h < 0 || ui_nav_button(h)) return true;
+            got[i] = (int8_t)h, have |= 1u << i;
+        }
+        if (have == (1u << BIND_UI_COUNT) - 1) {
+            // (no button twice, none that opens the menu alone: hand-edited; bind_settings_save writes the menu
+            // shortcuts first, so they're loaded by now)
+            bool ok = true;
+            for (int i = 0; i < BIND_UI_COUNT; i++) {
+                ok &= !bind_menu_single(got[i]);
+                for (int j = 0; j < i; j++) ok &= got[i] != got[j];
+            }
+            if (ok) memcpy(g_bind_ui, got, sizeof g_bind_ui), g_bind_ui_custom = true;
+            have = 0;
+        }
+        return true;
+    }
     bool pad = !strncmp(key, "bind_pad_", 9), kb = !strncmp(key, "bind_key_", 9);
     if (!pad && !kb) return false;
+    if (pad && !strncmp(key + 9, "menu", 4) && (key[13] == '1' || key[13] == '2') && !key[14]) {
+        int i = key[13] - '1', a = -1, b = -1;
+        char one[24] = "", two[24] = "";
+        if (strcmp(val, "none")) {
+            sscanf(val, "%23[^+]+%23s", one, two);
+            a = bind_pad_from_name(one), b = two[0] ? bind_pad_from_name(two) : -1;
+            if (a < 0 || a >= SDL_GAMEPAD_BUTTON_COUNT || b >= SDL_GAMEPAD_BUTTON_COUNT || (two[0] && b < 0)) return true;
+        }
+        g_bind_menu[i][0] = (int8_t)a, g_bind_menu[i][1] = (int8_t)b;
+        if (g_bind_menu[0][0] < 0 && g_bind_menu[1][0] < 0) memcpy(g_bind_menu, k_def_menu, sizeof g_bind_menu);  // (hand-edited)
+        return true;
+    }
     for (int i = 0; i < (pad ? BIND_PAD_COUNT : BIND_KEY_COUNT); i++) {
         if (strcmp(key + 9, k_ini[i])) continue;
         if (pad) {
@@ -242,6 +420,14 @@ void bind_settings_save(FILE *f) {
     for (int i = 0; i < BIND_PAD_COUNT; i++)
         if (g_bind_pad[i] != k_def_pad[i] && g_bind_pad[i] >= 0 && g_bind_pad[i] < PADB_HOST_COUNT)
             fprintf(f, "bind_pad_%s = %s\n", k_ini[i], k_pad_ini[g_bind_pad[i]]);
+    for (int i = 0; i < BIND_MENU_COUNT; i++) {
+        int a = g_bind_menu[i][0], b = g_bind_menu[i][1];
+        if (!memcmp(g_bind_menu[i], k_def_menu[i], 2)) continue;
+        if (a < 0) fprintf(f, "bind_pad_%s = none\n", k_ini[BIND_MENU_1 + i]);
+        else fprintf(f, "bind_pad_%s = %s%s%s\n", k_ini[BIND_MENU_1 + i], k_pad_ini[a], b >= 0 ? "+" : "", b >= 0 ? k_pad_ini[b] : "");
+    }
+    for (int i = 0; g_bind_ui_custom && i < BIND_UI_COUNT; i++)
+        fprintf(f, "bind_ui_%s = %s\n", k_ui_ini[i], k_pad_ini[g_bind_ui[i]]);
     for (int i = 0; i < BIND_KEY_COUNT; i++)
         if (g_bind_key[i] != k_def_key[i])
             fprintf(f, "bind_key_%s = %s\n", k_ini[i], g_bind_key[i] ? SDL_GetScancodeName((SDL_Scancode)g_bind_key[i]) : "none");
