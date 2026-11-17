@@ -50,7 +50,9 @@
 //   MOCK_XR_SHIFT_DUMP_AT=a,b  display times a to b seconds
 //   MOCK_XR_FLICK=<dir>      every new eye image whole, reduced on the GPU, as PGM luma with an index of the poses it was
 //                            submitted with, without stalling the loop (tools/flicker.py); MOCK_XR_FLICK_AT=a,b display times
-//                            a to b s (all), MOCK_XR_FLICK_SHIFT=n reduced by 2^n (2: a quarter), MOCK_XR_FLICK_EYES=0|1|both
+//                            a to b s (all), MOCK_XR_FLICK_SHIFT=n reduced by 2^n (2: a quarter), MOCK_XR_FLICK_EYES=0|1|both,
+//                            MOCK_XR_FLICK_BG=<luma>: the image over a background of that luma by its alpha (a layer blended
+//                            over the room: Table Edge Passthrough's alpha shows)
 //   MOCK_XR_COMPOSITOR=lead[,from]  (MOCK_XR_COMPOSITOR_PRIO=realtime|high|medium|none: its priority) a compositor's GPU job (two eye-sized blits) on its own high-priority device, lead
 //                            ms before each vsync; the summary gives its latency and the refreshes it would have missed,
 //                            counted from `from` seconds on (MOCK_XR_COMPOSITOR_LOG=<file>: one line per refresh)
@@ -1151,7 +1153,7 @@ static void shiftLayer(int frame, const XrCompositionLayerProjection* p, XrTime 
 // that could not be copied (no free slot). tools/flicker.py reads it.
 static const char* gFlickDir;
 static double gFlickFrom = 0, gFlickTo = 1e9;
-static int gFlickShift = 2, gFlickEyes = 3, gFlickSeq[2], gFlickTag, gFlickDrops, gFlickImgs;
+static int gFlickShift = 2, gFlickEyes = 3, gFlickSeq[2], gFlickTag, gFlickDrops, gFlickImgs, gFlickBg = -1;
 static FILE* gFlickIdx;
 #define FLICK_TAGS 64
 static struct { int used, eye, seq, frame; XrTime display, located; XrPosef pose; XrFovf fov; } gFlickMeta[FLICK_TAGS];
@@ -1221,7 +1223,7 @@ static void flickCollect(void) {
     for (;;) {
         size_t need = (size_t)4096 * 4096 / 4;
         if (cap < need) buf = (uint8_t*)realloc(buf, need), cap = need;
-        if (!mockvk_flick_collect(&tag, &w, &h, buf)) break;
+        if (!mockvk_flick_collect(&tag, &w, &h, buf, gFlickBg)) break;
         int k = tag % FLICK_TAGS;
         if (!gFlickMeta[k].used) continue;
         gFlickMeta[k].used = 0;
@@ -1751,6 +1753,7 @@ static void init(void) {
     if ((v = getenv("MOCK_XR_FLICK")) && *v) gFlickDir = v;
     if ((v = getenv("MOCK_XR_FLICK_AT"))) sscanf(v, "%lf,%lf", &gFlickFrom, &gFlickTo);
     if ((v = getenv("MOCK_XR_FLICK_SHIFT"))) gFlickShift = atoi(v) < 1 ? 1 : atoi(v) > 4 ? 4 : atoi(v);
+    if ((v = getenv("MOCK_XR_FLICK_BG"))) gFlickBg = atoi(v) < 0 ? -1 : atoi(v) > 255 ? 255 : atoi(v);
     if ((v = getenv("MOCK_XR_FLICK_EYES"))) gFlickEyes = !strcmp(v, "0") ? 1 : !strcmp(v, "1") ? 2 : 3;
     if ((v = getenv("MOCK_XR_SHIFT_DUMP_AT"))) sscanf(v, "%lf,%lf", &gDumpFrom, &gDumpTo);
     if ((v = getenv("MOCK_XR_TIMING"))) {

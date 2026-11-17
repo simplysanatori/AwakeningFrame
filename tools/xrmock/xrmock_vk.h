@@ -36,8 +36,9 @@ int mockvk_probe_collect(int* tag, int* w, int* h, float* out, int sub);
 // MOCK_XR_FLICK: the whole of a released image (layer `layer`) reduced by 2^shift on the GPU (box filter) and copied into
 // a host buffer, with a tag; -1 when no slot is free or the format is not 8-bit colour.
 int mockvk_flick_submit(void* images, int index, uint32_t layer, int shift, int tag);
-// A finished one: its luma bytes into out (w x h); 1 when one was collected.
-int mockvk_flick_collect(int* tag, int* w, int* h, uint8_t* out);
+// A finished one: its luma bytes into out (w x h), over a background of luma bg by its alpha when bg >= 0; 1 when one
+// was collected.
+int mockvk_flick_collect(int* tag, int* w, int* h, uint8_t* out, int bg);
 // MOCK_XR_COMPOSITOR: a compositor's GPU job on its own device, `lead_ms` before each vsync (t0 + n * period);
 // returns the global priority it got (0: none), -1 on failure. Stop writes a summary line into out.
 int mockvk_compositor_start(int64_t t0, int64_t period, double lead_ms, double from_s, int eye_w, int eye_h, const char* logpath);

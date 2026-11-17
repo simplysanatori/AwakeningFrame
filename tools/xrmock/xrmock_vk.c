@@ -769,8 +769,9 @@ int mockvk_flick_submit(void* images, int index, uint32_t layer, int shift, int 
 }
 
 // A finished reduced copy: its tag, size and luma bytes (Rec. 601 weights on the stored bytes) into out (w x h, which
-// must hold the source's size >> 1). 1 when one was collected.
-int mockvk_flick_collect(int* tag, int* w, int* h, uint8_t* out) {
+// must hold the source's size >> 1); bg >= 0: over a background of that luma by the image's alpha, as a compositor
+// blending a premultiplied layer over the room would show it. 1 when one was collected.
+int mockvk_flick_collect(int* tag, int* w, int* h, uint8_t* out, int bg) {
     for (int k = 0; k < FLICKS; k++) {
         Flick* p = &gFlick[k];
         if (!p->busy || DEV(vkGetFenceStatus)(gDevice, p->fence) != VK_SUCCESS) continue;
@@ -778,7 +779,8 @@ int mockvk_flick_collect(int* tag, int* w, int* h, uint8_t* out) {
         const uint8_t* s = (const uint8_t*)p->map;
         for (size_t i = 0, n = (size_t)p->w * (size_t)p->h; i < n; i++, s += 4) {
             float rr = bgr ? s[2] : s[0], gg = s[1], bb = bgr ? s[0] : s[2];
-            out[i] = (uint8_t)(0.299f * rr + 0.587f * gg + 0.114f * bb + 0.5f);
+            float l = 0.299f * rr + 0.587f * gg + 0.114f * bb + (bg >= 0 ? (1.0f - s[3] / 255.0f) * (float)bg : 0.0f);
+            out[i] = (uint8_t)(l > 254.5f ? 255.0f : l + 0.5f);
         }
         *tag = p->tag, *w = p->w, *h = p->h;
         p->busy = 0;
