@@ -1,9 +1,9 @@
 #!/bin/bash
 # Fetches the Khronos OpenXR SDK (Apache-2.0 / MIT, pinned and checksummed), and builds
-# the loader for this machine (native Linux aarch64, no sudo).  Installs
+# the loader for this machine (native Linux, aarch64 or x86-64, no sudo).  Installs
 #   $PREFIX/include/openxr/*.h     (the headers lasrecomp and the mock are compiled against)
 #   $PREFIX/lib/libopenxr_loader.so
-# PREFIX defaults to build/linux/aarch64/deps of the checkout (the game's DEPS dir); set
+# PREFIX defaults to build/linux/<uname -m>/deps of the checkout (the game's DEPS dir); set
 # OPENXR_PREFIX to put it elsewhere.  The source tarball is kept in ~/.cache/af-openxr.
 # Builds with nice and -j2.  Refuses to build while ~/.cache/headset-in-use exists.
 #   tools/fetch_openxr.sh
@@ -13,7 +13,7 @@ SHA256=5b8dac0608f49498fe8e95f562fe6bcf0bc781e561f137348a8c251d06a88b6f
 URL=https://github.com/KhronosGroup/OpenXR-SDK/archive/refs/tags/release-$VERSION.tar.gz
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-PREFIX=${OPENXR_PREFIX:-$REPO/build/linux/aarch64/deps}
+PREFIX=${OPENXR_PREFIX:-$REPO/build/linux/$(uname -m | sed s/arm64/aarch64/)/deps}
 CACHE=${AF_OPENXR_CACHE:-$HOME/.cache/af-openxr}
 
 if [ -f "$PREFIX/include/openxr/openxr.h" ] && [ -f "$PREFIX/lib/libopenxr_loader.so" ] \

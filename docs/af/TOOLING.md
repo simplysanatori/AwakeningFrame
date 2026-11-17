@@ -6,7 +6,7 @@ makes sense on the headset with a real session running. Builds refuse to run whi
 
 | Tool | Use |
 |---|---|
-| `tools/fetch_openxr.sh` | Downloads the OpenXR SDK 1.1.63 (pinned URL and SHA-256), builds the loader and installs headers and `libopenxr_loader.so` into `build/linux/aarch64/deps` (`OPENXR_PREFIX` to change). Idempotent. |
+| `tools/fetch_openxr.sh` | Downloads the OpenXR SDK 1.1.63 (pinned URL and SHA-256), builds the loader and installs headers and `libopenxr_loader.so` into `build/linux/<uname -m>/deps` (`build/linux/aarch64/deps` on the Frame; `OPENXR_PREFIX` to change). Idempotent. |
 | `tools/xrmock/build.sh [out]` | Builds `libxrmock.so`, `runtime.json` and `test_client` into `build/xrmock` and prints the path of `runtime.json`. |
 | `tools/xrmock/test_client` | Minimal OpenXR + Vulkan 1.3 client: a colour per eye, a quad, optional depth (`--depth`), mutable-format eyes (`--mutable`), Vulkan 1.2 instance (`--vk12`), a deliberate validation error (`--bad-layout`). |
 | `tools/xrmock/trace-compare.sh A B` | Diffs the call traces of two runs (setup lines, then the steady-state frames). |
@@ -22,7 +22,7 @@ export XR_RUNTIME_JSON=$PWD/build/xrmock/runtime.json     # the OpenXR loader th
 ```
 
 `XR_RUNTIME_JSON` is the only variable that selects it; the app links the real `libopenxr_loader.so`
-(from `build/linux/aarch64/deps/lib`, or any 1.x loader). Unset it to use SteamVR again. The mock
+(from `build/linux/<uname -m>/deps/lib`, or any 1.x loader). Unset it to use SteamVR again. The mock
 makes the Vulkan instance and device through `xrCreateVulkanInstanceKHR` / `xrCreateVulkanDeviceKHR`
 with the app's own loader, so Turnip (and validation layers) are what the app really runs on. The
 mock uses the app's queue (from the session binding) for its setup and PNG copies, as a runtime may,
