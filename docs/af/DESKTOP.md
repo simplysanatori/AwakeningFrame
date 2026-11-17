@@ -68,4 +68,24 @@ No switch forces these; they stay Frame-only checks:
   the `astc_bw` block, `astc.c`). Memory use and texture upload cost differ.
 - The shader compiler (ir3), tiled rendering (bins, GMEM, LRZ, UBWC), 16-bit float and subgroup-128 behaviour, the
   memory type the heap lands in (`heap_note_type`, `heap_noncoherent`), and every timing. Compile checks of the Frame's
-  compiler run under qemu ([BUILD-frame](BUILD-frame.md)); everything else needs the headset.
+  compiler run under qemu (below); everything else needs the headset.
+
+## The Arm64 program from the desktop
+
+`steam-frame/cross-build.sh` builds `build/aarch64/lasrecomp` (VR mode in, no game code) and SDL3 and FFmpeg for the Frame
+with clang's `--target` against an aarch64 glibc 2.39 root filesystem (`SYSROOT`), packs them as `build/aarch64/portable/`
+(what `steam-frame/build.sh` takes as `AF_PORTABLE_DIR`) and runs `steam-frame/tools/check-bundle.sh` on it and a start under
+qemu. It takes the build lock `AF_CROSS_LOCK`, nice 19 and at most 8 jobs. `steam-frame/build.sh` itself needs an arm64 machine
+(its game code generator is frozen by PyInstaller for the machine it runs on).
+
+Under qemu (`qemu-aarch64-static -L <Frame root filesystem>` with the Turnip driver and Mesa's no-op msm shim) the program
+starts in VR mode against an Arm64 build of the mock runtime and logs the Frame's own choices (`structured shaders on
+(default for this GPU)`, `lean usage on`, 8 px foveation texels, ...). The shim draws nothing, qemu has no userfaultfd and
+no placed memory mapping, so the guest heap falls back to copies there: the heap paths are not what the Frame runs.
+
+## The Frame's shader compiler from the desktop
+
+`tools/ir3_check.sh [count] [seed]` builds `tools/test_vk_pipelines.c` for Arm64 and runs it under qemu against the
+Frame's Turnip: fuzzed Maxwell programs are translated with the Frame's shader switches, compiled by shaderc and made into
+real pipelines by ir3. No game files are needed. The program's own shader preparation (`shader_prep.c`) finds each shader by
+its hash in the player's game files, so it needs them.

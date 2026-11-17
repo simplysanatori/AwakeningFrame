@@ -9,6 +9,7 @@
 #include "test_translate.c"
 #undef main
 
+#include <stdarg.h>
 #include <vulkan/vulkan.h>
 
 #include "../runtime/nvn/vulkan/shaders.h"
@@ -16,6 +17,9 @@
 // ---- what shaders.c needs from the rest of the runtime
 VkG g_vk;
 void rt_fatal_trace(void) { abort(); }
+void rt_fatal_msg(const char *fmt, ...) { va_list ap; va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap); }
+void vk_device_fault_report(void) {}
+const char smaa_hlsl_src[] = "";  // (the built-in SMAA shaders are not under test)
 ShaderInfo *old_maxwell_translate(const uint8_t *c, size_t m, int s, const ShaderKey *k) { (void)c, (void)m, (void)s, (void)k; return NULL; }
 void old_maxwell_free(ShaderInfo *s) { (void)s; }
 uint64_t old_maxwell_gmem_base, old_maxwell_gmem_size;
@@ -62,17 +66,23 @@ static void init_device(void) {
     vkGetPhysicalDeviceProperties(g_vk.phys, &g_vk.props);
     fprintf(stderr, "device: %s\n", g_vk.props.deviceName);
     // the feature set device.c enables
-    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    // (as device.c: what the driver has; a feature it lacks is left off and the shaders that need it fail to build)
+    VkPhysicalDeviceVulkan13Features h13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+    VkPhysicalDeviceVulkan12Features h12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &h13};
+    VkPhysicalDeviceVulkan11Features h11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &h12};
+    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &h11};
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
-    VkPhysicalDeviceVulkan13Features f13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .dynamicRendering = VK_TRUE,
-                                            .synchronization2 = VK_TRUE, .maintenance4 = VK_TRUE,
-                                            .shaderDemoteToHelperInvocation = VK_TRUE, .shaderTerminateInvocation = VK_TRUE};
+    VkPhysicalDeviceVulkan13Features f13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .dynamicRendering = h13.dynamicRendering,
+                                            .synchronization2 = h13.synchronization2, .maintenance4 = h13.maintenance4,
+                                            .shaderDemoteToHelperInvocation = h13.shaderDemoteToHelperInvocation,
+                                            .shaderTerminateInvocation = h13.shaderTerminateInvocation};
     VkPhysicalDeviceVulkan12Features f12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &f13,
-                                            .timelineSemaphore = VK_TRUE, .shaderInt8 = VK_TRUE, .samplerMirrorClampToEdge = VK_TRUE,
-                                            .uniformAndStorageBuffer8BitAccess = VK_TRUE, .storageBuffer8BitAccess = VK_TRUE,
-                                            .scalarBlockLayout = VK_TRUE};
+                                            .timelineSemaphore = h12.timelineSemaphore, .shaderInt8 = h12.shaderInt8,
+                                            .samplerMirrorClampToEdge = h12.samplerMirrorClampToEdge,
+                                            .uniformAndStorageBuffer8BitAccess = h12.uniformAndStorageBuffer8BitAccess,
+                                            .storageBuffer8BitAccess = h12.storageBuffer8BitAccess, .scalarBlockLayout = h12.scalarBlockLayout};
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &f12,
-                                            .storageBuffer16BitAccess = VK_TRUE};
+                                            .storageBuffer16BitAccess = h11.storageBuffer16BitAccess};
     VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &f11, .features = have.features};
     f.features.robustBufferAccess = VK_FALSE;
     float prio = 1;
@@ -97,8 +107,8 @@ static bool make_layout(Layout *l, const uint32_t *const *spv, const size_t *nw,
     for (int i = 0; i < l->n; i++) {  // the binding numbers the renderer fills (exec.c stage_set)
         VkBindingInfo *b = &l->b[i];
         bool ok = b->binding >= 32 ? b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
-                : b->binding == 17 ? b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
-                : b->binding <= 19 ? b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : false;
+                : b->binding == 17 || b->binding == GFAST_BUFFER_INDEX ? b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+                : b->binding <= GMAP_BUFFER_INDEX ? b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : false;  // (the guest memory tables)
         if (!ok || (int)b->set >= nsets) { fprintf(stderr, "unexpected binding set %u binding %u type %d\n", b->set, b->binding, b->type); return false; }
     }
     VkShaderStageFlags st[2] = {nsets == 1 ? VK_SHADER_STAGE_COMPUTE_BIT : VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT};
