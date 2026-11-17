@@ -11,6 +11,7 @@ makes sense on the headset with a real session running. Builds refuse to run whi
 | `tools/xrmock/test_client` | Minimal OpenXR + Vulkan 1.3 client: a colour per eye, a quad, optional depth (`--depth`), mutable-format eyes (`--mutable`), Vulkan 1.2 instance (`--vk12`), a deliberate validation error (`--bad-layout`). |
 | `tools/xrmock/trace-compare.sh A B` | Diffs the call traces of two runs (setup lines, then the steady-state frames). |
 | `tools/vvl/vvl.sh <cmd>` | Runs a command with the Khronos validation layer on. `tools/vvl/build-vvl.sh` builds it if it is missing (it is installed on this Frame already, 1.4.309). |
+| `tools/desk_tests.sh [--list] [--only text]` | Every unit test that needs no game files, headset or GPU (CI's Linux list, the pacer, dynres, settings, translator, camera override, display period filter), one pass/fail table. Three stale tests are marked as known failures. Logs in `build/desk_tests/`. |
 | `tools/session-report.py` | One table of frame pacing from the logs of one or more sessions. |
 | `tools/vrtiming.py SECONDS [out]` | SteamVR compositor timing, a line a second (headset only). |
 
