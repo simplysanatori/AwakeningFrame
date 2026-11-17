@@ -61,6 +61,7 @@ static int notices;  // save-failed warnings shown (fs.c tells the player once p
 void menu_save_failed(const char *folder) { notices++; }
 #ifdef __linux__
 void plat_os_write(uint64_t addr, uint64_t size) { (void)addr; (void)size; }  // (fs.c's file reads: no soft write tracking here)
+void plat_os_read(uint64_t addr, uint64_t size) { (void)addr; (void)size; }   // (fs.c's file writes: no lazy heap here)
 #endif
 #include "../runtime/game_addresses.h"
 static uint8_t live_save[0x6000];

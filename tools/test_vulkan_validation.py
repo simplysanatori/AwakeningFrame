@@ -30,6 +30,10 @@ static unsigned instance_calls, callback_calls;
 static bool requested_validation;
 #define LOG(...) fprintf(stderr,__VA_ARGS__)
 #define FATAL(...) do { fprintf(stderr,__VA_ARGS__); fflush(stderr); _Exit(19); } while (0)
+// (the VR mode makes its instance through the OpenXR runtime: not here, the window's path)
+static bool xr_mode(void) { return false; }
+static bool xr_in_runtime_call(void) { return false; }
+static VkResult xr_vk_create_instance(const VkInstanceCreateInfo *info, VkInstance *instance) { (void)info, (void)instance; return VK_ERROR_INITIALIZATION_FAILED; }
 static const char *const *SDL_Vulkan_GetInstanceExtensions(Uint32 *count) {
     static const char *extensions[]={"VK_KHR_surface"}; *count=1; return extensions;
 }

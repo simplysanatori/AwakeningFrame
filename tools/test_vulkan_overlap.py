@@ -181,6 +181,7 @@ static int pages_cpu_written(uint64_t addr, uint64_t size, uint32_t since, uint3
 static bool userptr;
 static bool overlap_on(void) { return true; }
 static bool gmir_on(void) { return false; }
+static void heap_lazy_touch(uint64_t addr, uint64_t size) { (void)addr, (void)size; }  // (the heap as lazy driver memory: not here)
 static uint64_t wrun_frames = 30;  // (exec.c's 30, a variable here: watch_tests)
 // (heap_note_type and heap_clean sit in the slice now: the import's memory type and the CPU cache maintenance - none
 // here, the heap's type is never noted, so heap_cc stays "not known" and heap_clean does nothing)

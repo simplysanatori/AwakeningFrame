@@ -41,6 +41,8 @@ bool renderer_prepare_begin(void) { return true; }
 bool renderer_prepare_multiview(void) { return false; }
 int renderer_prepare_pending(void) { return 0; }
 void renderer_prepare_end(void) {}
+void menu_boot_notice(int pct) { (void)pct; }  // (shader_prep_boot's label: no window here)
+void backend_boot_frame(void) {}
 
 // ---- the two translators (wrap.c)
 typedef struct {
