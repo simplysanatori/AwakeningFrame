@@ -57,8 +57,12 @@ typedef struct {
 } FovMap;
 
 // a shading-rate map (VRS mode): R8_UINT, 8 px texels, optimal tiling (Turnip has no linear shading-rate images), so
-// each change is copied in from transient memory at the start of the pending submission (vk_upload_cmd)
-#define VRS_TEXEL 8
+// each change is copied in from transient memory at the start of the pending submission (vk_upload_cmd).
+// LARECOMP_VR_FOVEATION_TEXEL=16 (a desktop test, off by default): 16 px texels, so a GPU whose attachments take no
+// other size (NVIDIA's) runs the foveation at all, with rings twice as coarse as the Frame's
+static int vrs_texel = 8;
+#define VRS_TEXEL vrs_texel
+int fov_vrs_texel(void) { return vrs_texel; }
 typedef struct {
     int eye;
     uint32_t w, h, mw, mh;
@@ -139,11 +143,13 @@ static bool setup_vrs(VkPhysicalDevice phys, bool have_ext, const char **ext, ui
     VkFormatProperties fp;
     vkGetPhysicalDeviceFormatProperties(phys, VK_FORMAT_R8_UINT, &fp);
     bool fmt = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR) != 0;
+    const char *te = getenv("LARECOMP_VR_FOVEATION_TEXEL");
+    if (te && atoi(te) == 16) vrs_texel = 16;
     bool texel = pp.minFragmentShadingRateAttachmentTexelSize.width <= VRS_TEXEL && pp.maxFragmentShadingRateAttachmentTexelSize.width >= VRS_TEXEL &&
                  pp.minFragmentShadingRateAttachmentTexelSize.height <= VRS_TEXEL && pp.maxFragmentShadingRateAttachmentTexelSize.height >= VRS_TEXEL;
     if (!have.attachmentFragmentShadingRate || !have.pipelineFragmentShadingRate || !fmt || !texel) {
-        LOG("[fov] foveation unavailable: shading-rate attachments %d, pipeline rates %d, R8_UINT %d, 8 px texels %d\n",
-            have.attachmentFragmentShadingRate, have.pipelineFragmentShadingRate, fmt, texel);
+        LOG("[fov] foveation unavailable: shading-rate attachments %d, pipeline rates %d, R8_UINT %d, %d px texels %d\n",
+            have.attachmentFragmentShadingRate, have.pipelineFragmentShadingRate, fmt, vrs_texel, texel);
         return false;
     }
     ext[(*n_ext)++] = VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME;
@@ -152,8 +158,9 @@ static bool setup_vrs(VkPhysicalDevice phys, bool have_ext, const char **ext, ui
                                                                   .pipelineFragmentShadingRate = VK_TRUE,
                                                                   .attachmentFragmentShadingRate = VK_TRUE, .pNext = f->pNext};
     f->pNext = &F.fsr_feat;
-    LOG("[fov] foveation %s, eye-tracked only: full rate until an eye gaze arrives (shading-rate attachments, 8 px texels, "
-        "fragments up to %ux%u)\n", k_names[F.level], pp.maxFragmentSize.width, pp.maxFragmentSize.height);
+    LOG("[fov] foveation %s, eye-tracked only: full rate until an eye gaze arrives (shading-rate attachments, %d px texels%s, "
+        "fragments up to %ux%u)\n", k_names[F.level], vrs_texel, vrs_texel != 8 ? " (LARECOMP_VR_FOVEATION_TEXEL)" : "",
+        pp.maxFragmentSize.width, pp.maxFragmentSize.height);
     return true;
 }
 
