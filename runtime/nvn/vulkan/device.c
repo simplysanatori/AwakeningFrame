@@ -2399,6 +2399,7 @@ void ui_window_init(void) {
         if (!xr_start(g_vk.queue, g_vk.qfam, (uint32_t)w, (uint32_t)h, &hud)) FATAL("[xr] the VR mode could not start (see above)\n");
         g_vk.sc_format = hud.format;
         g_vk.sc_extent = hud.extent;
+        g_vk.sc_phys = hud.extent, g_vk.sc_quarter = 0;  // (the images' own size: create_swapchain's, never called here)
         g_vk.sc_count = hud.count;
         memcpy(g_vk.sc_images, hud.images, sizeof g_vk.sc_images);
         memcpy(g_vk.sc_views, hud.views, sizeof g_vk.sc_views);
