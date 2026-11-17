@@ -1,6 +1,6 @@
 #!/bin/bash
-# Runs every test that needs no game files, no headset and no GPU on a Linux desktop (the CI list, CONTRIBUTING "Tests",
-# and the VR tests) and prints a pass/fail table.
+# Runs every test that needs no game files and no headset on a Linux desktop (the CI list, CONTRIBUTING "Tests",
+# and the VR tests; vk_pipelines uses the GPU) and prints a pass/fail table.
 #   tools/desk_tests.sh [--list] [--only <text>] [-j N]
 #   --list          print the tests and exit      --only <text>   only the tests whose name contains <text>
 #   -j N            run N tests at a time (default 4; the build output goes to build/desk_tests/<name>.log)
@@ -66,6 +66,7 @@ t cam_override       "clang"   "tools/test_cam_override.sh"
 t hz_filter          "clang"   "clang -std=gnu11 -O1 -Iruntime tools/test_hz_filter.c -o $OUT/hz_filter && $OUT/hz_filter"
 t translate_ops      "clang clang++" "tools/test_translate_ops.sh"
 t spirv_val          "glslc spirv-val" "tools/test_spirv_val.sh"
+t vk_pipelines      "clang"   "tools/test_vk_pipelines.sh 500 3"
 t translate_glsl     "clang"   "CC=\"clang -Wl,--allow-multiple-definition\" REF=HEAD tools/test_translate.sh 2000 4 glsl"
 t movie_extractor    "clang"   "mkdir -p $OUT/movie && clang -std=gnu11 -O1 tools/test_movie_extractor.c $FF -pthread -o $OUT/movie_extractor && $OUT/movie_extractor $OUT/movie"
 t condvar            "clang"   "clang -O2 -pthread tools/test_condvar.c -o $OUT/condvar && $OUT/condvar"
