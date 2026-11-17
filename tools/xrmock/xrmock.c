@@ -54,6 +54,9 @@
 //                            (the app released an image whose GPU work was unfinished).  Off unless set.
 //   MOCK_XR_AIM=<spec>       point a controller: "t0-t1:right|left:x,y,z;..." from t0 to t1 s after xrBeginSession that hand's
 //                            action spaces (aim, grip) turn so their -z points at STAGE point x,y,z (else straight ahead)
+//   MOCK_XR_GAZE=yaw,pitch[,ay,ap,hz[,jitter]]  the eye gaze (XR_EXT_eye_gaze_interaction's pose action space) relative to
+//                            the head, degrees: yaw / pitch, plus a Lissajous path of amplitudes ay / ap (hz in yaw, 0.7 hz in
+//                            pitch) and a fixation jitter of +-jitter degrees, new every 1/240 s (else the gaze is a hand pose)
 //   MOCK_XR_EXTENSIONS=a,b   replace the extension list offered
 //   MOCK_XR_NO_LOCAL_FLOOR=1 refuse LOCAL_FLOOR spaces
 //
@@ -316,10 +319,13 @@ static XrResult XRAPI_CALL mGetSystemProps(XrInstance i, XrSystemId s, XrSystemP
 }
 
 // ---- spaces ---------------------------------------------------------------
-typedef struct { int used, kind; Pose offset; int hand; } Space;  // kind: reference type, or -1 action
+typedef struct { int used, kind; Pose offset; int hand; } Space;  // kind: reference type, or -1 action (hand 2: the eye gaze)
 static Space gSpaces[256];
 static int gSpaceCount = 0;
 static Pose gLocalOrigin, gLocalFloorOrigin;
+static int gGazeOn = -1;  // MOCK_XR_GAZE (gazeRel)
+static float gGaze[6];
+static int actionIsGaze(XrAction a);
 typedef struct { double t0, t1; int hand; XrVector3f at; } AimKey;  // MOCK_XR_AIM
 static AimKey gAim[32];
 static int gAimCount = -1;
@@ -371,6 +377,12 @@ static XrResult XRAPI_CALL mCreateActionSpace(XrSession s, const XrActionSpaceCr
     int hand = 1;
     for (int k = 0; k < gPathCount; k++)
         if (gPaths[k] == ci->subactionPath && strstr(gPathStr[k], "left")) hand = 0;
+    if (gGazeOn < 0) {
+        const char* g = getenv("MOCK_XR_GAZE");
+        memset(gGaze, 0, sizeof gGaze);
+        gGazeOn = g && sscanf(g, "%f,%f,%f,%f,%f,%f", &gGaze[0], &gGaze[1], &gGaze[2], &gGaze[3], &gGaze[4], &gGaze[5]) >= 2;
+    }
+    if (gGazeOn && actionIsGaze(ci->action)) hand = 2;
     gSpaces[gSpaceCount] = (Space){1, -1, fromXr(ci->poseInActionSpace), hand};
     *out = (XrSpace)(uintptr_t)(100 + gSpaceCount++);
     return XR_SUCCESS;
@@ -386,6 +398,17 @@ static XrResult XRAPI_CALL mDestroySpace(XrSpace sp) {
     s->used = 0;
     return XR_SUCCESS;
 }
+// MOCK_XR_GAZE: the gaze's orientation relative to the head at t (NULL spec: none)
+static Q gazeRel(double t) {
+    float yaw = gGaze[0] + gGaze[2] * (float)sin(t * 2 * 3.14159265358979 * gGaze[4]);
+    float pitch = gGaze[1] + gGaze[3] * (float)sin(t * 2 * 3.14159265358979 * 0.7 + 1.0);
+    if (gGaze[5] > 0) {  // (fixation jitter: two hashed uniforms per 1/240 s step)
+        uint32_t k = (uint32_t)(t * 240.0) * 2654435761u;
+        k ^= k >> 15, k *= 2246822519u, k ^= k >> 13;
+        yaw += gGaze[5] * ((float)(k & 0xffff) / 32767.5f - 1.0f), pitch += gGaze[5] * ((float)(k >> 16) / 32767.5f - 1.0f);
+    }
+    return qeuler(yaw * D2R, pitch * D2R, 0);
+}
 // Pose of a space in STAGE at time t (seconds from the session start).
 static Pose spaceInStage(const Space* s, double t) {
     Pose base;
@@ -394,6 +417,11 @@ static Pose spaceInStage(const Space* s, double t) {
     case XR_REFERENCE_SPACE_TYPE_LOCAL: base = gLocalOrigin; break;
     case XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR: base = gLocalFloorOrigin; break;
     case -1: {
+        if (s->hand == 2) {  // (the eye gaze, MOCK_XR_GAZE: from the head)
+            Pose h = headPoseAt(t);
+            base = (Pose){qmul(h.q, gazeRel(t)), h.p};
+            break;
+        }
         XrVector3f at = {s->hand ? 0.25f : -0.25f, 1.15f, -0.35f};
         base = (Pose){aimAt(s->hand, at, t), at};
         break;
@@ -746,6 +774,7 @@ static XrResult XRAPI_CALL mBeginSession(XrSession s, const XrSessionBeginInfo* 
     if (bi->primaryViewConfigurationType != XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO) return XR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED;
     gT0 = nowNs();
     initOrigins();
+    if (gShift) fprintf(gShift, "begin monotonic_ns=%lld\n", (long long)gT0);  // (lines up the app's own CLOCK_MONOTONIC logs with t)
     if (getenv("MOCK_XR_COMPOSITOR")) {  // "lead_ms[,from_s]": the compositor model (xrmock_vk.c)
         double lead = 4.0, from = 0.0;
         sscanf(getenv("MOCK_XR_COMPOSITOR"), "%lf,%lf", &lead, &from);
@@ -1336,6 +1365,14 @@ static XrResult XRAPI_CALL mCreateAction(XrActionSet s, const XrActionCreateInfo
 static MAction* actionOf(XrAction h) {
     int k = (int)((uintptr_t)h - 200);
     return k >= 0 && k < gActionCount ? &gAct[k] : NULL;
+}
+static int actionIsGaze(XrAction h) {  // (bound to /user/eyes_ext/...: the eye gaze)
+    MAction* a = actionOf(h);
+    for (int k = 0; a && k < a->nbind; k++) {
+        const char* ps = pathStr(a->bind[k]);
+        if (ps && !strncmp(ps, "/user/eyes_ext/", 15)) return 1;
+    }
+    return 0;
 }
 static XrResult XRAPI_CALL mSuggest(XrInstance i, const XrInteractionProfileSuggestedBinding* b) {
     (void)i;

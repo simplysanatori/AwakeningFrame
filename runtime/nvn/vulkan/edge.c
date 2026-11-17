@@ -886,6 +886,17 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
             LOG("[edge] fade: centre (%.1f %.1f %.1f), clear to %.1f units, black past %.1f%s\n", fade_c[0], fade_c[1], fade_c[2], fade_r,
                 fade_r + fade_w, fitted ? " (fitted inside the floor the culling draws)" : ""), said_r = fade_r;
     }
+    {   // LARECOMP_VR_EDGE_LOG=1: one line per eye-0 pass with what the fade was drawn with (flicker hunts)
+        static int lg = -1;
+        if (lg < 0) lg = getenv("LARECOMP_VR_EDGE_LOG") && atoi(getenv("LARECOMP_VR_EDGE_LOG")) > 0;
+        float dq[4][2] = {{0}};  // (the fit's trapezoid; zeros when there was none: `drawn` is only filled for a fit)
+        if (fitted) memcpy(dq, drawn, sizeof dq);
+        if (lg && eye == 0 && mode == EDGE_FADE)
+            LOG("[edgelog] t=%.4f out %ux%u crop %.4f %.4f c %.2f %.2f r %.2f w %.2f fit %d cut %d dq %.1f,%.1f %.1f,%.1f %.1f,%.1f %.1f,%.1f vrs %d foci %.1f,%.1f %.1f,%.1f r0 %.3f r1 %.3f filled %.0fx%.0f\n",
+                plat_now_ns() / 1e9, w, h, in->color_crop[0], in->color_crop[1], fade_c[0], fade_c[2], fade_r, fade_w, fitted, cut,
+                dq[0][0], dq[0][1], dq[1][0], dq[1][1], dq[2][0], dq[2][1], dq[3][0], dq[3][1], (int)u.va[0],
+                u.vc[0], u.vc[1], u.vc[2], u.vc[3], u.va[2], u.va[3], u.vb[0], u.vb[1]);
+    }
     u.mi[0] = cfg.desat, u.mi[1] = cfg.bright, u.mi[2] = (float)cfg.debug, u.mi[3] = cfg.fixed_colours ? 1.0f : 0.0f;
 
     // the backdrop colours: eye 0 makes this frame's from the last (the other image); eye 1 reads them

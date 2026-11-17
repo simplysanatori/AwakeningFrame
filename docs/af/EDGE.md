@@ -174,6 +174,35 @@ XR_META_* offered: XR_META_performance_metrics, _recommended_layer_resolution, _
 `LARECOMP_VR_EDGE=passthrough` is untested on the headset: the runtime offers ALPHA_BLEND, but whether SteamVR shows the
 room behind alpha-0 pixels of a projection layer (and not just black) can only be seen in the headset.
 
+## Open: headset flicker
+
+The owner saw Table Edge = Fade flicker in the headset (session 20261106-193606), with Surroundings Off and also with
+Backdrop and Full; Black was fine. Not reproduced at the time of these notes (no xrmock run was made). What reading the
+code gives (unmeasured):
+
+- **Seen with Surroundings on too, so the fit is not the only cause.** With Surroundings on the fit is off (`reach > 0`)
+  and the cut band is unused. What every fade frame has in common, and Black does not, is the edge pass itself: the
+  foveated block smoothing and the dither. The dither is fixed to the pixel. The smoothing follows the live gaze: each
+  game frame the rings (`fov_shade`) move with the eye tracker, the texels whose rate changes switch between the
+  full-rate read and the block-centre interpolation, and at a silhouette against black that interpolation spreads a
+  4-8 px ramp of black into the geometry. As the gaze jitters, these ramps jump about along the fade band. In xrmock the
+  gaze was fixed (the gaze action space was a hand pose), so this never showed there. First suspect.
+- **Surroundings Off: the fit has two frame-to-frame jumps.** (1) When `vr_cull_fit` sees a corner of the table prism
+  behind the game camera it clears `g_drawn.have`; for that frame `edge_eye` skips `fade_fit` and draws the old fixed
+  circle (clear to 13, black past 25) in place of the fitted one (owner log: about 9 / 15), so the whole fade radius
+  jumps for one frame and back. Fast head turns make this more likely. (2) The cut band (`FADE_CUT_BAND`) is drawn
+  against the raw trapezoid of each frame, not a filtered one, and `cut` switches on and off by a threshold, so that band
+  pops in and out. Only the centre and radius are filtered (0.4 s).
+- Dynres (1536-1728) only changes the filled part. The rings, the block-centre images and the dither use the same
+  coordinates in the map and in the edge pass, so no mismatch was found there.
+
+Next steps: xrmock with `MOCK_XR_GAZE` (a moving, jittering gaze), the pose file
+`build/flick/sway25.pose` (yaw +-25 degrees at 1.5 Hz) and `LARECOMP_VR_EDGE_LOG=1` (one line per eye-0 fade pass:
+radius, width, fit, cut, trapezoid, foci, rings). Dump consecutive frames without stalling (`MOCK_XR_SHIFT_DUMP`). Then
+bisect `LARECOMP_VR_EDGE_SMOOTH=0`, `LARECOMP_VR_EDGE_FIT=0`, foveation off and dynres off. Likely fixes: smoothing
+against rings that hold still (quantised or hysteretic foci), keeping the last fit while `vr_cull_drawn` has nothing,
+and filtering the cut-band trapezoid or dropping the band.
+
 ## Known limits and open items
 
 - The edge fade is image-space: a room that floats in black (interiors) also thins at its silhouette.

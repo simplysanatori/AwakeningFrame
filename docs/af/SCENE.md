@@ -118,8 +118,8 @@ with the head 45 degrees down. GPU = the pacer's GPU per game frame; CPU = the g
 
 The owner's headset session (2026-11-06 19:36, Fade, dynamic resolution on with the 14.5 ms budget, eyes 1536 of 1728
 from the first seconds) showed what xrmock never did: Backdrop's fill came out as scattered fragments only, Backdrop,
-Low Quality and Full flickered, and the reach changed with head pose (buildings missing). Not reproduced yet: the first
-run in the owner's conditions did not start (see below). What the code shows so far, to check in that order:
+Low Quality and Full flickered, and the reach changed with head pose (buildings missing). Not reproduced at the time of these notes: the
+first run in the owner's conditions did not start. What the code shows so far, to check in that order:
 
 - **Captures flicker by design.** A capture turns the wide culling on for 8 eye outputs, and those outputs are shown:
   the outer objects pop into the live picture and vanish again. Turns of 25 degrees trigger one, at most every second,
@@ -147,7 +147,5 @@ run in the owner's conditions did not start (see below). What the code shows so 
 - **Off / Backdrop reach.** One game-camera frustum fitted to the table and widened by the eyes' views, so the reach
   depends on pose. `LARECOMP_VR_CULL_HOLD_ALL=1` holds the widening in every mode; its 60 FPS cost is not measured.
 
-Test harness (outside the repo): one xrmock session at Mabe with the owner's settings, a fast sway
-(+-25 degrees yaw at 1.5 Hz), consecutive eye dumps. Its first run hung: `tools/stream_run.sh` did not start the game
-(the bench check found a lasrecomp), and the runner's memory watcher waited for one forever. Fix: end the watcher
-when stream_run returns.
+The desktop reproduction (`tools/flicker_run.sh`, [TOOLING](TOOLING.md) "Flicker") runs these conditions under xrmock and
+measures the flicker.
