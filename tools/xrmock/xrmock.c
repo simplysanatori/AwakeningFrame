@@ -28,6 +28,9 @@
 //   MOCK_XR_EYE_SIZE=WxH     recommended per-eye size (1680x1760, the Frame's default at 120 Hz); max is 4096x4096
 //   MOCK_XR_IPD=<m>          eye separation (0.064)
 //   MOCK_XR_FOV=l,r,u,d      per-eye fov in degrees (-48,48,48,-48)
+//   MOCK_XR_FOV_RIGHT=l,r,u,d the right eye's own fov (default: MOCK_XR_FOV; "mirror": MOCK_XR_FOV mirrored, -r,-l,u,d,
+//                            as a headset whose eyes see further outward than inward)
+//   MOCK_XR_CANT=<deg>       each eye's view turned outward by this (canted displays; 0)
 //   MOCK_XR_POSE=<spec>      head pose in STAGE: sway (default: yaw +-17 deg at 0.5 Hz, 1.6 m up) |
 //                            static[:x,y,z,yaw[,pitch[,roll]]] (metres, degrees) | file:<path>
 //                            (lines "t x y z yaw pitch roll", t in seconds from xrBeginSession, linear, held at the ends)
@@ -204,7 +207,8 @@ static void loadPose(const char* spec) {
 // ---- configuration --------------------------------------------------------
 static int gEyeW = 1680, gEyeH = 1760;
 static float gIpd = 0.064f;
-static XrFovf gFov = {-0.8377f, 0.8377f, 0.8377f, -0.8377f};
+static XrFovf gFov = {-0.8377f, 0.8377f, 0.8377f, -0.8377f}, gFovR = {-0.8377f, 0.8377f, 0.8377f, -0.8377f};
+static float gCant = 0;  // radians, outward
 static int gPipeline = 2;
 static double gDeadlineMs = -1;
 static int gMaxFrames = 0;
@@ -481,9 +485,10 @@ static XrResult XRAPI_CALL mLocateViews(XrSession s, const XrViewLocateInfo* li,
     Pose head = headPoseAt(t);
     Pose inBase = pinv(spaceInStage(base, t));
     for (int e = 0; e < 2; e++) {
-        Pose eye = pcompose(head, (Pose){{0, 0, 0, 1}, {e ? gIpd * 0.5f : -gIpd * 0.5f, 0, 0}});
+        float ca = e ? -gCant : gCant;  // (yaw about +y: positive turns left, outward for the left eye)
+        Pose eye = pcompose(head, (Pose){{0, sinf(ca * 0.5f), 0, cosf(ca * 0.5f)}, {e ? gIpd * 0.5f : -gIpd * 0.5f, 0, 0}});
         v[e].pose = toXr(pcompose(inBase, eye));
-        v[e].fov = gFov;
+        v[e].fov = e ? gFovR : gFov;
         gLocates[gLocateNext].pose[e] = v[e].pose;
     }
     gLocates[gLocateNext].time = li->displayTime;
@@ -1523,8 +1528,14 @@ static void init(void) {
     if ((v = getenv("MOCK_XR_IPD"))) gIpd = (float)atof(v);
     if ((v = getenv("MOCK_XR_FOV"))) {
         float l, r, u, d;
-        if (sscanf(v, "%f,%f,%f,%f", &l, &r, &u, &d) == 4) gFov = (XrFovf){l * D2R, r * D2R, u * D2R, d * D2R};
+        if (sscanf(v, "%f,%f,%f,%f", &l, &r, &u, &d) == 4) gFov = gFovR = (XrFovf){l * D2R, r * D2R, u * D2R, d * D2R};
     }
+    if ((v = getenv("MOCK_XR_FOV_RIGHT"))) {
+        float l, r, u, d;
+        if (!strcmp(v, "mirror")) gFovR = (XrFovf){-gFov.angleRight, -gFov.angleLeft, gFov.angleUp, gFov.angleDown};
+        else if (sscanf(v, "%f,%f,%f,%f", &l, &r, &u, &d) == 4) gFovR = (XrFovf){l * D2R, r * D2R, u * D2R, d * D2R};
+    }
+    if ((v = getenv("MOCK_XR_CANT"))) gCant = (float)atof(v) * D2R;
     if ((v = getenv("MOCK_XR_SHOT"))) snprintf(gShotSpec, sizeof(gShotSpec), "%s", v);
     if ((v = getenv("MOCK_XR_SHOT_DIR"))) gShotDir = v;
     if ((v = getenv("MOCK_XR_VK_MAX"))) {

@@ -1,5 +1,6 @@
 // XR_KHR_vulkan_enable2 (the instance and device made by the runtime from LAS's own create infos) and the swapchains
 // (from GalaxyFrame's xr_gfx_vk.cpp attach / createChain).
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -267,6 +268,16 @@ static bool locate_views(XrTime t, XrView views[2], XrSpace *space_out) {
     pthread_mutex_unlock(&g_xr.mu);
     const XrViewStateFlags need = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT;
     if (XR_FAILED(r) || n != 2 || (vs.viewStateFlags & need) != need) return false;
+    static bool fov_logged;  // (once: each eye's fov and how far the eyes' views turn apart, canted displays)
+    if (!fov_logged) {
+        fov_logged = true;
+        const XrQuaternionf *a = &views[0].pose.orientation, *b = &views[1].pose.orientation;
+        float d = fabsf(a->x * b->x + a->y * b->y + a->z * b->z + a->w * b->w);
+        LOG("[xr] eye fov (degrees left right up down): left %.1f %.1f %.1f %.1f, right %.1f %.1f %.1f %.1f; views %.1f degrees apart\n",
+            views[0].fov.angleLeft * 57.29578f, views[0].fov.angleRight * 57.29578f, views[0].fov.angleUp * 57.29578f,
+            views[0].fov.angleDown * 57.29578f, views[1].fov.angleLeft * 57.29578f, views[1].fov.angleRight * 57.29578f,
+            views[1].fov.angleUp * 57.29578f, views[1].fov.angleDown * 57.29578f, 2.0f * acosf(fminf(d, 1.0f)) * 57.29578f);
+    }
     *space_out = space;
     return true;
 }
