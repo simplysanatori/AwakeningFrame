@@ -2,8 +2,10 @@
 //
 // Drawing the rooms past the table every frame costs the game thread about as much as the GPU (the game emits every
 // object its frustum lets through), which is what holds 60 FPS back. Backdrop draws them only now and then: on a capture
-// it asks vr_cull for the wide culling (as Full) for a few frames, then copies eye 0's finished output and its scene depth
-// with that frame's camera. Every frame after, both eyes get that picture back as a mesh: one vertex per grid point of
+// it asks vr_cull for the wide culling (as Full) for a few frames. The executor keeps the draws that adds out of the eyes
+// (exec.c ring_phase) but for one frame, the capture frame: eye 0's finished output and its scene depth are copied
+// with that frame's camera, and what lies past the table is then taken out of both eyes' outputs again (the mask
+// below), so the capture frame shows what the frames around it show. Every frame after, both eyes get that picture back as a mesh: one vertex per grid point of
 // the capture, moved to where its depth puts it in the world and drawn with the eye's current camera, so the head can
 // move and the table can follow Link. It only fills pixels the scene left empty (scene depth still cleared): whatever
 // the game draws live always wins. Cells whose corners lie at very different depths are left out (no rubber sheets
@@ -31,7 +33,8 @@ static struct {
     float turn;        // LARECOMP_VR_BACKDROP_TURN: the head turned this far (degrees) from the captured view
     float refresh;     // LARECOMP_VR_BACKDROP_REFRESH: seconds before a capture is taken again anyway (0: never)
     float gap;         // LARECOMP_VR_BACKDROP_GAP: seconds between captures at least
-    int delay;         // LARECOMP_VR_BACKDROP_DELAY: new eye outputs between asking for the wide culling and the capture
+    int delay;         // LARECOMP_VR_BACKDROP_DELAY: new eye outputs between asking for the wide culling and the capture frame, at most
+    int tail;          // LARECOMP_VR_BACKDROP_TAIL: new eye outputs after it, at most, for the wide culling's draws to leave the game's lists
     float settle;      // LARECOMP_VR_BACKDROP_SETTLE: seconds after a level change, a warp or a blink before a capture
     float jump;        // a cell whose corners' distances from the capture's eye differ more than this share is left out
     bool log;
@@ -50,6 +53,7 @@ static void cfg_init(void) {
     cfg.refresh = envf("LARECOMP_VR_BACKDROP_REFRESH", 0.0f);
     cfg.gap = envf("LARECOMP_VR_BACKDROP_GAP", 1.0f);
     cfg.delay = (int)envf("LARECOMP_VR_BACKDROP_DELAY", 8);
+    cfg.tail = (int)envf("LARECOMP_VR_BACKDROP_TAIL", 60);
     cfg.settle = envf("LARECOMP_VR_BACKDROP_SETTLE", 2.5f);
     cfg.jump = envf("LARECOMP_VR_BACKDROP_JUMP", 0.08f);
     cfg.log = getenv("LARECOMP_VR_BACKDROP_LOG") != NULL;
@@ -127,6 +131,9 @@ static const char *fs_src =
     "  vec4 sz;   // the eye's filled size w h (pixels), seed w h\n"                                                   \
     "  vec4 cr;   // the colour's filled part x y, levels, the fade's level\n"                                         \
     "  vec4 fl;   // backdrop drawn this eye (its depth is binding 3), -, the scene depth's filled part x y\n"         \
+    "  layout(row_major) mat4 cinv;  // (the capture frame's mask) this eye: clip (game convention) -> world\n"        \
+    "  vec4 keep;  // the world box kept: lo x, lo z, hi x, hi z\n"                                                    \
+    "  vec4 zr;    // the depth's range: zn, zf - zn, depth in -1..1, the row order (as the backdrop's ce.w)\n"        \
     "} u;\n"                                                                                                           \
     "layout(set = 0, binding = 1) uniform sampler2D sd;\n"  /* the scene depth (nearest) */                             \
     "layout(set = 0, binding = 2) uniform sampler2D ec;\n"  /* the eye output (nearest), or the seed's mips */          \
@@ -174,6 +181,34 @@ static const char *bleed_fs =
     "  o = vec4(c * f * f, 1.0);\n"
     "}\n";
 
+// The capture frame's mask. That frame's eye outputs hold the draws the wide culling added, which no other frame shows:
+// they lie past the table's footprint grown by the ring margin. mask = the eye's scene depth as the other frames have
+// it: 0 where something drawn lies inside that box, 1 elsewhere (the fill and the edge fill only ask "below 0.9999?").
+// erase = the drawn pixels the mask leaves out, black: the void they are in the other frames, for the fill and the
+// edge fill to cover as they do there. A draw the table fit has too loses the part of it past the box for this one
+// frame; the fill puts the same pixels back from the capture just taken wherever it has them.
+static const char *mask_fs =
+    "#version 450\n" EBLOCK
+    "void main() {\n"
+    "  vec2 q = gl_FragCoord.xy / u.sz.xy;\n"
+    "  float d = texture(sd, q * u.fl.zw).r;\n"
+    "  o = vec4(1.0);\n"
+    "  if (d >= 0.9999) return;\n"
+    "  float z = (d - u.zr.x) / u.zr.y;\n"
+    "  if (u.zr.z > 0.5) z = z * 2.0 - 1.0;\n"
+    "  vec4 w = u.cinv * vec4(q.x * 2.0 - 1.0, (q.y * 2.0 - 1.0) * u.zr.w, z, 1.0);\n"
+    "  vec2 p = w.xz / w.w;\n"
+    "  if (p.x >= u.keep.x && p.y >= u.keep.y && p.x <= u.keep.z && p.y <= u.keep.w) o = vec4(0.0);\n"
+    "}\n";
+
+static const char *erase_fs =
+    "#version 450\n" EBLOCK
+    "void main() {\n"
+    "  vec2 q = gl_FragCoord.xy / u.sz.xy;\n"
+    "  if (texture(sd, q * u.fl.zw).r >= 0.9999 || texture(bd, q).r < 0.5) discard;\n"  // (nothing drawn, or kept; bd: the mask)
+    "  o = vec4(0.0, 0.0, 0.0, 1.0);\n"
+    "}\n";
+
 // ------------------------------------------------------------------------------------------------ GPU objects
 typedef struct { VkImage img; VmaAllocation mem; VkImageView view; VkFormat fmt; uint32_t w, h; VkImageAspectFlags asp; } Img;
 static struct {
@@ -185,11 +220,12 @@ static struct {
     Img col, dep, zb;  // the capture's colour and depth; the fill pass's own depth
     // the edge fill
     int eok;
-    VkShaderModule fvs, seed_fs, bleed_fs;
+    VkShaderModule fvs, seed_fs, bleed_fs, mask_fs, erase_fs;
     VkDescriptorSetLayout esl;
     VkPipelineLayout epl;
-    VkPipeline seed_p;
-    struct { VkFormat fmt; VkPipeline p; } bleed_p[4];
+    VkPipeline seed_p, mask_p;
+    struct { VkFormat fmt; VkPipeline p; } bleed_p[4], erase_p[4];
+    Img mask;  // the capture frame's mask (R8, the scene depth's size)
     struct { VkImage img; VmaAllocation mem; VkImageView all, lv0; uint32_t w, h, levels; } seed;
 } g = {.ok = -1, .eok = -1};
 
@@ -202,8 +238,21 @@ static struct {
     int level;
 } cap;
 
-static int state;  // 0 idle, 1 waiting for the wide culling to reach the eyes (cap_wait outputs to go)
+// A capture, in new eye outputs: 1 the next frame is still culled to the table and notes its ring draws; 2 the wide
+// culling on its way to the eyes: until the draws it adds stop growing in number (about 3 outputs; cap_wait at most);
+// 3 the capture frame asked for (the next one drawn; cap_wait outputs before giving up); 4 the wide culling leaving the
+// game's lists: until the draws it added stop getting fewer (about 15 outputs: the game lets go of them over several
+// frames, and keeps a few for good; cap_wait at most); 0 none. phase is what the frames drawn next are to it (exec.c
+// ring_phase).
+enum { RP_NONE, RP_LEARN, RP_WIDE, RP_CAPTURE };
+#define RING_MARGIN 4.0f  // (vr_cull.c: the ring margin of the Surroundings modes; exec.c sorts the draws by it)
+static int state, phase;
 static int cap_wait;
+static int n_wide, n_first, n_last;  // (the log) outputs since the wide culling was asked; the first and the last with draws it added
+static uint32_t add_ref;             // the added draws' count to beat (state 2: the most so far; state 4: the fewest)
+static int add_steady;               // outputs since it was beaten
+int scene_ring_phase(void) { return phase; }
+static void capture_stop(void) { vr_scene_backdrop_wide(false), state = 0, phase = RP_NONE; }
 static double last_try;
 static unsigned n_caps;
 // Not while the world is changing: after a level change, a warp (the table's centre jumped) or the rig's blink, and at
@@ -233,7 +282,7 @@ static void settle_watch(double now) {
     if (!why) return;
     if (cfg.log && (now >= settle_until || why[0] != 'b')) LOG("[scene] backdrop: settling (%s)\n", why);
     settle_until = fmax(settle_until, now + (blink ? 0.5 : cfg.settle)), need = 2;
-    if (state == 1) vr_scene_backdrop_wide(false), state = 0;  // (a capture asked before it: not of this)
+    if (state) capture_stop();  // (a capture asked before it: not of this)
 }
 
 static bool img_make(Img *m, VkFormat fmt, uint32_t w, uint32_t h, VkImageUsageFlags usage, VkImageAspectFlags asp) {
@@ -398,8 +447,11 @@ static void capture(const StereoEyePost *e) {
 }
 
 typedef struct { float inv[16], cur[16], grid[4], cz[4], ce[4], sz[4], cdp[4]; } UBlock;
+// the image that says where the live scene has something (below 0.9999) and its filled part: the eye's scene depth
+// (view null), or on a capture frame the mask
+typedef struct { VkImageView view; float ax, ay; } Live;
 
-static bool fill(const StereoEyePost *e) {
+static bool fill(const StereoEyePost *e, const Live *live) {
     TexBackend *c = e->color, *d = e->depth;
     if (!img_make(&g.zb, VK_FORMAT_D16_UNORM, c->width, c->height, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                   VK_IMAGE_ASPECT_DEPTH_BIT)) return false;
@@ -409,6 +461,7 @@ static bool fill(const StereoEyePost *e) {
     VkImageView cv = vk_image_view(c, VK_IMAGE_VIEW_TYPE_2D, c->format, 0, 1, e->layer, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
     VkImageView dv = vk_image_view(d, VK_IMAGE_VIEW_TYPE_2D, d->format, 0, 1, e->depth_layer, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
     if (!cv || !dv) return false;
+    if (live->view) dv = live->view;
     uint32_t w = (uint32_t)lroundf(e->ax * (float)c->width), h = (uint32_t)lroundf(e->ay * (float)c->height);
     if (!w || !h) return false;
     UBlock u;
@@ -422,7 +475,7 @@ static bool fill(const StereoEyePost *e) {
     // the bottom of the view. Taken as the top, a capture drawn from the pose it was taken at still came out right (the
     // two mistakes cancel), and from any other pose mirrored: the fill slid against the table with every head movement
     u.ce[3] = renderer_origin_lower_left() ? 1.0f : -1.0f;
-    u.sz[0] = (float)w, u.sz[1] = (float)h, u.sz[2] = e->dax, u.sz[3] = e->day;
+    u.sz[0] = (float)w, u.sz[1] = (float)h, u.sz[2] = live->ax, u.sz[3] = live->ay;
     u.cdp[0] = cap.dax, u.cdp[1] = cap.day;
     VkSpan s = vk_transient_copy(&u, sizeof u, 256);
     VkDescriptorSet set = vk_alloc_set(g.sl);
@@ -501,7 +554,9 @@ static bool einit(void) {
     g.fvs = vk_compile_glsl(fvs_src, STAGE_VERTEX, "scene_edge.vert");
     g.seed_fs = vk_compile_glsl(seed_fs, STAGE_FRAGMENT, "scene_edge_seed.frag");
     g.bleed_fs = vk_compile_glsl(bleed_fs, STAGE_FRAGMENT, "scene_edge_bleed.frag");
-    if (!g.fvs || !g.seed_fs || !g.bleed_fs) { LOG("[scene] edge shaders failed to compile\n"); return false; }
+    g.mask_fs = vk_compile_glsl(mask_fs, STAGE_FRAGMENT, "scene_mask.frag");
+    g.erase_fs = vk_compile_glsl(erase_fs, STAGE_FRAGMENT, "scene_erase.frag");
+    if (!g.fvs || !g.seed_fs || !g.bleed_fs || !g.mask_fs || !g.erase_fs) { LOG("[scene] edge shaders failed to compile\n"); return false; }
     VkDescriptorSetLayoutBinding b[4] = {{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
                                          {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
                                          {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
@@ -511,7 +566,8 @@ static bool einit(void) {
     VkPipelineLayoutCreateInfo pci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &g.esl};
     if (vkCreatePipelineLayout(g_vk.dev, &pci, NULL, &g.epl) != VK_SUCCESS) return false;
     g.seed_p = efs_pipe(g.seed_fs, VK_FORMAT_R16G16B16A16_SFLOAT);
-    if (!g.seed_p) return false;
+    g.mask_p = efs_pipe(g.mask_fs, VK_FORMAT_R8_UNORM);
+    if (!g.seed_p || !g.mask_p) return false;
     g.eok = 1;
     return true;
 }
@@ -557,7 +613,7 @@ static VkSampler mip_sampler(void) {
     return s;
 }
 
-typedef struct { float sz[4], cr[4], fl[4]; } EBlock;
+typedef struct { float sz[4], cr[4], fl[4], cinv[16], keep[4], zr[4]; } EBlock;
 
 static VkDescriptorSet eset(const EBlock *eb, VkImageView sd, VkImageView ec, VkSampler ecs, VkImageView bd) {
     VkSpan s = vk_transient_copy(eb, sizeof *eb, 256);
@@ -596,7 +652,7 @@ static void epass(VkCommandBuffer cb, VkImageView target, uint32_t w, uint32_t h
     rec_CmdEndRendering(cb);
 }
 
-static void edge_fill(const StereoEyePost *e, bool backdrop_drawn) {
+static void edge_fill(const StereoEyePost *e, bool backdrop_drawn, const Live *live) {
     TexBackend *c = e->color, *d = e->depth;
     uint32_t sw = (c->width + 7) / 8, sh = (c->height + 7) / 8;
     if (!einit() || !seed_make(sw, sh) || !mip_sampler()) return;
@@ -612,9 +668,11 @@ static void edge_fill(const StereoEyePost *e, bool backdrop_drawn) {
     VkImageView cv = vk_image_view(c, VK_IMAGE_VIEW_TYPE_2D, c->format, 0, 1, e->layer, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
     VkImageView dv = vk_image_view(d, VK_IMAGE_VIEW_TYPE_2D, d->format, 0, 1, e->depth_layer, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
     if (!cv || !dv) return;
+    float dax = e->dax, day = e->day;
+    if (live && live->view) dv = live->view, dax = live->ax, day = live->ay;
     uint32_t w = (uint32_t)lroundf(e->ax * (float)c->width), h = (uint32_t)lroundf(e->ay * (float)c->height);
     if (!w || !h) return;
-    EBlock eb = {.sz = {(float)w, (float)h, (float)sw, (float)sh}, .cr = {e->ax, e->ay, 0, 0}, .fl = {backdrop_drawn ? 1.0f : 0.0f, 0, e->dax, e->day}};
+    EBlock eb = {.sz = {(float)w, (float)h, (float)sw, (float)sh}, .cr = {e->ax, e->ay, 0, 0}, .fl = {backdrop_drawn ? 1.0f : 0.0f, 0, dax, day}};
     // the fade's level: where a seed texel covers about the reach (share of the view's height, in seed texels)
     float reach = cfg.edge_reach * (float)sh;
     eb.cr[2] = (float)g.seed.levels, eb.cr[3] = fminf(log2f(fmaxf(reach, 1.0f)), (float)g.seed.levels - 1);
@@ -633,12 +691,47 @@ static void edge_fill(const StereoEyePost *e, bool backdrop_drawn) {
     vk_full_barrier(cb);
 }
 
+// (a capture frame) the mask and the erase (above the GPU objects). false: none made, the frame shows what it has
+static bool mask_live(const StereoEyePost *e) {
+    extern bool vr_cull_core_box(float lo[3], float hi[3]);
+    extern uint32_t nvn_depth_mode(void);
+    TexBackend *c = e->color, *d = e->depth;
+    float lo[3], hi[3], vp[16], m = RING_MARGIN;
+    EBlock eb = {.fl = {0, 0, e->dax, e->day}};
+    mul4(e->P, e->V, vp);
+    if (!einit() || !vr_cull_core_box(lo, hi) || !inv4(vp, eb.cinv)) return false;
+    if (!img_make(&g.mask, VK_FORMAT_R8_UNORM, d->width, d->height, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                  VK_IMAGE_ASPECT_COLOR_BIT)) return false;
+    VkPipeline ep = VK_NULL_HANDLE;
+    for (int i = 0; i < 4 && !ep; i++) {
+        if (g.erase_p[i].p && g.erase_p[i].fmt == c->format) ep = g.erase_p[i].p;
+        else if (!g.erase_p[i].p) g.erase_p[i].fmt = c->format, ep = g.erase_p[i].p = efs_pipe(g.erase_fs, c->format);
+    }
+    static const VkComponentMapping id = {0};
+    VkImageView cv = vk_image_view(c, VK_IMAGE_VIEW_TYPE_2D, c->format, 0, 1, e->layer, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
+    VkImageView dv = vk_image_view(d, VK_IMAGE_VIEW_TYPE_2D, d->format, 0, 1, e->depth_layer, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
+    uint32_t w = (uint32_t)lroundf(e->ax * (float)c->width), h = (uint32_t)lroundf(e->ay * (float)c->height);
+    if (!ep || !cv || !dv || !w || !h) return false;
+    eb.keep[0] = lo[0] - m, eb.keep[1] = lo[2] - m, eb.keep[2] = hi[0] + m, eb.keep[3] = hi[2] + m;
+    eb.zr[0] = e->zn, eb.zr[1] = e->zf - e->zn, eb.zr[2] = nvn_depth_mode() == 0 ? 1.0f : 0.0f, eb.zr[3] = renderer_origin_lower_left() ? 1.0f : -1.0f;
+    VkCommandBuffer cb = e->cb;
+    VkSampler nearest = vk_default_sampler(false);
+    vk_full_barrier(cb);
+    eb.sz[0] = (float)d->width, eb.sz[1] = (float)d->height;
+    epass(cb, g.mask.view, d->width, d->height, g.mask_p, eset(&eb, dv, dv, nearest, dv));
+    vk_full_barrier(cb);
+    eb.sz[0] = (float)w, eb.sz[1] = (float)h;
+    epass(cb, cv, w, h, ep, eset(&eb, dv, dv, nearest, g.mask.view));
+    vk_full_barrier(cb);
+    return true;
+}
+
 // (exec.c vk_stereo_eyes, before stereo_eye_post) each new eye output
 void scene_eye_post(const StereoEyePost *e) {
     if (!cfg.init) cfg_init();
     int mode = vr_scene_mode();
     if (mode != VR_SCENE_BACKDROP && (state || cap.valid || settle_until >= 0))
-        vr_scene_backdrop_wide(false), state = 0, cap.valid = false, settle_until = -1, have_last_anchor = false;
+        capture_stop(), cap.valid = false, settle_until = -1, have_last_anchor = false;
     if (mode == VR_SCENE_OFF || e->eye < 0 || e->eye > 1 || !e->depth || !e->color) return;
     if (cfg.log && e->eye == 0) {  // (each change of the eye's size: what a draw reads its two images with)
         static float was[4];
@@ -652,20 +745,40 @@ void scene_eye_post(const StereoEyePost *e) {
     extern int game_level_overworld(void);
     bool edge = cfg.edge && game_level_overworld() == 1;  // (indoors the dark around a room is the game's look)
     if (mode != VR_SCENE_BACKDROP || !e->have_matrices || !init()) {
-        if (edge) edge_fill(e, false);
+        if (edge) edge_fill(e, false, NULL);
         return;
     }
     if (e->eye == 0) {
         double now = plat_now_ns() / 1e9;
         settle_watch(now);
-        if (state == 1 && --cap_wait <= 0) {
-            capture(e);
-            vr_scene_backdrop_wide(false), state = 0;
-        } else if (state == 0 && want_capture(e, now)) {
-            vr_scene_backdrop_wide(true), state = 1, cap_wait = cfg.delay, last_try = now;
+        if (state >= 2) {
+            n_wide++;
+            if (e->added) n_last = n_wide, n_first = n_first ? n_first : n_wide;
+            bool beat = state == 4 ? e->added < add_ref : e->added > add_ref + add_ref / 8;
+            if (beat) add_ref = e->added, add_steady = 0;
+            else add_steady++;
+        }
+        if (state == 0 && want_capture(e, now)) {
+            state = 1, phase = RP_LEARN, last_try = now;
             if (cfg.log) LOG("[scene] backdrop: capture asked (%s)\n", need ? "settled" : cap.valid ? "moved, turned or due" : "none yet");
+        } else if (state == 1) {
+            vr_scene_backdrop_wide(true), state = 2, phase = RP_WIDE, cap_wait = cfg.delay, n_wide = n_first = n_last = 0, add_ref = 0, add_steady = 0;
+        } else if (state == 2 && (--cap_wait <= 0 || (add_ref && add_steady >= 2))) {
+            state = 3, phase = RP_CAPTURE, cap_wait = 4;
+        } else if (state == 3 && (e->capture || --cap_wait <= 0)) {
+            if (e->capture) capture(e);
+            if (cfg.log) LOG("[scene] backdrop: %s in output %d after the wide culling was asked; it added %u draws, from output %d on\n",
+                             e->capture ? "captured" : "no capture frame came", n_wide, e->added, n_first);
+            vr_scene_backdrop_wide(false), state = 4, phase = RP_WIDE, cap_wait = cfg.tail, n_first = n_wide, add_ref = e->added, add_steady = 0;
+        } else if (state == 4 && (--cap_wait <= 0 || add_steady >= 6 || n_wide - n_last >= 2)) {
+            if (cfg.log) LOG("[scene] backdrop: back to the table fit %d outputs after the capture, %u of the added draws kept by the game\n",
+                             n_wide - n_first, e->added);
+            capture_stop();
         }
     }
-    bool drawn = cap.valid && fill(e);  // (also while a capture is pending: until the wide culling reaches the eyes they have holes)
-    if (edge) edge_fill(e, drawn);
+    // (a capture frame, both eyes) what the wide culling added: out of the picture again, and of the depth the fills go by
+    Live live = {VK_NULL_HANDLE, e->dax, e->day};
+    if (e->capture && mask_live(e)) live = (Live){g.mask.view, 1.0f, 1.0f};
+    bool drawn = cap.valid && fill(e, &live);
+    if (edge) edge_fill(e, drawn, &live);
 }

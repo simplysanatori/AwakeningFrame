@@ -7412,6 +7412,8 @@ static NvnTexture *st_last_depth;    // the latest twinned depth target drawn in
 static float st_last_zr[2];
 static TexBackend *g_eye_depth[2];   // per eye output: that eye's scene depth (stereo_eye_post)
 static float g_eye_zr[2][2];
+static bool g_eye_capture[2];        // per eye output: of a Backdrop capture frame (ring_phase)
+static uint32_t g_eye_added[2];      // per eye output: the draws the wide culling added to its frame
 static void clone_target(NvnTexture *dst, bool *ok, const NvnTexture *win, uint32_t fmt, const char *label) {
     if (*ok && dst->width == win->width && dst->height == win->height && dst->format == fmt) return;
     if (*ok && dst->backend) backend_texture_destroyed(dst);
@@ -7422,6 +7424,7 @@ static void clone_target(NvnTexture *dst, bool *ok, const NvnTexture *win, uint3
     *ok = true;
     LOG("[stereo] %s %ux%u fmt %#x (the window image's size)\n", label, win->width, win->height, fmt);
 }
+static void stereo_composite_ring(int eye);  // (below the ring draws' state)
 static void stereo_composite(void) {
     NvnTexture *win = st.rt.color[0];
     clone_target(&g_eye_out, &g_eye_out_ok, win, win->format, "stereo eye output");
@@ -7460,6 +7463,7 @@ static void stereo_composite(void) {
         stereo_note_composite(e);  // (the poses this output was rendered with go with it into the layer)
         g_eye_depth[e] = st_last_depth ? vk_tex(st_last_depth, true) : NULL;
         memcpy(g_eye_zr[e], st_last_zr, sizeof st_last_zr);
+        stereo_composite_ring(e);
     }
     static uint64_t n[2];
     if (n[g_eye]++ % 600 == 0) LOG("[stereo] eye %d composite #%llu (frame %llu)\n", g_eye, (unsigned long long)n[g_eye], (unsigned long long)renderer_exec_frame());
@@ -7662,10 +7666,70 @@ static bool ring_world_box(CmdRec *r, bool indexed, float wlo[3], float whi[3]) 
     }
     return true;
 }
+// (Backdrop, scene.c) what the frame being drawn is to a capture (scene_ring_phase, taken once per frame). Between
+// captures Backdrop has no ring draws. Around one the game culls wide for some frames, and those must look like the
+// others: the draws the wide culling adds stay out of every pass but the capture frame's eye colour passes. They are
+// the ring draws the frame before the wide culling did not have (RP_LEARN notes that frame's by mesh and place); the
+// ring draws it had (the table fit's own, past the footprint) stay core, as they are between captures. The frame
+// before the wide culling and the frames after it are sorted here (ring_box_class): vr_cull's ring margin is on with
+// the wide culling only.
+enum { RP_NONE, RP_LEARN, RP_WIDE, RP_CAPTURE };
+#define RING_MARGIN 4.0f  // (vr_cull.c: the ring margin of the Surroundings modes)
+static int ring_ph;                 // the frame's phase
+static uint64_t ring_ph_frame = ~0ull;  // the frame ring_ph is of
+static uint32_t ring_gen, ring_added;  // the learned set's generation; this frame's draws the wide culling added
+static struct { uint64_t id; uint32_t gen; } ring_known[8192];
+static int ring_phase(uint64_t frame) {
+    extern int scene_ring_phase(void);
+    if (frame != ring_ph_frame) {
+        ring_ph_frame = frame, ring_ph = scene_ring_phase(), ring_added = 0;
+        if (ring_ph == RP_LEARN) ring_gen++;
+    }
+    return ring_ph;
+}
+static void stereo_composite_ring(int eye) {
+    bool now = ring_ph_frame == renderer_exec_frame();  // (a frame without a ring draw never asked for its phase)
+    g_eye_capture[eye] = now && ring_ph == RP_CAPTURE, g_eye_added[eye] = now ? ring_added : 0;
+}
+// a ring draw by its vertex count and the half-unit cell its box's middle is in. Looked up in that cell and the eight
+// around it, and noted again where it was found one cell on: a prop stands still, a character walks from cell to cell
+static bool ring_known_cell(uint64_t mesh, int32_t cx, int32_t cz, bool add) {
+    uint64_t id = (mesh ^ ((uint64_t)(uint32_t)cx * 0x9E3779B97F4A7C15ull) ^ ((uint64_t)(uint32_t)cz * 0xC2B2AE3D27D4EB4Full)) | 1;
+    uint32_t k = (uint32_t)(id ^ id >> 31);
+    for (int i = 0; i < 8; i++) {
+        uint32_t j = (k + (uint32_t)i) & 8191;
+        if (ring_known[j].gen == ring_gen && ring_known[j].id == id) return true;
+        if (ring_known[j].gen != ring_gen) {
+            if (add) ring_known[j].id = id, ring_known[j].gen = ring_gen;
+            return false;
+        }
+    }
+    return false;
+}
+static bool ring_known_draw(CmdRec *r, const float lo[3], const float hi[3], bool add) {
+    uint64_t mesh = (r->x[2] * 0xBF58476D1CE4E5B9ull) ^ (r->x[0] << 56);  // (its vertex count: some draws' buffers move every frame)
+    int32_t cx = (int32_t)floorf(lo[0] + hi[0]), cz = (int32_t)floorf(lo[2] + hi[2]);
+    if (add) return ring_known_cell(mesh, cx, cz, true);
+    if (ring_known_cell(mesh, cx, cz, false)) return true;
+    for (int dz = -1; dz <= 1; dz++)
+        for (int dx = -1; dx <= 1; dx++)
+            if ((dx || dz) && ring_known_cell(mesh, cx + dx, cz + dz, false)) return ring_known_cell(mesh, cx, cz, true), true;
+    return false;
+}
+// (Backdrop around a capture) a box against the frame's footprint grown by a margin: 1 past it, 0 not (or no footprint)
+static int ring_box_class(const float blo[3], const float bhi[3], uint64_t frame, float m) {
+    extern bool vr_cull_core_box(float lo[3], float hi[3]);
+    static float lo[3], hi[3];
+    static bool ok;
+    static uint64_t at = ~0ull;
+    if (frame != at) at = frame, ok = vr_cull_core_box(lo, hi);
+    return ok && !(bhi[0] >= lo[0] - m && blo[0] <= hi[0] + m && bhi[2] >= lo[2] - m && blo[2] <= hi[2] + m);
+}
 // 0 core, 1 ring, 2 ring that casts, 3 past the EXTENT box. The memo holds where the draw lies (its box against the
 // frame's footprint and box), which every pass finds alike
 static int ring_class(CmdRec *r, bool indexed, int kind) {
     extern int vr_ring_class(const float lo[3], const float hi[3], uint64_t frame);
+    extern bool vr_ring_on(void);
     uint64_t inst = indexed ? r->x[6] : r->x[4];
     if (inst > 1 || !st.ubuf[0][2].addr) return 0;  // (instanced: grass and the like stay core)
     if (kind == 2 && (st.color_state[0] & 1)) return 0;  // (blended: decals, effects)
@@ -7678,7 +7742,20 @@ static int ring_class(CmdRec *r, bool indexed, int kind) {
     if (rc[k].key == key && rc[k].frame == frame) c = rc[k].c;
     else {
         float lo[3], hi[3];
-        c = ring_world_box(r, indexed, lo, hi) ? vr_ring_class(lo, hi, frame) : 0;
+        int ph = ring_phase(frame);
+        bool box = ring_world_box(r, indexed, lo, hi);
+        // (the frame before the wide culling: half the margin, so that a draw the footprint moves away from in the
+        // frames that follow is known by then)
+        if (ph == RP_LEARN) {
+            if (box && ring_box_class(lo, hi, frame, RING_MARGIN * 0.5f)) ring_known_draw(r, lo, hi, true);
+            c = 0;
+        } else {
+            c = !box ? 0 : vr_ring_on() ? vr_ring_class(lo, hi, frame) : ring_box_class(lo, hi, frame, RING_MARGIN);
+            if (ph != RP_NONE && c >= 1) {
+                if (ring_known_draw(r, lo, hi, false)) c = 0;
+                else ring_added++;
+            }
+        }
         rc[k].key = key, rc[k].frame = frame, rc[k].c = (int8_t)c;
     }
     // only room geometry is left out past the box; characters, props and sprites still draw. Which it is, a colour pass
@@ -7727,7 +7804,7 @@ static bool ring_route(CmdRec *r, bool indexed) {  // true: skip this draw
     g_ring_leq = false;
     static int log = -1;  // (vr_ring_on is read per draw: the VR tab's Surroundings row switches it live)
     if (log < 0) log = getenv("LARECOMP_VR_RING_LOG") != NULL;
-    if (g_eye < 0 || !vr_ring_on()) return false;
+    if (g_eye < 0 || !(vr_ring_on() || ring_phase(renderer_exec_frame()) != RP_NONE)) return false;
     if (!log) return ring_route_(r, indexed, 0);
     uint64_t t0 = SDL_GetTicksNS();
     bool skip = ring_route_(r, indexed, 1);
@@ -7742,6 +7819,7 @@ static bool ring_route_(CmdRec *r, bool indexed, int log) {
     int kind = !tw ? 0 : !nc ? 1 : 2;  // shared / an eye's depth-only pass / an eye's colour pass
     int c = ring_class(r, indexed, kind);
     bool skip = (kind == 0 && !nc && (c == 1 || c == 3)) || (kind == 1 && c >= 1) || (kind == 2 && c == 3);  // (shared: depth-only ones, the casters)
+    if (kind == 2 && c >= 1 && ring_phase(renderer_exec_frame()) == RP_WIDE) skip = true;  // (Backdrop: only the capture frame draws them)
     static int lowres = -1;  // LARECOMP_VR_RING_LOWRES=0: ring draws stay out of the eyes' smaller colour passes too
     if (lowres < 0) lowres = !getenv("LARECOMP_VR_RING_LOWRES") || atoi(getenv("LARECOMP_VR_RING_LOWRES")) != 0;
     if (!lowres && kind == 2 && c >= 1 && wx_scene_w && st.rt.color[0] && st.rt.color[0]->width * 4 < wx_scene_w * 3) skip = true;
@@ -7816,7 +7894,8 @@ static bool ring_early(CmdRec *r, bool indexed) {
     extern bool vr_ring_on(void);
     static int log = -1;
     if (log < 0) log = getenv("LARECOMP_VR_RING_LOG") != NULL;
-    if (g_eye < 0 || g_interp_log || g_interp_replaying || !st.rt.depth || !vr_ring_on()) return false;
+    if (g_eye < 0 || g_interp_log || g_interp_replaying || !st.rt.depth) return false;
+    if (!(vr_ring_on() || ring_phase(renderer_exec_frame()) != RP_NONE)) return false;
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) return false;
     uint64_t t0 = log ? SDL_GetTicksNS() : 0;
     bool tw = vk_tex_twinned(st.rt.depth);
@@ -10342,6 +10421,7 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
                                 .ax = b->scalable && b->ax > 0 ? b->sx / b->ax : 1, .ay = b->scalable && b->ay > 0 ? b->sy / b->ay : 1,
                                 .dax = zb && zb->scalable && zb->ax > 0 ? zb->sx / zb->ax : 1,
                                 .day = zb && zb->scalable && zb->ay > 0 ? zb->sy / zb->ay : 1,
+                                .capture = g_eye_capture[eye], .added = g_eye_added[eye],
                                 .zn = g_eye_zr[eye][0], .zf = g_eye_zr[eye][1]};
             ep.have_matrices = stereo_eye_matrices(eye, ep.V, ep.P);
             if (!ep.have_matrices) for (int i = 0; i < 16; i++) ep.V[i] = ep.P[i] = i % 5 == 0;
