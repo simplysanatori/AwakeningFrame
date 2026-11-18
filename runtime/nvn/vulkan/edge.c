@@ -718,18 +718,20 @@ void stereo_eye_post(const StereoEyePost *e) {
         if (!said_vrs && fov_shade(&sh) && !n->vrs)
             LOG("[edge] foveated passes %ux%u, eye output %ux%u: their blocks are not smoothed\n", sh.w, sh.h, e->width, e->height), said_vrs = true;
     }
-    {   // (each change of the images' sizes, once: which depth the passes read, and the part of each that is filled)
-        static uint32_t said_cw[2], said_dw[2], said_dh[2];
-        static float said_ax[2];
+    {   // (once per eye and change of the depth read, not of the filled parts: dynamic resolution changes those often)
+        static const void *said_d[2];
+        static uint32_t said_dw[2];
+        static int nsaid;  // (at most 24 lines: a frame without the scene's own depth falls back to the copy and back)
         const TexBackend *d = e->depth_full && !g_depth_quarter ? e->depth_full : e->depth;
-        float dax = d == e->depth ? e->dax : e->fax, day = d == e->depth ? e->day : e->fay;
-        uint32_t dl = d == e->depth ? e->depth_layer : e->depth_full_layer;
         int i = e->eye;
-        if (d && (said_cw[i] != e->width || said_dw[i] != d->width || said_dh[i] != d->height || fabsf(said_ax[i] - e->ax) > 0.004f))
+        if (d && (said_d[i] != (const void *)d || said_dw[i] != d->width) && nsaid < 24) {
+            nsaid++;
+            bool full = d != e->depth;
             LOG("[edge] eye %d output %ux%u filled %.3f x %.3f; reads the %s scene depth %ux%u fmt %d layer %u filled %.3f x %.3f\n", i,
-                e->width, e->height, e->ax, e->ay, d == e->depth ? "quarter-size" : "full-size", d->width, d->height, (int)d->format, dl,
-                dax, day),
-                said_cw[i] = e->width, said_dw[i] = d->width, said_dh[i] = d->height, said_ax[i] = e->ax;
+                e->width, e->height, e->ax, e->ay, full ? "full-size" : "quarter-size", d->width, d->height, (int)d->format,
+                full ? e->depth_full_layer : e->depth_layer, full ? e->fax : e->dax, full ? e->fay : e->day);
+            said_d[i] = d, said_dw[i] = d->width;
+        }
     }
     static bool said;
     if (!said && edge_mode() != EDGE_BLACK && (!e->depth || !e->have_matrices)) LOG("[edge] eye %d: no %s noted: the edge pass waits for it\n", e->eye, e->depth ? "matrices" : "depth"), said = true;
