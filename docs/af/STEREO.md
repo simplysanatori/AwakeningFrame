@@ -284,14 +284,31 @@ carry that pose:
   at 120 Hz / 60 FPS, 3 at 90 Hz / 30 FPS, 4 in the 30 FPS hold at 120 Hz). For each later one it locates the views
   at that display time (`xr_reshow_views`, one `xrLocateViews` for both eyes) and draws each eye from the set's
   finished XR eye image into a swapchain of its own (`xr_reshow_target`: 2 pairs x 2 eyes, made at first use, 137 MB
-  at 1728 x 1728 for one re-shown refresh), in the set's own submission. Everything already in the XR image comes along
-  (the Table Edge, Surroundings, anti-aliasing, the upscale, the blink, Passthrough's alpha), and dynamic resolution
-  and foveation are behind it (the pass reads the finished image at the XR image's size). Multiview and v1 give the
-  same XR images, so the pass is the same.
+  at 1728 x 1728 for one re-shown refresh). The views are located there; the passes are recorded once the set's own
+  submission is made (`reproj_submit`, from `vk_frame_end`), each refresh's in a submission of its own after it, so
+  the set's images finish, and are released, without waiting for its redraws (in the set's own submission they
+  delayed its release by their GPU time, and on the Frame with every set held to its grid line moved the lead a
+  refresh out). Everything already in the XR image comes along (the Table Edge, Surroundings, anti-aliasing, the
+  upscale, the blink, Passthrough's alpha), and dynamic resolution and foveation are behind it (the pass reads the
+  finished image). Multiview and v1 give the same XR images, so the pass is the same.
 - The XR thread picks, at each refresh, the image drawn for the display time nearest its own (`end_frame`), among
-  those of the set shown; it never waits for or records GPU work. Drawing them when the refresh comes is not possible
-  on the one Turnip queue: the next game frame's work is ahead of it there.
-- One fullscreen pass per eye and re-shown refresh. `rot`: the image as a plane at infinity, one colour read per
+  those of the set shown whose submission has finished (`xr_release_completed` releases each refresh's images once
+  `vk_completed_seq` has passed it); it never waits for or records GPU work. A refresh whose own image is not finished
+  shows the newest finished one (an image drawn for an earlier refresh, or the set's own), counted in the `[xr]` line.
+  The set's own images are released once their submission is done and the driver has its redraws (`rec_submitted`:
+  every read of them is submitted before the release, as the runtime asks). SteamVR shows a released image at once,
+  finished or not, and the redraws still read the set's images (and move them to a sampled layout and back) while the
+  compositor may show them; on Turnip those layouts should be the same memory, so that is expected to be harmless, but it
+  is the headset's to show. `LARECOMP_XR_REPROJ_JOINT=1` releases a set only once its redraws are done too (the
+  timing of the redraws inside the set's own submission): the comparison, and the fallback.
+- Why not later, with a fresher pose: on the one Turnip queue a pass submitted when its refresh comes runs after the
+  next game frame's chunks already queued (on the Frame its main pass alone is about 4.5 ms an eye), so it could not
+  be bounded under a refresh; and by then the set's XR images belong to the compositor (released at its first
+  refresh) and the depth is the next frame's. Keeping copies of both for later would cost about a `rot` redraw's GPU
+  time a set and 96 MB. The poses are located for each refresh's own display time at the present, 1 to 4 refreshes
+  ahead; the prediction to that time is the runtime's.
+- One fullscreen pass per eye and re-shown refresh (`LARECOMP_XR_REPROJ_MV=1`: one multiview pass for both eyes, into
+  a two-layer swapchain, layer = eye; needs the device's multiview, else one an eye). `rot`: the image as a plane at infinity, one colour read per
   pixel. `pos`: the source pixel whose scene point lands on this pixel, by a fixed-point search over the scene's depth
   (the eye post hook's: full size where the frame had it, else the quarter-size copy), `LARECOMP_XR_REPROJ_ITER` depth
   reads (3), then one colour read: 4 reads a pixel. Pixels without depth (the void, glows, the Backdrop) are taken on
@@ -304,6 +321,10 @@ carry that pose:
   Link walks the world then moves at every refresh instead of every game frame; Link and other moving things step
   with it instead, at 60 Hz, as they are drawn (only in-between game frames would fix those).
 - The HUD is a layer of its own and is not touched.
+- `LARECOMP_XR_REPROJ_RECT=1`: the pass draws only as many pixels as the eye was rendered at (the eye output's filled
+  part under dynamic resolution; the whole image where the frame upscaled into it), into the top left of its image,
+  and the layer names that part (`subImage.imageRect`); the compositor scales it to the view. At 1536 of 1728 that is
+  79 % of the pixels; the set's own image stays full size.
 - A refresh whose change of pose moves no pixel by more than `LARECOMP_XR_REPROJ_SKIP` (0.25 px) gets no images: it
   shows the set's own with their poses, exactly as off (a still head costs nothing).
 - The prediction is on the grid in these modes (`predict_time`): a set's poses are located for the refresh it will
@@ -319,10 +340,12 @@ carry that pose:
   the last one stays up, a refresh or more old, as off shows the set's own; the XR thread does not wait for the
   game's GPU work, and the late set's own images are released only once its submission has finished.
 
-`LARECOMP_XR_REPROJ_LOG=1`: a `[reproj]` line every 5 s (sets, re-shown refreshes due, drawn, skipped, passes,
-reads a pixel, GPU time of a set's passes by timestamps). The `[xr] re-shown refreshes:` line (every 5 s in these
-modes) counts the refreshes with images drawn for them, those past the last drawn for (a late set), the sets whose
-first refresh was on their grid line, later or earlier, and the refreshes a finished set waited for its own.
+`LARECOMP_XR_REPROJ_LOG=1`: a `[reproj]` line every 5 s (sets, re-shown refreshes due, drawn, skipped, eye images
+and passes, the share of their pixels drawn, reads a pixel, submissions, GPU time of a refresh's passes and of a set's
+by timestamps). The `[xr] re-shown refreshes:` line (every 5 s in these modes) counts the refreshes with images drawn
+for them, those past the last drawn for (a late set), those that showed an older one because their own was not
+finished, the sets whose first refresh was on their grid line, later or earlier, the refreshes a finished set waited
+for its own, and how many refreshes before their own the drawn images were found finished (2 or more, 1, 0, after).
 
 Measured under xrmock (2026-11-18; the house, 1728 x 1728 eyes, the head 25 degrees down; `reproj-report.py`, 6 s
 of steady motion, 710-720 refreshes; the measure's own floor about 0.02 degrees). Steady 30 degrees a second turn at
@@ -356,6 +379,8 @@ default none are drawn.
 | `LARECOMP_XR_INFLIGHT=<n>` | cap the submissions on the GPU behind the newest (off; above) |
 | `LARECOMP_XR_REPROJ=off\|fresh\|rot\|pos\|follow` | the refreshes that show a set again: as rendered (default), a fresh pose on the same images (a test), or drawn again for their own pose (above; the VR tab's Reprojection row) |
 | `LARECOMP_XR_REPROJ_SKIP=<px>`, `_ITER=<n>`, `_LOG=1` | no images below that much motion (0.25 px); the depth search's reads (3, at most 8); the `[reproj]` line (above) |
+| `LARECOMP_XR_REPROJ_MV=1`, `_RECT=1` | the redraw: both eyes in one multiview pass; only the eye's rendered size drawn, the layer naming that part (both off; above) |
+| `LARECOMP_XR_REPROJ_JOINT=1` | a set released only once its redraws are done too (their timing in the set's own submission; above) |
 | `LARECOMP_GPU_OVERLAP=0\|1` | the CPU / GPU overlap (VR default on, flat off on Turnip; docs/af/PASSES.md) |
 | `LARECOMP_VR_FOVEATION=off\|low\|medium\|high` | eye-tracked foveation of the eye passes (above) |
 | `LARECOMP_VR_FOVEATION_CAP=2`, `LARECOMP_VR_FOVEATION_RINGS=<f>` | tests: no rate coarser than 2x2; the rings' radii times f (above) |
