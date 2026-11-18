@@ -126,6 +126,12 @@ extern "C" void vr_tab_draw(float scale) {
                    desc(VRO_UPSCALE, "How the picture is scaled up when Dynamic Resolution renders it smaller. AMD FSR 1 "
                                      "sharpens edges as it scales and costs GPU time, Bilinear is plain and soft.")))
         changed(VRO_UPSCALE);
+    grey(VRO_REPROJ);
+    if (opt_choice("Reprojection", &v.reproj, g_vr_rs_names, VRS_N_RS, VRS_RS_OFF,
+                   desc(VRO_REPROJ, "Redraws the picture for where your head is on the refreshes between game frames, so the "
+                                    "world stays still when you move your head. Full also follows your head's position, Full + "
+                                    "Follow also the table following Link. Costs GPU time.")))
+        changed(VRO_REPROJ);
 
     opt_section("Performance");
     grey(VRO_FOVEATION);

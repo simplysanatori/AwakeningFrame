@@ -22,6 +22,7 @@ const char *const g_vr_turn_names[VRS_N_TURN] = {"Smooth", "Snap"};
 const char *const g_vr_hand_names[VRS_N_HAND] = {"Right", "Left"};
 const char *const g_vr_aa_names[VRS_N_AA] = {"Off", "FXAA", "SMAA"};
 const char *const g_vr_up_names[VRS_N_UP] = {"Bilinear", "AMD FSR 1"};
+const char *const g_vr_rs_names[VRS_N_RS] = {"Off", "Rotation", "Full", "Full + Follow"};
 
 // larecomp.ini words; the environment variables take the same ones (LARECOMP_VR_EDGE=fade, ...). The edge's words are the
 // variable's: off is "black"; the variable's older "fog" and "gradient" stay usable from the environment but are not in the menu.
@@ -34,6 +35,7 @@ static const char *const k_fov[] = {"off", "low", "medium", "high"};
 static const char *const k_hand[] = {"right", "left"};
 static const char *const k_aa[] = {"off", "fxaa", "smaa"};
 static const char *const k_up[] = {"off", "fsr"};
+static const char *const k_rs[] = {"off", "rot", "pos", "follow"};
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The hooks. Each is the function that changes one option while the game runs (weak: an absent one, as in a flat
@@ -62,6 +64,7 @@ extern float xr_display_hz(void) WEAK;                    // the display's rate 
 // Provided here, in runtime/xr/vrui_hook.c (XR builds only): the HUD / menu panel's place, read by xr_loop.c every frame.
 extern void vrui_set_hud_quad(float dist_m, float width_m) WEAK;
 extern void vk_vr_eye_post_set(int aa, int up) WEAK;      // VRS_AA_*, VRS_UP_*: exec.c (read per eye)
+extern void xr_set_reproj_mode(int mode) WEAK;            // xr.h XR_REPROJ_* (VRS_RS_* + 1 past off): xr_loop.c (read per set)
 
 // ---------------------------------------------------------------------------------------------------------------------
 static int pick(const char *const *keys, int n, const char *v, int def) {
@@ -98,6 +101,7 @@ bool vr_settings_parse(const char *key, const char *val) {
     else if (!strcmp(key, "pointer_hand")) VR.pointer_hand = pick(k_hand, VRS_N_HAND, val, VRS_HAND_RIGHT);
     else if (!strcmp(key, "antialias")) VR.aa = pick(k_aa, VRS_N_AA, val, VRS_AA_OFF);
     else if (!strcmp(key, "upscaler")) VR.upscale = pick(k_up, VRS_N_UP, val, VRS_UP_PLAIN);
+    else if (!strcmp(key, "reprojection")) VR.reproj = pick(k_rs, VRS_N_RS, val, VRS_RS_OFF);
     else return false;
     return true;
 }
@@ -114,6 +118,7 @@ void vr_settings_save(FILE *f) {
     fprintf(f, "vr_panel_distance = %.2f\nvr_panel_width = %.2f\n", VR.hud_dist, VR.hud_width);
     fprintf(f, "vr_pointer_hand = %s\n", k_hand[VR.pointer_hand]);
     fprintf(f, "vr_antialias = %s\nvr_upscaler = %s\n", k_aa[VR.aa], k_up[VR.upscale]);
+    fprintf(f, "vr_reprojection = %s\n", k_rs[VR.reproj]);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -127,7 +132,7 @@ static const char *const k_env[VRO_COUNT] = {
     [VRO_RECENTRE] = "", [VRO_EDGE] = "LARECOMP_VR_EDGE", [VRO_SCENE] = "LARECOMP_VR_SCENE", [VRO_FOVEATION] = "LARECOMP_VR_FOVEATION",
     [VRO_DYNRES] = "LARECOMP_VR_DYNRES", [VRO_HUD_DIST] = "LARECOMP_XR_QUAD",
     [VRO_HUD_WIDTH] = "LARECOMP_XR_QUAD", [VRO_POINTER_HAND] = "LARECOMP_VR_POINTER_HAND", [VRO_AA] = "LARECOMP_VR_AA",
-    [VRO_UPSCALE] = "LARECOMP_VR_UPSCALE"};
+    [VRO_UPSCALE] = "LARECOMP_VR_UPSCALE", [VRO_REPROJ] = "LARECOMP_XR_REPROJ"};
 
 const char *vr_opt_env(VrOpt o) {
     // (the refresh rate is taken by the launch wrapper from AF_REFRESH_HZ before larecomp.ini)
@@ -169,6 +174,7 @@ void vr_settings_apply_env(void) {
     if (!g_given[VRO_SCENE] && VR.scene != VRS_SCENE_OFF) put("LARECOMP_VR_SCENE", k_scene[VR.scene]);
     if (!g_given[VRO_AA] && VR.aa != VRS_AA_OFF) put("LARECOMP_VR_AA", k_aa[VR.aa]);
     if (!g_given[VRO_UPSCALE] && VR.upscale != VRS_UP_PLAIN) put("LARECOMP_VR_UPSCALE", k_up[VR.upscale]);
+    if (!g_given[VRO_REPROJ] && VR.reproj != VRS_RS_OFF) put("LARECOMP_XR_REPROJ", k_rs[VR.reproj]);
     if (!g_given[VRO_FOVEATION]) put("LARECOMP_VR_FOVEATION", k_fov[VR.foveation]);
     if (!g_given[VRO_DYNRES]) put("LARECOMP_VR_DYNRES", VR.dynres ? "1" : "0");
     if (!g_given[VRO_HUD_DIST] && (VR.hud_dist != 2.0f || VR.hud_width != 2.2f)) {
@@ -215,6 +221,7 @@ bool vr_opt_live(VrOpt o) {
     case VRO_HUD_DIST: case VRO_HUD_WIDTH: return vrui_set_hud_quad != NULL;
     case VRO_POINTER_HAND: return true;  // (xr_input.c reads g_settings.vr.pointer_hand each refresh)
     case VRO_AA: case VRO_UPSCALE: return vk_vr_eye_post_set != NULL;
+    case VRO_REPROJ: return xr_set_reproj_mode != NULL;
     default: return false;
     }
 }
@@ -236,6 +243,7 @@ void vr_settings_changed(VrOpt o) {
     case VRO_DYNRES: if (diet_set_dynres) diet_set_dynres(VR.dynres); break;
     case VRO_HUD_DIST: case VRO_HUD_WIDTH: if (vrui_set_hud_quad) vrui_set_hud_quad(VR.hud_dist, VR.hud_width); break;
     case VRO_AA: case VRO_UPSCALE: if (vk_vr_eye_post_set) vk_vr_eye_post_set(VR.aa, VR.upscale); break;
+    case VRO_REPROJ: if (xr_set_reproj_mode) xr_set_reproj_mode(VR.reproj ? VR.reproj + 1 : 0); break;
     default: break;
     }
 }
@@ -268,7 +276,8 @@ void vr_settings_test_tick(uint64_t frame) {
         static const struct { const char *k; VrOpt o; } map[] = {
             {"edge_style", VRO_EDGE}, {"surroundings", VRO_SCENE}, {"foveation", VRO_FOVEATION}, {"dynamic_resolution", VRO_DYNRES}, {"follow", VRO_FOLLOW},
             {"layout", VRO_LAYOUT}, {"turn", VRO_TURN}, {"panel_distance", VRO_HUD_DIST}, {"panel_width", VRO_HUD_WIDTH},
-            {"refresh", VRO_REFRESH}, {"fps", VRO_REFRESH}, {"antialias", VRO_AA}, {"upscaler", VRO_UPSCALE}};
+            {"refresh", VRO_REFRESH}, {"fps", VRO_REFRESH}, {"antialias", VRO_AA}, {"upscaler", VRO_UPSCALE},
+            {"reprojection", VRO_REPROJ}};
         for (size_t i = 0; i < sizeof map / sizeof *map; i++)
             if (!strcmp(k, map[i].k)) o = map[i].o;
         snprintf(k2, sizeof k2, "vr_%s", k);
