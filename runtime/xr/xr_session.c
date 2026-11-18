@@ -1,6 +1,5 @@
 // The OpenXR instance, system, session, reference spaces and events (from GalaxyFrame's xr_app.cpp: initInstance,
 // initSession, handleEvents, setAppSpace / updateAppSpace, requestRefreshRate).
-#include <dlfcn.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,7 +23,28 @@ XR_FUNCS(XR_DEF)
 PFN_xrEnumerateDisplayRefreshRatesFB p_xrEnumerateDisplayRefreshRatesFB;
 PFN_xrGetDisplayRefreshRateFB p_xrGetDisplayRefreshRateFB;
 PFN_xrRequestDisplayRefreshRateFB p_xrRequestDisplayRefreshRateFB;
-PFN_xrConvertTimeToTimespecTimeKHR p_xrConvertTimeToTimespecTimeKHR;
+#ifdef _WIN32
+static PFN_xrConvertTimeToWin32PerformanceCounterKHR p_xrConvertTime;
+#else
+static PFN_xrConvertTimeToTimespecTimeKHR p_xrConvertTime;
+#endif
+
+bool xr_time_convertible(void) { return p_xrConvertTime != NULL; }
+bool xr_time_to_plat(XrTime t, int64_t *ns) {
+    if (!p_xrConvertTime) return false;
+#ifdef _WIN32
+    static LARGE_INTEGER f;
+    LARGE_INTEGER pc;
+    if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    if (XR_FAILED(p_xrConvertTime(g_xr.inst, t, &pc))) return false;
+    *ns = (int64_t)((unsigned __int128)pc.QuadPart * 1000000000u / (uint64_t)f.QuadPart);  // (plat_now_ns's formula)
+#else
+    struct timespec ts;
+    if (XR_FAILED(p_xrConvertTime(g_xr.inst, t, &ts))) return false;
+    *ns = (int64_t)ts.tv_sec * 1000000000ll + ts.tv_nsec;
+#endif
+    return true;
+}
 
 // LARECOMP_XR=1 (the Frame's launcher sets it; --vr, xr_args), read once. A PC VR package (LARECOMP_PCVR, make PCVR=1)
 // is in VR unless LARECOMP_XR=0 (--flat), or xr_pc_start turned it off.
@@ -62,16 +82,33 @@ bool xr_ok_(XrResult r, const char *what) {
     return false;
 }
 
-// The loader: LARECOMP_XR_LOADER, else SteamVR's (no soname: by path), else the system's. XR_RUNTIME_JSON (the
-// loader's own variable) picks another runtime, e.g. tools/xrmock.
+// The loader: LARECOMP_XR_LOADER, else SteamVR's on the Frame (no soname: by path), else the one the package carries or
+// the system's (Linux: the AppImage's usr/lib comes first, through the program's RUNPATH; Windows: LoadLibrary looks in
+// the exe's folder first). XR_RUNTIME_JSON (the loader's own variable) picks another runtime, e.g. tools/xrmock.
+#ifdef _WIN32
+static void *lib_open(const char *p) { return (void *)LoadLibraryA(p); }
+static void *lib_sym(void *l, const char *n) { return (void *)GetProcAddress((HMODULE)l, n); }
+static const char *lib_error(void) {
+    static char b[48];
+    snprintf(b, sizeof b, "Windows error %lu", GetLastError());
+    return b;
+}
+// (the Khronos release's name, then a MinGW build's)
+static const char *const k_loaders[] = {"openxr_loader.dll", "libopenxr_loader.dll"};
+#else
+#include <dlfcn.h>
+static void *lib_open(const char *p) { return dlopen(p, RTLD_NOW | RTLD_LOCAL); }
+static void *lib_sym(void *l, const char *n) { return dlsym(l, n); }
+static const char *lib_error(void) { return dlerror(); }
+static const char *const k_loaders[] = {"/opt/steamvr/bin/linuxarm64/libopenxr_loader.so", "libopenxr_loader.so.1", "libopenxr_loader.so"};
+#endif
 bool xr_load_loader(void) {
     if (g_xr.loader) return true;
-    const char *paths[] = {getenv("LARECOMP_XR_LOADER"), "/opt/steamvr/bin/linuxarm64/libopenxr_loader.so", "libopenxr_loader.so.1",
-                           "libopenxr_loader.so"};
-    for (size_t i = 0; i < sizeof paths / sizeof *paths && !g_xr.loader; i++)
-        if (paths[i] && *paths[i]) g_xr.loader = dlopen(paths[i], RTLD_NOW | RTLD_LOCAL);
-    if (!g_xr.loader) { LOG("[xr] no OpenXR loader (%s)\n", dlerror()); return false; }
-    p_xrGetInstanceProcAddr = (PFN_xrGetInstanceProcAddr)dlsym(g_xr.loader, "xrGetInstanceProcAddr");
+    const char *own = getenv("LARECOMP_XR_LOADER");
+    if (own && *own) g_xr.loader = lib_open(own);
+    for (size_t i = 0; i < sizeof k_loaders / sizeof *k_loaders && !g_xr.loader; i++) g_xr.loader = lib_open(k_loaders[i]);
+    if (!g_xr.loader) { LOG("[xr] no OpenXR loader (%s)\n", lib_error()); return false; }
+    p_xrGetInstanceProcAddr = (PFN_xrGetInstanceProcAddr)lib_sym(g_xr.loader, "xrGetInstanceProcAddr");
     if (!p_xrGetInstanceProcAddr) { LOG("[xr] the OpenXR loader has no xrGetInstanceProcAddr\n"); return false; }
     p_xrGetInstanceProcAddr(XR_NULL_HANDLE, "xrCreateInstance", (PFN_xrVoidFunction *)&p_xrCreateInstance);
     p_xrGetInstanceProcAddr(XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties",
@@ -94,7 +131,7 @@ bool xr_instance_create(void) {
         en2 |= !strcmp(xp[i].extensionName, XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME);
         refresh |= !strcmp(xp[i].extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
         fmtlist |= !strcmp(xp[i].extensionName, XR_KHR_VULKAN_SWAPCHAIN_FORMAT_LIST_EXTENSION_NAME);
-        timespec |= !strcmp(xp[i].extensionName, XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME);
+        timespec |= !strcmp(xp[i].extensionName, XR_TIME_EXTENSION_NAME);
         valve |= !strcmp(xp[i].extensionName, XR_INPUT_VALVE_EXT);
         gaze |= !strcmp(xp[i].extensionName, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
     }
@@ -105,7 +142,7 @@ bool xr_instance_create(void) {
     ext[ne++] = XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME;
     if (refresh) ext[ne++] = XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME;
     if (fmtlist) ext[ne++] = XR_KHR_VULKAN_SWAPCHAIN_FORMAT_LIST_EXTENSION_NAME;
-    if (timespec) ext[ne++] = XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME;  // (xr_timing.log: display times on our clock)
+    if (timespec) ext[ne++] = XR_TIME_EXTENSION_NAME;  // (xr_timing.log, the pose prediction: display times on our clock)
     if (valve) ext[ne++] = XR_INPUT_VALVE_EXT;  // (the Frame controllers' own profile: xr_input.c)
     if (gaze) ext[ne++] = XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME;  // (the eye tracker: foveation, xr_input.c)
     XrInstanceCreateInfo ci = {.type = XR_TYPE_INSTANCE_CREATE_INFO, .enabledExtensionCount = ne, .enabledExtensionNames = ext};
@@ -124,7 +161,11 @@ bool xr_instance_create(void) {
         p_xrGetInstanceProcAddr(g_xr.inst, "xrGetDisplayRefreshRateFB", (PFN_xrVoidFunction *)&p_xrGetDisplayRefreshRateFB);
         p_xrGetInstanceProcAddr(g_xr.inst, "xrRequestDisplayRefreshRateFB", (PFN_xrVoidFunction *)&p_xrRequestDisplayRefreshRateFB);
     }
-    if (timespec) p_xrGetInstanceProcAddr(g_xr.inst, "xrConvertTimeToTimespecTimeKHR", (PFN_xrVoidFunction *)&p_xrConvertTimeToTimespecTimeKHR);
+#ifdef _WIN32
+    if (timespec) p_xrGetInstanceProcAddr(g_xr.inst, "xrConvertTimeToWin32PerformanceCounterKHR", (PFN_xrVoidFunction *)&p_xrConvertTime);
+#else
+    if (timespec) p_xrGetInstanceProcAddr(g_xr.inst, "xrConvertTimeToTimespecTimeKHR", (PFN_xrVoidFunction *)&p_xrConvertTime);
+#endif
     g_xr.has_gaze = gaze;
     xr_input_init(p_xrGetInstanceProcAddr, valve);
     g_xr.has_refresh_fb = refresh && p_xrRequestDisplayRefreshRateFB;

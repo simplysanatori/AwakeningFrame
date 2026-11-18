@@ -35,7 +35,11 @@ void romfs_file_read_hook(const char *path) {
 // frame. A host thread watches the present counter, so nothing in the game's own code changes.
 #include <pthread.h>
 #include <unistd.h>
+#ifdef _WIN32  // (a research probe of the Linux builds: on Windows no page reads as resident, so the scan finds nothing)
+static int mincore(void *addr, size_t len, unsigned char *vec) { (void)addr, (void)len, (void)vec; return -1; }
+#else
 #include <sys/mman.h>
+#endif
 
 #define SCAN_STEPS 8
 #define SCAN_TRACKS 8

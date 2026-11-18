@@ -122,15 +122,14 @@ static void timing_open(void) {
     char p[1024], q[1040];
     snprintf(p, sizeof p, "%s/xr_timing.log", rt_data_root());
     snprintf(q, sizeof q, "%s.prev", p);
+    remove(q);  // (Windows' rename does not replace a file)
     rename(p, q);
     tlog = fopen(p, "w");
     if (!tlog) LOG("[xr] cannot write %s\n", p);
 }
 static double time_ms(XrTime t) {  // an XrTime on xr_timing.log's clock
-    struct timespec ts;
-    uint64_t ns = (uint64_t)t;  // (SteamVR's and the mock's XrTime are CLOCK_MONOTONIC ns already)
-    if (p_xrConvertTimeToTimespecTimeKHR && XR_SUCCEEDED(p_xrConvertTimeToTimespecTimeKHR(g_xr.inst, t, &ts)))
-        ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+    int64_t ns = t;  // (SteamVR's on Linux and the mock's XrTime are CLOCK_MONOTONIC ns already)
+    xr_time_to_plat(t, &ns);
     return ((double)ns - (double)g_xr.begin_ns) / 1e6;
 }
 static void timing_line(uint64_t f, uint64_t t_wait0, uint64_t t_ret, const XrFrameState *fs, uint64_t t_begin, uint64_t t_end, bool late) {
@@ -318,9 +317,8 @@ static void *xr_thread(void *arg) {
         }
         uint64_t now = plat_now_ns();
         {   // XrTime - plat_now_ns() (both CLOCK_MONOTONIC on SteamVR and the mock: 0 there; converted when the runtime can)
-            struct timespec ts;
-            if (p_xrConvertTimeToTimespecTimeKHR && XR_SUCCEEDED(p_xrConvertTimeToTimespecTimeKHR(g_xr.inst, fs.predictedDisplayTime, &ts)))
-                atomic_store(&g_xr.xr_minus_plat, fs.predictedDisplayTime - ((int64_t)ts.tv_sec * 1000000000ll + ts.tv_nsec));
+            int64_t ns;
+            if (xr_time_to_plat(fs.predictedDisplayTime, &ns)) atomic_store(&g_xr.xr_minus_plat, fs.predictedDisplayTime - ns);
         }
         int64_t period = fs.predictedDisplayPeriod > 0 ? fs.predictedDisplayPeriod : 8333333;
         {   // a new rate once it holds HZ_FILTER_FRAMES refreshes (hz_filter.h): one-frame blips don't flip the 30 fps hold
@@ -407,6 +405,11 @@ bool xr_thread_start(void) {
     g_xr.stop = false;
     const char *pe = getenv("LARECOMP_XR_PREDICT");
     g_xr.predict = !(pe && !strcmp(pe, "vsync"));
+#ifdef _WIN32
+    // (the measured prediction compares our clock with the runtime's: without the conversion the two are unrelated on
+    // Windows, so the latest vsync's display time is used, as LARECOMP_XR_PREDICT=vsync)
+    if (g_xr.predict && !xr_time_convertible()) g_xr.predict = 0, LOG("[xr] no time conversion from the runtime: poses predicted from the vsync\n");
+#endif
     if (pthread_create(&g_xr.thread, NULL, xr_thread, NULL) != 0) return false;
     pthread_setname_np(g_xr.thread, "xr");
     g_xr.thread_on = true;
