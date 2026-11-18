@@ -90,7 +90,7 @@ EQUAL against it). The copies' readers are in "Clears and copies" below.
 
 ## Clears and copies (VR mode only)
 
-What a game frame asks of the GPU, counted, and three savings on the clears and copies it holds, each behind its own
+What a game frame asks of the GPU, counted, and four savings on the clears and copies it holds, each behind its own
 switch (`vr_diet.c` `vr_saving`; the `[diet] VR savings:` line at start names the ones on).
 
 Tools:
@@ -104,10 +104,10 @@ Tools:
 
 Mabe at frame 1320 (Frame-like profile, 1728² eyes): 41 passes (37 multiview), 15 of them only clears, 1087 draws, 14
 copies (7 full-size layer copies), 5 dispatches. The copies and their readers over a whole run:
-- main depth -> depth copy A: read by the water (Mabe; rarely in Tail Cave).
+- main depth -> depth copy A: read every frame at Mabe (the water), in the forest and in Tail Cave; not in the house.
 - main depth -> depth copy B: its depth is cleared right after (stencil kept) and nothing reads it.
-- scene -> RGBA16F: read only at Mabe (~3 frames in 4); its source is cleared at the next frame's start, before the next
-  copy, so a lazy copy would be made at that clear anyway; formats differ, so no alias.
+- scene -> RGBA16F: read only in Tail Cave 04B (every frame there), made everywhere; its source is cleared at the next
+  frame's start, before the next copy, so a lazy copy would be made at that clear anyway; formats differ, so no alias.
 - window image -> the presented texture (full size): never read in VR gameplay (the HUD clone is presented).
 - window image -> thumbnails (682x154, 777x243) -> 136x30 / 155x48: the last ones never read; small.
 
@@ -131,11 +131,14 @@ The savings (all VR only, flat unchanged; on by default: the deferral and the al
 Checked with `mv_check --mode env --more` (eight spots: Mabe, forest, the house, Tail Cave, the beach, the menu open at
 Mabe, in the house and in Tail Cave; the Frame-like profile `tools/frame_profile.env` + `frame_profile_copies.env`):
 the deferral and the alias each alone, and all four together, pass at every spot, both eyes; again with Table Edge
-Fade and Surroundings Backdrop, and in rain and snow at Mabe (one menu spot in rain failed by 0.1 % on chickens and a fox
-standing elsewhere: the game is not deterministic). The fold alone and the present copy alone failed spots the same
+Fade and Surroundings Backdrop, and in snow at Mabe (`LARECOMP_WEATHER=rain` drew no rain under the mock: the same
+image as without weather, so rain is not covered). The fold alone and the present copy alone failed spots the same
 way, on moving actors. Under the validation layer, a tour with all four on and the eye size stepping through 1152,
 1536 and 1680 gives the same messages as with all four off. `LARECOMP_CHUNK_PASSES=0` passes too.
-`LARECOMP_SHADOW_SCALE=0.5` changes the image (shadow edges: 11 % of the forest's pixels).
+`LARECOMP_SHADOW_SCALE=0.5` changes the image (shadow edges: 11 % of the forest's pixels). The game is not deterministic:
+a Mabe spot can fail any of these checks by up to ~2 % on chickens, a fox and butterflies standing elsewhere (rerun it).
+The counts are of the game's own commands; the runtime's own passes (weather, the edge, the eye composite) are not in
+the pass log.
 Only the headset can show: the time saved (PLAN 3.4: load ops alone gained nothing on Turnip), the held pass begin with
 foveation's shading-rate attachment or Valve's density map layer (this desktop has no foveation), and Turnip's tiles.
 
