@@ -147,6 +147,18 @@ AF_HEADSET_FLAG=$T/headset-in-use AF_BENCH_LOCK=$T/bench.lock "$KITD/frame-bench
 check "bench: refused while the headset is in use (exit 75)" test $? -eq 75
 AF_HEADSET_FLAG=$T/headset-in-use AF_BENCH_LOCK=$T/bench.lock "$KITD/frame-bench.sh" --plan "$F/bench-app" > "$T/b2.log" 2>&1
 check "bench: --plan lists the four spots" test "$(grep -c '^  spot ' "$T/b2.log")" = 4
+# the whole bench against a stand-in program that writes the log lines a run has (two programs: a table and a comparison)
+printf '#!/bin/bash\necho "[info] fake"\nfor s in Field_11C Field_06C MarinTarinHouse_01A Lv01TailCave_04B; do echo "[warp] jumping to X / $s"; for i in $(seq 60); do echo "[pace] period 16.67 blocked 1.00 busy 5.00 cost 5.00 ms (queue wait 0.10, cpu 3.20, render cpu 2.10, gpu $GPU, gpu wait 0.2, submit 0.1, present 0.1, hooks 0.1, lock 0.0)"; done; done > "$LARECOMP_DATA_ROOT/lasrecomp.log"\n' > "$F/bench-app/lasrecomp"
+cp -r "$F/bench-app" "$F/bench-app2"; sed -i 's/\$GPU/7.00/' "$F/bench-app2/lasrecomp"; sed -i 's/\$GPU/4.50/' "$F/bench-app/lasrecomp"
+echo "0.1.1" > "$F/bench-app/VERSION"; echo "0.1.1-dev-abc" > "$F/bench-app2/VERSION"
+mkdir -p "$F/.local/share/lasrecomp-dev/extracted/exefs"; echo ex > "$F/.local/share/lasrecomp-dev/extracted/exefs/main"
+AFDEV_BENCH_ROOT=$T/scratch AF_BENCH_LOCK=$T/bench.lock AF_HEADSET_FLAG=$T/nohs FRAME_BENCH_ALLOW_RUNNING=1 "$KITD/frame-bench.sh" --dwell 1 --settle 0 --hz 120 --out "$T/res.md" "$F/bench-app" "$F/bench-app2" > "$T/b3.log" 2>&1
+check "bench: two programs run one after the other, exit 0" test $? -eq 0
+check "bench: one results file with a row for each spot" test "$(grep -c '^| .* | 60 | ' "$T/res.md")" = 8
+check "bench: GPU ms and FPS per spot" grep -q "| 60 | 60.0 | 4.50 |" "$T/res.md"
+check "bench: the second program compared with the first" grep -q "(+2.50)" "$T/res.md"
+check "bench: peak memory in the results, the lock released" sh -c "grep -q 'MB peak RSS' '$T/res.md' && [ ! -e '$T/bench.lock' ]"
+check "bench: the Dev and released data folders untouched" test "$(sums "$F/.local/share/lasrecomp")" = "$REL2"
 echo
 if [ "$fails" = 0 ]; then echo "all passed"; else echo "$fails FAILED"; fi
 [ "$fails" = 0 ]

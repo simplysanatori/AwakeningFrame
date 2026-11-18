@@ -233,7 +233,7 @@ for idx, app in enumerate(apps):
         lines.append("| %s | %d | %s | %s | %s | %s | %s | %s |" % (r["name"], r["frames"], f(r.get("fps")), f(r.get("gpu"), 2), f(r.get("gpu2"), 2), f(r.get("render"), 2), f(r.get("cpu"), 2), f(r.get("p95"), 2)))
     if not rows: lines.append("| no spot reached (see the log) | | | | | | | |")
     lines.append("")
-    summary.append((label, ver, rows, status, rss))
+    summary.append((label, ver, rows, status, rss, why))
     if base is None: base = rows
 if len(summary) > 1 and base:
     lines += ["## Against the first program", "", "| Spot | " + " | ".join("%s GPU ms / FPS" % s[0] for s in summary[1:]) + " |", "|---|" + "---|" * (len(summary) - 1)]
@@ -246,7 +246,8 @@ if len(summary) > 1 and base:
     lines.append("")
 open(out, "w").write("\n".join(lines) + "\n")
 print("frame-bench: results in %s" % out)
-left = subprocess.run(["pgrep", "-x", "lasrecomp"], capture_output=True, text=True).stdout.split()
-print("frame-bench: lasrecomp still running: %s" % (", ".join(left) if left else "none"))
-sys.exit(0 if all(s[3] == 0 for s in summary) else 1)
+left = subprocess.run(["pgrep", "-f", "^" + os.path.join(scratch, "x").rstrip("x") + "|" + "|".join("^" + os.path.join(a, "lasrecomp") for a in apps)], capture_output=True, text=True).stdout.split()
+print("frame-bench: of these programs still running: %s" % (", ".join(left) if left else "none"))
+good = all(s[3] == 0 and s[5] == "ended" and s[2] and all(r["frames"] for r in s[2]) for s in summary)
+sys.exit(0 if good else 1)
 PY
