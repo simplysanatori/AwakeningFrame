@@ -7629,17 +7629,23 @@ static bool ring_bounds(CmdRec *r, bool indexed, float lo[3], float hi[3]) {
     if (ok) memcpy(lo, l, 12), memcpy(hi, u, 12);
     return ok;
 }
-// the draw's world box (x, z; y too): its vertex box through its model matrix. Level draws (vertex block 4 of 912 / 928
-// bytes) carry the model matrix in block 2 (3x4 rows, the room's offset); characters and props (1056 / 1072) a zero
-// translation there and, as u32 12, the index of their matrix in block 3 (the world-space bone palette)
-static bool ring_world_box(CmdRec *r, bool indexed, float wlo[3], float whi[3], bool *level) {
-    uint64_t s4 = st.ubuf[0][4].addr ? st.ubuf[0][4].size : 0;
-    if (!(s4 == 912 || s4 == 928 || s4 == 1056 || s4 == 1072) || !st.ubuf[0][2].addr || st.ubuf[0][2].size < 64) return false;
-    if (level) *level = s4 == 912 || s4 == 928;
+// the draw's world box (x, z; y too): its vertex box through its model matrix. Block 2 holds it (3x4 rows): room
+// geometry has the room's offset as the translation (never zero in x and z), props their place; skinned and attached
+// meshes a zero translation and, as u32 12, the index of their matrix in block 3 (the world-space bone palette).
+// Nothing else is read, so that every pass a draw is in finds the same box: a draw left out of the depth pre-pass and
+// then drawn as core in the colour pass fails its EQUAL test, and is gone. Block 4's size (912 / 928 bytes: room
+// geometry, 1056 / 1072: characters and props) used to pick between the two here, but only the colour passes bind
+// block 4 per draw: in the depth-only passes it is what an earlier draw left. There a character's draw after a room's
+// was taken for room geometry at its zero translation, the world's origin, past every box. The frame's class memo
+// mostly still held the class of the draw's first pass; when another draw had taken its slot (the blocks' addresses,
+// and with them the slots, alternate between two sets from frame to frame), the draw was gone for that frame: Link's
+// head at Marin and Tarin's door on every other frame, and props past the box left out or not by the same chance.
+static bool ring_world_box(CmdRec *r, bool indexed, float wlo[3], float whi[3]) {
+    if (!st.ubuf[0][2].addr || st.ubuf[0][2].size < 64) return false;
     const float *m2 = (const float *)(uintptr_t)st.ubuf[0][2].addr, *m = NULL;
     float pos[3], sc;
     if (!ring_matrix_at(m2, pos, &sc)) return false;
-    if (s4 == 912 || s4 == 928 || pos[0] != 0 || pos[2] != 0) m = m2;
+    if (pos[0] != 0 || pos[2] != 0) m = m2;
     else {
         uint32_t idx;
         memcpy(&idx, m2 + 12, 4);
@@ -7656,7 +7662,9 @@ static bool ring_world_box(CmdRec *r, bool indexed, float wlo[3], float whi[3], 
     }
     return true;
 }
-static int ring_class(CmdRec *r, bool indexed, int kind) {  // 0 core, 1 ring, 2 ring that casts, 3 past the EXTENT box
+// 0 core, 1 ring, 2 ring that casts, 3 past the EXTENT box. The memo holds where the draw lies (its box against the
+// frame's footprint and box), which every pass finds alike
+static int ring_class(CmdRec *r, bool indexed, int kind) {
     extern int vr_ring_class(const float lo[3], const float hi[3], uint64_t frame);
     uint64_t inst = indexed ? r->x[6] : r->x[4];
     if (inst > 1 || !st.ubuf[0][2].addr) return 0;  // (instanced: grass and the like stay core)
@@ -7666,27 +7674,42 @@ static int ring_class(CmdRec *r, bool indexed, int kind) {  // 0 core, 1 ring, 2
     uint64_t frame = renderer_exec_frame();
     uint64_t key = ((st.ubuf[0][2].addr * 0x9E3779B97F4A7C15ull) ^ (r->x[3] * 0xBF58476D1CE4E5B9ull) ^ st.vbuf[0].addr ^ (r->x[2] << 40)) | 1;
     uint32_t k = (uint32_t)(key ^ key >> 29) & (RC - 1);
-    if (rc[k].key == key && rc[k].frame == frame) return rc[k].c;
-    float lo[3], hi[3];
-    bool level = false;
-    int c = ring_world_box(r, indexed, lo, hi, &level) ? vr_ring_class(lo, hi, frame) : 0;
-    if (c == 3 && !level) c = 1;  // (lane scene: only room geometry is left out past the box; characters, props and sprites still draw)
-    rc[k].key = key, rc[k].frame = frame, rc[k].c = (int8_t)c;
+    int c;
+    if (rc[k].key == key && rc[k].frame == frame) c = rc[k].c;
+    else {
+        float lo[3], hi[3];
+        c = ring_world_box(r, indexed, lo, hi) ? vr_ring_class(lo, hi, frame) : 0;
+        rc[k].key = key, rc[k].frame = frame, rc[k].c = (int8_t)c;
+    }
+    // only room geometry is left out past the box; characters, props and sprites still draw. Which it is, a colour pass
+    // can tell (block 4 is the draw's own there); the depth-only passes leave both out alike
+    if (c == 3 && kind == 2) {
+        uint64_t s4 = st.ubuf[0][4].addr ? st.ubuf[0][4].size : 0;
+        if (!(s4 == 912 || s4 == 928)) c = 1;
+    }
     return c;
 }
-static void ring_dump(CmdRec *r, bool indexed, int kind, int c) {  // (LARECOMP_VR_RING_DUMP=<frame>, eye 0)
-    static int64_t at = -2;
+// (LARECOMP_VR_RING_DUMP=<frame>[,<frames>], eye 0; a draw the early route took shows the fragment shader of the draw before it)
+static void ring_dump(CmdRec *r, bool indexed, int kind, int c) {
+    static int64_t at = -2, frames = 1, cur = -1;
     static int n;
-    if (at == -2) at = getenv("LARECOMP_VR_RING_DUMP") ? atoll(getenv("LARECOMP_VR_RING_DUMP")) : -1;
-    if (at < 0 || g_eye != 0 || renderer_exec_frame() != (uint64_t)at || n >= 3000) return;
+    if (at == -2) {
+        const char *e = getenv("LARECOMP_VR_RING_DUMP"), *cm = e ? strchr(e, ',') : NULL;
+        at = e ? atoll(e) : -1;
+        if (cm && atoll(cm + 1) > 0) frames = atoll(cm + 1);
+    }
+    int64_t f = (int64_t)renderer_exec_frame();
+    if (at < 0 || g_eye != 0 || f < at || f >= at + frames) return;
+    if (f != cur) cur = f, n = 0;
+    if (n >= 3000) return;
     if (!n++) {
         extern bool vr_cull_core_box(float lo[3], float hi[3]);
         float lo[3] = {0}, hi[3] = {0};
         bool ok = vr_cull_core_box(lo, hi);
-        LOG("[ringdump] frame %lld core %d x %.2f..%.2f z %.2f..%.2f\n", (long long)at, ok, lo[0], hi[0], lo[2], hi[2]);
+        LOG("[ringdump] frame %lld core %d x %.2f..%.2f z %.2f..%.2f\n", (long long)f, ok, lo[0], hi[0], lo[2], hi[2]);
     }
     char b[512];
-    int l = snprintf(b, sizeof b, "[ringdump] kind %d class %d fs %016llx inst %llu n %llu blend %d depth %d/%d/%d |", kind, c,
+    int l = snprintf(b, sizeof b, "[ringdump] f%lld kind %d class %d fs %016llx inst %llu n %llu blend %d depth %d/%d/%d |", (long long)f, kind, c,
                      (unsigned long long)g_cur_fs_hash, (unsigned long long)(indexed ? r->x[6] : r->x[4]), (unsigned long long)r->x[2],
                      st.color_state[0] & 1, st.ds[0], st.ds[1], st.ds[2]);
     for (int i = 1; i < 5 && l < (int)sizeof b - 48; i++)
@@ -7694,7 +7717,7 @@ static void ring_dump(CmdRec *r, bool indexed, int kind, int c) {  // (LARECOMP_
     float lo[3], hi[3];
     if (ring_bounds(r, indexed, lo, hi) && l < (int)sizeof b - 96)
         l += snprintf(b + l, sizeof b - l, " | local %.1f,%.1f,%.1f..%.1f,%.1f,%.1f", lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
-    if (ring_world_box(r, indexed, lo, hi, NULL) && l < (int)sizeof b - 64)
+    if (ring_world_box(r, indexed, lo, hi) && l < (int)sizeof b - 64)
         l += snprintf(b + l, sizeof b - l, " world x %.1f..%.1f z %.1f..%.1f", lo[0], hi[0], lo[2], hi[2]);
     LOG("%s\n", b);
 }
@@ -7799,6 +7822,7 @@ static bool ring_early(CmdRec *r, bool indexed) {
     bool tw = vk_tex_twinned(st.rt.depth);
     int c = ring_class(r, indexed, tw ? 1 : 0);
     bool skip = tw ? c >= 1 : (c == 1 || c == 3);
+    ring_dump(r, indexed, tw ? 1 : 0, c);
     if (skip) {
         if (tw) st_last_depth = st.rt.depth, memcpy(st_last_zr, st.depth_range[0], sizeof st_last_zr);
         if (g_eye == 1) eye1_skip_rt();  // (its counters)
