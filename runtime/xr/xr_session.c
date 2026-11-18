@@ -13,7 +13,7 @@
 #include "xr_input.h"
 #include "xr_internal.h"
 
-XrCore g_xr = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER};
+XrCore g_xr = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER, .lead = XR_LEAD_NONE};
 
 static PFN_xrGetInstanceProcAddr p_xrGetInstanceProcAddr;
 static PFN_xrCreateInstance p_xrCreateInstance;

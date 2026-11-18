@@ -61,6 +61,10 @@ typedef struct {
     VkImageView view[8];
 } XrChain;
 
+#define XR_LEADS 8
+#define XR_LEAD_NONE (-1000)
+#define XR_RESHOW_MAX 3     // re-shown refreshes a set carries images for (four refreshes a frame: the 30 FPS hold at 120 Hz)
+
 typedef struct {
     bool valid;
     int pair;               // which pair of swapchains (g_xr.hud[pair], g_xr.eyes[pair])
@@ -79,7 +83,18 @@ typedef struct {
     uint64_t rid[2];        // the latch each eye's image came from (xr_latch_views_id)
     uint64_t latch_ns;      // plat_now_ns() of that latch (prediction: latch -> display)
     XrTime vtime;           // the display time its views were located for
+    XrTime vref;            // the latch's vsync target then (predict_time: the grid line the prediction counts from)
     bool alpha;             // its eye images carry alpha for passthrough (edge.c; the Table Edge can change between sets)
+    // (LARECOMP_XR_REPROJ, runtime/nvn/vulkan/reproj.c) the refreshes after its first, each with eye images of its own
+    // drawn for that refresh's head pose: refresh k (1..rs_n) is due at grid0 + k periods
+    XrTime grid0;           // the display time of its first refresh (on the display's grid); 0: none due
+    int64_t period;
+    int rs_n;
+    bool rs_ok[XR_RESHOW_MAX];        // both eyes drawn: the layer may name them
+    bool rs_has[XR_RESHOW_MAX][2];    // acquired (released with the set)
+    uint32_t rs_img[XR_RESHOW_MAX][2];
+    XrView rs_views[XR_RESHOW_MAX][2];
+    XrTime ready;           // (XR thread) the first refresh it was found finished at (it may wait for grid0 then)
 } XrSet;
 
 // xr_latch_views_id's latches: the poses each frame's eyes were rendered with, kept until a set names them
@@ -90,6 +105,7 @@ typedef struct {
     XrSpace space;
     XrTime time;            // the display time they were located for
     uint64_t made_ns;
+    XrTime ref;             // the latest vsync's target time then (predict_time)
 } XrLatch;
 
 typedef struct {
@@ -120,6 +136,7 @@ typedef struct {
     // Two of each, used by alternate sets: a swapchain a layer names has no image acquired at xrEndFrame (the set being
     // made is on the other pair; the mock checks it, and SteamVR may show an acquired image otherwise)
     XrChain hud[2], eyes[2][2];  // [pair], [pair][eye]
+    XrChain rs[2][XR_RESHOW_MAX][2];  // [pair][k][eye]: the re-shown refreshes' images (LARECOMP_XR_REPROJ), made on first use
     XrViewConfigurationView vcv[2];
     // the set hand-off (mu / cv)
     pthread_mutex_t mu;
@@ -138,6 +155,12 @@ typedef struct {
     _Atomic int64_t target_time;  // XrTime the latest vsync's game frame is predicted for
     _Atomic int64_t xr_minus_plat; // XrTime - plat_now_ns() (the clocks' offset, from the latest refresh)
     _Atomic int64_t lat_ns;        // smoothed latch -> first display of the sets (0: not measured yet)
+    _Atomic int64_t grid_t, grid_period;  // the latest refresh's predicted display time and period (the display's grid)
+    // (LARECOMP_XR_REPROJ rot / pos / follow) whole periods from a latch's vsync target to the first refresh its set could
+    // be shown at: the latest of the last XR_LEADS sets' (XR_LEAD_NONE: too few yet). The XR thread's (xr_release_completed).
+    _Atomic int lead;
+    int8_t leads[XR_LEADS];
+    int lead_n;
     int predict;                   // LARECOMP_XR_PREDICT: 1 measured (default), 0 vsync (the latest vsync's time)
     float quad_dist, quad_width;
 } XrCore;
@@ -161,9 +184,14 @@ void xr_chain_release(XrChain *c);
 // xr_loop.c
 bool xr_thread_start(void);
 void xr_thread_stop(void);
-void xr_release_completed(void);  // (XR thread) the pending set, once its GPU work finished
+void xr_release_completed(XrTime pdt);  // (XR thread) the pending set, once its GPU work finished (pdt: this refresh's; 0 none)
 // xr_vk.c: the layer's poses are the ones the set's eye images were rendered with (the pose check)
 bool xr_layer_matches_render(const XrSet *s);
+// xr_vk.c: one xrLocateViews for both eyes at display time t in `space` (false: no valid pose)
+bool xr_locate_in(XrTime t, XrSpace space, XrView views[2]);
+// xr_loop.c: the refreshes a game frame is shown on at the display's rate now (2 at 120 Hz, 4 in the 30 FPS hold; the
+// larger count at an uneven rate)
+int xr_refreshes_per_frame(void);
 
 // record.c: the queue's external synchronisation
 void vk_queue_lock(void);

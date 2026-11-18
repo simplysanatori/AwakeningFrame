@@ -29,7 +29,46 @@ static struct {  // (XR thread; the presenting thread's fields under g_xr.mu)
     int64_t lat_sum_ns, vt_err_sum_ns, vt_err_max_ns;
     // the frame end: the queue lock's wait and the runtime's xrEndFrame (SteamVR's waits behind the queue's backlog)
     uint64_t end_n, end_slow, lock_slow, end_sum_ns, end_max_ns;
+    // (LARECOMP_XR_REPROJ) re-shown refreshes: with an image drawn for them, without one (none due, skipped as too
+    // small a change, or past the last due: a late next set), and (fresh) with a pose located for them; past: shown later
+    // than the last refresh drawn for (the image of that one, a period or more old); a set's first refresh on the
+    // display time its poses were located for, a period or more later, or earlier; held: refreshes a finished set
+    // waited for its own (xr_release_completed)
+    uint64_t rs_drawn, rs_none, rs_fresh, rs_past, first_on, first_late, first_early, held;
 } st;
+
+// LARECOMP_XR_REPROJ=off|fresh|rot|pos|follow (xr.h; docs/af/STEREO.md "Re-shown refreshes"); the VR tab sets it live
+static int g_reproj = -1;
+static void reproj_init(void) {
+    if (__atomic_load_n(&g_reproj, __ATOMIC_ACQUIRE) >= 0) return;
+    const char *e = getenv("LARECOMP_XR_REPROJ");
+    int m = XR_REPROJ_OFF;
+    if (e && *e) {
+        if (!strcmp(e, "fresh")) m = XR_REPROJ_FRESH;
+        else if (!strcmp(e, "rot")) m = XR_REPROJ_ROT;
+        else if (!strcmp(e, "pos")) m = XR_REPROJ_POS;
+        else if (!strcmp(e, "follow")) m = XR_REPROJ_FOLLOW;
+        else if (strcmp(e, "off") && strcmp(e, "0")) LOG("[xr] LARECOMP_XR_REPROJ=%s unknown (off, fresh, rot, pos, follow): off\n", e);
+    }
+    int expect = -1;
+    if (__atomic_compare_exchange_n(&g_reproj, &expect, m, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) && m)
+        LOG("[xr] re-shown refreshes: %s\n", m == XR_REPROJ_FRESH ? "a fresh pose on the same images (a test)"
+                                          : m == XR_REPROJ_ROT ? "drawn again for their head pose (rotation)"
+                                          : m == XR_REPROJ_POS ? "drawn again for their head pose (rotation and position)"
+                                                               : "drawn again for their head pose and the table's follow");
+}
+int xr_reproj_mode(void) {
+    reproj_init();
+    return __atomic_load_n(&g_reproj, __ATOMIC_ACQUIRE);
+}
+void xr_set_reproj_mode(int mode) {
+    if (mode < XR_REPROJ_OFF || mode > XR_REPROJ_FOLLOW) return;
+    reproj_init();
+    if (__atomic_exchange_n(&g_reproj, mode, __ATOMIC_ACQ_REL) != mode) LOG("[xr] re-shown refreshes: mode %d (VR settings)\n", mode);
+}
+
+static _Atomic int g_per_frame = 2;  // (xr_refreshes_per_frame: the XR thread's cadence rule)
+int xr_refreshes_per_frame(void) { return atomic_load(&g_per_frame); }
 
 bool xr_active(void) { return g_xr.thread_on && g_xr.session; }
 bool xr_session_running(void) { return g_xr.running; }
@@ -86,15 +125,42 @@ void xr_set_submit(uint64_t seq) {
 }
 
 // ---- the XR thread
+// (LARECOMP_XR_REPROJ) a finished set's first possible refresh, `pdt`: its lead, whole periods from its latch's vsync
+// target, into the last XR_LEADS; the prediction's lead is their latest (predict_time)
+static void lead_note(const XrSet *s, XrTime pdt) {
+    int64_t per = atomic_load(&g_xr.grid_period);
+    if (!s->vref || per <= 0) return;
+    int64_t d = pdt - s->vref, m = d >= 0 ? (d + per / 2) / per : -((-d + per / 2) / per);
+    if (m < -4 || m > 12) return;  // (a hitch or a load, not the pipeline)
+    g_xr.leads[g_xr.lead_n++ % XR_LEADS] = (int8_t)m;
+    if (g_xr.lead_n < XR_LEADS / 2) return;
+    int n = g_xr.lead_n < XR_LEADS ? g_xr.lead_n : XR_LEADS, lead = g_xr.leads[0];
+    for (int i = 1; i < n; i++) if (g_xr.leads[i] > lead) lead = g_xr.leads[i];
+    atomic_store(&g_xr.lead, lead);
+}
+
 // The pending set, once the GPU finished its submission: its images released, and it becomes the one shown. Also
-// while the session isn't running (no frames), so the presenting thread never waits on a display that isn't there.
-void xr_release_completed(void) {
+// while the session isn't running (no frames, pdt 0), so the presenting thread never waits on a display that isn't
+// there. (LARECOMP_XR_REPROJ rot / pos / follow) A set finished before the refresh its poses were located for waits for
+// it (at most XR_RESHOW_MAX + 1 refreshes): shown earlier, its images would be a refresh ahead of the head; the set
+// shown meanwhile has its own image for that refresh.
+void xr_release_completed(XrTime pdt) {
     pthread_mutex_lock(&g_xr.mu);
     if (g_xr.pending.valid) {
         if (vk_completed_seq() >= g_xr.pending.seq) {
+            XrSet *p = &g_xr.pending;
+            if (pdt && !p->ready) p->ready = pdt, lead_note(p, pdt);
+            if (pdt && p->grid0 && p->period > 0 && xr_reproj_mode() >= XR_REPROJ_ROT && 2 * (p->grid0 - pdt) > p->period &&
+                p->grid0 - pdt <= (XR_RESHOW_MAX + 1) * p->period) {
+                st.held++;
+                pthread_mutex_unlock(&g_xr.mu);
+                return;
+            }
             XrSet s = g_xr.pending;
             xr_chain_release(&g_xr.hud[s.pair]);
             for (int i = 0; i < 2; i++) if (s.has_eye[i]) xr_chain_release(&g_xr.eyes[s.pair][i]);
+            for (int k = 0; k < XR_RESHOW_MAX; k++)
+                for (int i = 0; i < 2; i++) if (s.rs_has[k][i]) xr_chain_release(&g_xr.rs[s.pair][k][i]);
             g_xr.shown = s;
             g_xr.shown_any = true;
             g_xr.pending.valid = false;
@@ -208,9 +274,38 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
     if (fs->shouldRender && g_xr.shown_any) {
         const XrSet *s = &g_xr.shown;
         if (s->views_ok && s->has_eye[0] && s->has_eye[1]) {
-            if (s->exec_eyes) {
+            // the eye images for this refresh (LARECOMP_XR_REPROJ): the set's own, or those drawn for the refresh whose
+            // display time is nearest this one's, each with the views it was drawn for; past the last one drawn (the next
+            // set is late) the last one stays
+            const XrView *views = s->views;
+            const XrChain *ch[2] = {&g_xr.eyes[s->pair][0], &g_xr.eyes[s->pair][1]};
+            int k = 0;
+            if (s->grid0 && s->period > 0 && s->rs_n) {
+                int64_t d = fs->predictedDisplayTime - s->grid0;
+                k = d <= 0 ? 0 : (int)((d + s->period / 2) / s->period);
+                if (k > s->rs_n) k = s->rs_n, st.rs_past++;
+                while (k > 0 && !s->rs_ok[k - 1]) k--;
+            }
+            XrView fresh[2];
+            int mode = xr_reproj_mode();
+            if (k) {
+                views = s->rs_views[k - 1], ch[0] = &g_xr.rs[s->pair][k - 1][0], ch[1] = &g_xr.rs[s->pair][k - 1][1];
+                st.rs_drawn++;
+            } else if (!new_set && mode == XR_REPROJ_FRESH && xr_locate_in(fs->predictedDisplayTime, s->space, fresh)) {
+                views = fresh;  // (the test: a pose located for this refresh on the set's own images)
+                st.rs_fresh++;
+            } else if (!new_set && mode >= XR_REPROJ_ROT) {
+                st.rs_none++;
+            }
+            if (s->exec_eyes && views == s->views) {
                 if (xr_layer_matches_render(s)) st.pose_ok++;
                 else st.pose_bad++;
+            }
+            if (new_set && s->grid0 && s->period > 0) {
+                int64_t d = fs->predictedDisplayTime - s->grid0;
+                if (2 * d >= s->period) st.first_late++;
+                else if (2 * d <= -s->period) st.first_early++;
+                else st.first_on++;
             }
             if (new_set && s->latch_ns) {  // (its first refresh: how far ahead the poses were located, the latency)
                 int64_t disp = fs->predictedDisplayTime - atomic_load(&g_xr.xr_minus_plat);
@@ -224,8 +319,8 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
             }
             for (int i = 0; i < 2; i++)
                 pv[i] = (XrCompositionLayerProjectionView){
-                    .type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW, .pose = s->views[i].pose, .fov = s->views[i].fov,
-                    .subImage = {g_xr.eyes[s->pair][i].sc, {{0, 0}, {(int32_t)g_xr.eyes[s->pair][i].w, (int32_t)g_xr.eyes[s->pair][i].h}}, 0}};
+                    .type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW, .pose = views[i].pose, .fov = views[i].fov,
+                    .subImage = {ch[i]->sc, {{0, 0}, {(int32_t)ch[i]->w, (int32_t)ch[i]->h}}, 0}};
             proj.space = s->space;
             // (LARECOMP_VR_EDGE=passthrough: the eye images carry premultiplied alpha, 0 in the void: runtime/nvn/vulkan/edge.c)
             if (s->alpha) proj.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
@@ -282,6 +377,13 @@ static void log_stats(double secs) {
         st.firsts ? st.lat_sum_ns / 1e6 / st.firsts : 0.0, st.firsts ? st.vt_err_sum_ns / 1e6 / st.firsts : 0.0, st.vt_err_max_ns / 1e6,
         g_xr.predict ? "measured" : "vsync", atomic_load(&g_xr.lat_ns) / 1e6, st.end_n ? st.end_sum_ns / 1e6 / st.end_n : 0.0,
         st.end_max_ns / 1e6, (unsigned long long)st.end_slow, (unsigned long long)st.lock_slow);
+    if (st.rs_drawn + st.rs_none + st.rs_fresh)
+        LOG("[xr] re-shown refreshes: %llu with images drawn for their pose (%llu of them past the last drawn for: the next "
+            "set late), %llu with the set's own (none drawn: skipped), %llu with a fresh pose on the set's images; a set's first "
+            "refresh: %llu on its grid line, %llu later, %llu earlier; %llu refreshes a finished set waited for its own (lead %d)\n",
+            (unsigned long long)st.rs_drawn, (unsigned long long)st.rs_past, (unsigned long long)st.rs_none,
+            (unsigned long long)st.rs_fresh, (unsigned long long)st.first_on, (unsigned long long)st.first_late,
+            (unsigned long long)st.first_early, (unsigned long long)st.held, atomic_load(&g_xr.lead));
     memset(&st, 0, sizeof st);
     pthread_mutex_unlock(&g_xr.mu);
 }
@@ -302,7 +404,7 @@ static void *xr_thread(void *arg) {
             break;
         }
         if (!g_xr.running) {
-            xr_release_completed();
+            xr_release_completed(0);
             last_d = 0;
             plat_sleep_until_ns(plat_now_ns() + 10000000ull);
             continue;
@@ -321,6 +423,8 @@ static void *xr_thread(void *arg) {
             if (xr_time_to_plat(fs.predictedDisplayTime, &ns)) atomic_store(&g_xr.xr_minus_plat, fs.predictedDisplayTime - ns);
         }
         int64_t period = fs.predictedDisplayPeriod > 0 ? fs.predictedDisplayPeriod : 8333333;
+        atomic_store(&g_xr.grid_period, period);  // (the display's grid: the re-shown refreshes' display times, xr_reshow_times)
+        atomic_store(&g_xr.grid_t, fs.predictedDisplayTime);
         {   // a new rate once it holds HZ_FILTER_FRAMES refreshes (hz_filter.h): one-frame blips don't flip the 30 fps hold
             static HzFilter hzf;
             static uint32_t blips_logged;
@@ -352,6 +456,7 @@ static void *xr_thread(void *arg) {
                 pace_xr_frame_ms(rule.frame_ms);
                 hz_cadence_set(&cad, &rule);
                 float per = rule.hold30 ? g_xr.display_hz / 30 : g_xr.display_hz / 60;
+                atomic_store(&g_per_frame, (int)ceilf(per - 0.01f));
                 if (test60) LOG("[xr] test: 60 fps at %.0f Hz (uneven cadence)\n", g_xr.display_hz);
                 if (test30 && rule.hold30) LOG("[xr] test: the game held at 30 fps (LARECOMP_XR_FPS=30)\n");
                 if (rule.even) LOG("[xr] display at %.0f Hz: the game %s fps (%.0f refresh%s a frame)\n", g_xr.display_hz,
@@ -387,7 +492,7 @@ static void *xr_thread(void *arg) {
         xr_update_app_space(fs.predictedDisplayTime);
         xr_input_pointer(fs.predictedDisplayTime);  // the menu laser at this refresh's display time, in the app space now
         uint64_t before = st.released, late_before = st.gpu_late;
-        xr_release_completed();
+        xr_release_completed(fs.predictedDisplayTime);
         uint64_t t_end = plat_now_ns();
         end_frame(&fs, st.released != before);
         timing_line(frame_no++, t_wait0, now, &fs, t_begin, t_end, st.gpu_late != late_before);
