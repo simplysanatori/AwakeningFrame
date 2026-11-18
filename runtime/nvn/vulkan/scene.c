@@ -64,7 +64,7 @@ static void cfg_init(void) {
     "  layout(row_major) mat4 cur;  // this eye: world -> clip (game convention)\n"                                    \
     "  vec4 grid;  // cells x, cells y, the filled part x, y of the capture's colour\n"                                \
     "  vec4 cz;    // the capture's depth range: zn, zf - zn, depth in -1..1, the cell jump share\n"                    \
-    "  vec4 ce;    // the capture's eye (world)\n"                                                                     \
+    "  vec4 ce;    // the capture's eye (world); the images' row order: 1 rows upward (row 0 is NDC y -1), -1 downward\n" \
     "  vec4 sz;    // this eye's filled size w h (pixels), the filled part x, y of its scene depth\n"                  \
     "  vec4 cdp;   // the filled part x, y of the capture's depth\n"                                                   \
     "} u;\n"
@@ -80,7 +80,7 @@ static const char *vs_src =
     "  if (d >= 0.9999) return vec3(1e30);\n"
     "  float z = (d - u.cz.x) / u.cz.y;\n"
     "  if (u.cz.z > 0.5) z = z * 2.0 - 1.0;\n"
-    "  vec4 w = u.inv * vec4(g.x * 2.0 - 1.0, 1.0 - 2.0 * g.y, z, 1.0);\n"
+    "  vec4 w = u.inv * vec4(g.x * 2.0 - 1.0, (g.y * 2.0 - 1.0) * u.ce.w, z, 1.0);\n"
     "  return w.xyz / w.w;\n"
     "}\n"
     "void main() {\n"
@@ -101,7 +101,7 @@ static const char *vs_src =
     "  v_uv = g * u.grid.zw;\n"
     "  if (hi > 1e29 || hi > lo * (1.0 + u.cz.w)) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }\n"
     "  vec4 c = u.cur * vec4(me, 1.0);\n"
-    "  gl_Position = vec4(c.x, -c.y, (c.z + c.w) * 0.5, c.w);\n"  // (into the output's texture space: row 0 is the top, NDC y +1)
+    "  gl_Position = vec4(c.x, c.y * u.ce.w, (c.z + c.w) * 0.5, c.w);\n"  // (into the output's rows, as the game drew them)
     "}\n";
 
 static const char *fs_src =
@@ -215,6 +215,7 @@ static int last_level = -2;
 static float last_anchor[3];
 static bool have_last_anchor;
 extern float xr_rig_fade(void) __attribute__((weak));
+bool renderer_origin_lower_left(void);
 
 static void settle_watch(double now) {
     extern int game_level_overworld(void);
@@ -417,6 +418,10 @@ static bool fill(const StereoEyePost *e) {
     u.grid[0] = u.grid[1] = (float)cfg.grid, u.grid[2] = cap.ax, u.grid[3] = cap.ay;
     u.cz[0] = cap.zn, u.cz[1] = cap.zf - cap.zn, u.cz[2] = cap.dm1 ? 1.0f : 0.0f, u.cz[3] = cfg.jump;
     memcpy(u.ce, cap.eye, 12);
+    // The eye output's rows run as the game's window origin says: with the origin at the lower left (this game) row 0 is
+    // the bottom of the view. Taken as the top, a capture drawn from the pose it was taken at still came out right (the
+    // two mistakes cancel), and from any other pose mirrored: the fill slid against the table with every head movement
+    u.ce[3] = renderer_origin_lower_left() ? 1.0f : -1.0f;
     u.sz[0] = (float)w, u.sz[1] = (float)h, u.sz[2] = e->dax, u.sz[3] = e->day;
     u.cdp[0] = cap.dax, u.cdp[1] = cap.day;
     VkSpan s = vk_transient_copy(&u, sizeof u, 256);
