@@ -12,6 +12,12 @@
 //   --rates      the display rate of each 5 s stats line ("[xr] 5 s: ... at N Hz") passed to the pacer when it changes,
 //                as an xr_loop.c that tells the pacer every rate change would (60 FPS rates: a 16.67 ms game frame); the
 //                session's own build only told it when the game's rate choice changed
+//   --cadence    the frames of the VR mode's 30 fps lock on a simulated 60 Hz vsync clock instead: each frame's game
+//                thread works its logged busy time (plus --idle <ms> of waits inside the work, which the busy time
+//                doesn't count), waits for its vsync event (the gate pace.c sets: runtime/hle/vi.c g_vsync_game_from)
+//                and presents; prints the 50 ms and under-25 ms periods the replay's pacer gives next to the log's.
+//                --from <text>: counted from the log line holding the text (e.g. "jumping to Field / Field_11C") on,
+//                to the next warp, its first 60 frames left out (as the bench's pacestat.py)
 //   -q           no per-5 s lines
 #include <math.h>
 #include <stdbool.h>
@@ -25,14 +31,21 @@
 // ---- what pace.c reads (as tools/test_pace.c)
 static uint64_t t_ns = 1000000000ull, cpu_ns, gpu_total_ns, render_cpu_ns;
 __thread uint64_t g_blocked_ns, g_rq_wait_ns, g_rq_lock_ns, g_submit_ns, g_gpu_wait_ns, g_present_ns, g_hooks_ns;
-volatile uint64_t g_vsync_count, g_vsync_ns;
+volatile uint64_t g_vsync_count, g_vsync_ns, g_vsync_game_from;
 uint64_t pace_test_game_mgr;
 static uint8_t game_mgr[0x500];
 static bool gameplay = true;
 static char level[64] = "Field";
 uint64_t plat_now_ns(void) { return t_ns; }
-// (the held cadence's wait is in the logged period already: no time passes here)
-void plat_sleep_until_ns(uint64_t t) { (void)t; g_vsync_count += 2; }
+// (the held cadence's wait is in the logged period already: no time passes here; --cadence: the clock's)
+#define VSYNC_NS 16666667ull
+static bool cadence;
+static void vsyncs(void) { g_vsync_count = t_ns / VSYNC_NS, g_vsync_ns = g_vsync_count * VSYNC_NS; }
+void plat_sleep_until_ns(uint64_t t) {
+    if (!cadence) { g_vsync_count += 2; return; }
+    if (t > t_ns) t_ns = t;
+    vsyncs();
+}
 uint64_t plat_thread_cpu_ns(void) { return cpu_ns; }
 uint64_t rq_render_cpu_ns(void) { return render_cpu_ns; }
 int64_t pace_gpu_ns(void) { return (int64_t)gpu_total_ns; }
@@ -55,21 +68,83 @@ static void xr_rate(double hz, bool held30, double frame_ms, bool quiet) {
     if (!quiet) printf("      (pacer told: %.0f Hz, %s, game frame %.2f ms)\n", hz, held30 ? "held at 30" : "60 free", frame_ms);
 }
 
+// --cadence (see the top): the game thread's own wait, for the next vsync that signals its event
+static uint64_t game_vsync_after(uint64_t t) {
+    uint64_t k = t / VSYNC_NS + 1, from = g_vsync_game_from;
+    while (k < from && from - k <= 2) k++;
+    return k;
+}
+static int replay_cadence(FILE *f, double idle, const char *from) {
+    char line[4096];
+    bool counting = !from, any_lock = false;
+    int skip = 60, n = 0, log50 = 0, log16 = 0, r50 = 0, r16 = 0, both50 = 0;
+    double lat = 0;
+    uint64_t last = 0;
+    vsyncs();
+    while (fgets(line, sizeof line, f)) {
+        if (from && strstr(line, from)) { counting = true, skip = 60; continue; }
+        if (from && counting && n && strstr(line, "[warp] jumping")) counting = false;
+        double h;
+        if (sscanf(line, "[xr] display at %lf Hz: the game", &h) == 1) {
+            bool held30 = strstr(line, "held at 30") != NULL;
+            pace_xr_lock(held30 ? 30 : 0), pace_xr_frame_ms(held30 ? 0 : 2e3 / h), any_lock = held30;
+            continue;
+        }
+        double p, b, u, c, q, cpu, rc, g;
+        if (sscanf(line, "[pace] period %lf blocked %lf busy %lf cost %lf ms (queue wait %lf, cpu %lf, render cpu %lf, gpu %lf,",
+                   &p, &b, &u, &c, &q, &cpu, &rc, &g) != 8 || !any_lock)
+            continue;
+        gameplay = !strstr(line, "(no gameplay)");
+        uint64_t t0 = t_ns;
+        if (u > 100) u = 100;  // (a load: not a frame's work)
+        t_ns += (uint64_t)((u + idle) * 1e6);
+        g_blocked_ns += (uint64_t)(idle * 1e6);
+        uint64_t shown = game_vsync_after(t_ns) * VSYNC_NS;
+        g_blocked_ns += shown - t_ns;
+        t_ns = shown;
+        vsyncs();
+        cpu_ns += (uint64_t)(cpu * 1e6);
+        render_cpu_ns += (uint64_t)(rc * 1e6) + 1;
+        if (g >= 0) gpu_total_ns += (uint64_t)(g * 1e6);
+        double rp = last ? (shown - last) / 1e6 : 0;
+        last = shown;
+        if (counting && gameplay && skip-- <= 0) {
+            n++, lat += (shown - t0) / 1e6;
+            log50 += p > 45, log16 += p < 25, r50 += rp > 45, r16 += rp < 25, both50 += p > 45 && rp > 45;
+        }
+        pace_frame();
+    }
+    printf("%d frames%s%s, idle %.1f ms a frame: the log %d at 50 ms (%.1f%%), %d under 25; the replay %d at 50 ms (%.1f%%; "
+           "%d of them the log's too), %d under 25; start to present %.1f ms on average\n", n, from ? " from " : "",
+           from ? from : "", idle, log50, 100.0 * log50 / (n ? n : 1), log16, r50, 100.0 * r50 / (n ? n : 1), both50, r16,
+           lat / (n ? n : 1));
+    return 0;
+}
+
 int main(int argc, char **argv) {
     const char *path = NULL;
     bool as_logged = false, rates = false, quiet = false;
+    const char *from = NULL;
+    double idle = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--as-logged")) as_logged = true;
+        else if (!strcmp(argv[i], "--cadence")) cadence = true;
+        else if (!strcmp(argv[i], "--idle") && i + 1 < argc) idle = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--from") && i + 1 < argc) from = argv[++i];
         else if (!strcmp(argv[i], "--rates")) rates = true;
         else if (!strcmp(argv[i], "-q")) quiet = true;
         else path = argv[i];
     }
     FILE *f = path ? fopen(path, "r") : NULL;
-    if (!f) { fprintf(stderr, "usage: pace_replay <log> [--as-logged] [--rates] [-q]\n"); return 2; }
+    if (!f) {
+        fprintf(stderr, "usage: pace_replay <log> [--as-logged] [--rates] [--cadence [--idle <ms>] [--from <text>]] [-q]\n");
+        return 2;
+    }
     setvbuf(stdout, NULL, _IOLBF, 0);
     setvbuf(stderr, NULL, _IOLBF, 0);
     game_mgr[0x4e3] = 1;  // (the game allows its 30 fps mode)
     pace_test_game_mgr = (uint64_t)(uintptr_t)game_mgr;
+    if (cadence) return replay_cadence(f, idle, from);
     char line[4096];
     bool log_slow = false, log_lock = false;  // the session's own pacer hold, and its VR lock at 30
     double hz = 0, told_hz = 0, gpu_ema = -1, start = t_ns / 1e9;
