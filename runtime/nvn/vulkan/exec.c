@@ -7412,6 +7412,8 @@ static NvnTexture *st_last_depth;    // the latest twinned depth target drawn in
 static float st_last_zr[2];
 static TexBackend *g_eye_depth[2];   // per eye output: that eye's scene depth (stereo_eye_post)
 static float g_eye_zr[2][2];
+static bool g_eye_capture[2];        // per eye output: of a Backdrop capture frame (ring_phase)
+static uint32_t g_eye_added[2];      // per eye output: the draws the wide culling added to its frame
 static void clone_target(NvnTexture *dst, bool *ok, const NvnTexture *win, uint32_t fmt, const char *label) {
     if (*ok && dst->width == win->width && dst->height == win->height && dst->format == fmt) return;
     if (*ok && dst->backend) backend_texture_destroyed(dst);
@@ -7422,6 +7424,7 @@ static void clone_target(NvnTexture *dst, bool *ok, const NvnTexture *win, uint3
     *ok = true;
     LOG("[stereo] %s %ux%u fmt %#x (the window image's size)\n", label, win->width, win->height, fmt);
 }
+static void stereo_composite_ring(int eye);  // (below the ring draws' state)
 static void stereo_composite(void) {
     NvnTexture *win = st.rt.color[0];
     clone_target(&g_eye_out, &g_eye_out_ok, win, win->format, "stereo eye output");
@@ -7460,6 +7463,7 @@ static void stereo_composite(void) {
         stereo_note_composite(e);  // (the poses this output was rendered with go with it into the layer)
         g_eye_depth[e] = st_last_depth ? vk_tex(st_last_depth, true) : NULL;
         memcpy(g_eye_zr[e], st_last_zr, sizeof st_last_zr);
+        stereo_composite_ring(e);
     }
     static uint64_t n[2];
     if (n[g_eye]++ % 600 == 0) LOG("[stereo] eye %d composite #%llu (frame %llu)\n", g_eye, (unsigned long long)n[g_eye], (unsigned long long)renderer_exec_frame());
@@ -7629,17 +7633,23 @@ static bool ring_bounds(CmdRec *r, bool indexed, float lo[3], float hi[3]) {
     if (ok) memcpy(lo, l, 12), memcpy(hi, u, 12);
     return ok;
 }
-// the draw's world box (x, z; y too): its vertex box through its model matrix. Level draws (vertex block 4 of 912 / 928
-// bytes) carry the model matrix in block 2 (3x4 rows, the room's offset); characters and props (1056 / 1072) a zero
-// translation there and, as u32 12, the index of their matrix in block 3 (the world-space bone palette)
-static bool ring_world_box(CmdRec *r, bool indexed, float wlo[3], float whi[3], bool *level) {
-    uint64_t s4 = st.ubuf[0][4].addr ? st.ubuf[0][4].size : 0;
-    if (!(s4 == 912 || s4 == 928 || s4 == 1056 || s4 == 1072) || !st.ubuf[0][2].addr || st.ubuf[0][2].size < 64) return false;
-    if (level) *level = s4 == 912 || s4 == 928;
+// the draw's world box (x, z; y too): its vertex box through its model matrix. Block 2 holds it (3x4 rows): room
+// geometry has the room's offset as the translation (never zero in x and z), props their place; skinned and attached
+// meshes a zero translation and, as u32 12, the index of their matrix in block 3 (the world-space bone palette).
+// Nothing else is read, so that every pass a draw is in finds the same box: a draw left out of the depth pre-pass and
+// then drawn as core in the colour pass fails its EQUAL test, and is gone. Block 4's size (912 / 928 bytes: room
+// geometry, 1056 / 1072: characters and props) used to pick between the two here, but only the colour passes bind
+// block 4 per draw: in the depth-only passes it is what an earlier draw left. There a character's draw after a room's
+// was taken for room geometry at its zero translation, the world's origin, past every box. The frame's class memo
+// mostly still held the class of the draw's first pass; when another draw had taken its slot (the blocks' addresses,
+// and with them the slots, alternate between two sets from frame to frame), the draw was gone for that frame: Link's
+// head at Marin and Tarin's door on every other frame, and props past the box left out or not by the same chance.
+static bool ring_world_box(CmdRec *r, bool indexed, float wlo[3], float whi[3]) {
+    if (!st.ubuf[0][2].addr || st.ubuf[0][2].size < 64) return false;
     const float *m2 = (const float *)(uintptr_t)st.ubuf[0][2].addr, *m = NULL;
     float pos[3], sc;
     if (!ring_matrix_at(m2, pos, &sc)) return false;
-    if (s4 == 912 || s4 == 928 || pos[0] != 0 || pos[2] != 0) m = m2;
+    if (pos[0] != 0 || pos[2] != 0) m = m2;
     else {
         uint32_t idx;
         memcpy(&idx, m2 + 12, 4);
@@ -7656,8 +7666,74 @@ static bool ring_world_box(CmdRec *r, bool indexed, float wlo[3], float whi[3], 
     }
     return true;
 }
-static int ring_class(CmdRec *r, bool indexed, int kind) {  // 0 core, 1 ring, 2 ring that casts, 3 past the EXTENT box
+// (Backdrop, scene.c) what the frame being drawn is to a capture (scene_ring_phase, taken once per frame). Between
+// captures Backdrop has no ring draws. Around one the game culls wide for some frames, and those must look like the
+// others: the draws the wide culling adds stay out of every pass but the capture frame's eye colour passes. They are
+// the draws past the footprint that the frame before the wide culling did not have (RP_LEARN notes that frame's by
+// vertex count and place); the ones it had (the table fit's own) stay core, as they are between captures. Past the
+// footprint itself, not the footprint grown by the ring margin: the wide culling adds houses right behind the table's
+// rim too. These frames are sorted here (ring_box_class), not by vr_cull's ring margin, which is on with the wide
+// culling only. The eyes' passes and the shared ones (the shadow maps) are noted and sorted apart: the table
+// fit's shadow pass already has outer houses and people the eyes do not (the light's frustum reaches past the table),
+// and taken as known they came into the eyes on every wide frame: the pop a capture was meant not to show.
+enum { RP_NONE, RP_LEARN, RP_WIDE, RP_CAPTURE };
+#define RING_MARGIN 4.0f  // (vr_cull.c: the ring margin of the Surroundings modes)
+static int ring_ph;                 // the frame's phase
+static uint64_t ring_ph_frame = ~0ull;  // the frame ring_ph is of
+static uint32_t ring_gen, ring_added;  // the learned set's generation; this frame's draws the wide culling added
+static struct { uint64_t id; uint32_t gen; } ring_known[8192];
+static int ring_phase(uint64_t frame) {
+    extern int scene_ring_phase(void);
+    if (frame != ring_ph_frame) {
+        ring_ph_frame = frame, ring_ph = scene_ring_phase(), ring_added = 0;
+        if (ring_ph == RP_LEARN) ring_gen++;
+    }
+    return ring_ph;
+}
+static void stereo_composite_ring(int eye) {
+    bool now = ring_ph_frame == renderer_exec_frame();  // (a frame without a ring draw never asked for its phase)
+    g_eye_capture[eye] = now && ring_ph == RP_CAPTURE, g_eye_added[eye] = now ? ring_added : 0;
+}
+// a ring draw by its vertex count and the half-unit cell its box's middle is in. Looked up in that cell and the eight
+// around it, and noted again where it was found one cell on: a prop stands still, a character walks from cell to cell
+static bool ring_known_cell(uint64_t mesh, int32_t cx, int32_t cz, bool add) {
+    uint64_t id = (mesh ^ ((uint64_t)(uint32_t)cx * 0x9E3779B97F4A7C15ull) ^ ((uint64_t)(uint32_t)cz * 0xC2B2AE3D27D4EB4Full)) | 1;
+    uint32_t k = (uint32_t)(id ^ id >> 31);
+    for (int i = 0; i < 8; i++) {
+        uint32_t j = (k + (uint32_t)i) & 8191;
+        if (ring_known[j].gen == ring_gen && ring_known[j].id == id) return true;
+        if (ring_known[j].gen != ring_gen) {
+            if (add) ring_known[j].id = id, ring_known[j].gen = ring_gen;
+            return false;
+        }
+    }
+    return false;
+}
+static bool ring_known_draw(CmdRec *r, const float lo[3], const float hi[3], bool eye, bool add) {
+    uint64_t mesh = (r->x[2] * 0xBF58476D1CE4E5B9ull) ^ (r->x[0] << 56);  // (its vertex count: some draws' buffers move every frame)
+    if (eye) mesh ^= 0x94D049BB133111EBull;  // (an eye pass's set, apart from the shared passes')
+    int32_t cx = (int32_t)floorf(lo[0] + hi[0]), cz = (int32_t)floorf(lo[2] + hi[2]);
+    if (add) return ring_known_cell(mesh, cx, cz, true);
+    if (ring_known_cell(mesh, cx, cz, false)) return true;
+    for (int dz = -1; dz <= 1; dz++)
+        for (int dx = -1; dx <= 1; dx++)
+            if ((dx || dz) && ring_known_cell(mesh, cx + dx, cz + dz, false)) return ring_known_cell(mesh, cx, cz, true), true;
+    return false;
+}
+// (Backdrop around a capture) a box against the frame's footprint grown by a margin: 1 past it, 0 not (or no footprint)
+static int ring_box_class(const float blo[3], const float bhi[3], uint64_t frame, float m) {
+    extern bool vr_cull_core_box(float lo[3], float hi[3]);
+    static float lo[3], hi[3];
+    static bool ok;
+    static uint64_t at = ~0ull;
+    if (frame != at) at = frame, ok = vr_cull_core_box(lo, hi);
+    return ok && !(bhi[0] >= lo[0] - m && blo[0] <= hi[0] + m && bhi[2] >= lo[2] - m && blo[2] <= hi[2] + m);
+}
+// 0 core, 1 ring, 2 ring that casts, 3 past the EXTENT box. The memo holds where the draw lies (its box against the
+// frame's footprint and box), which every pass finds alike
+static int ring_class(CmdRec *r, bool indexed, int kind) {
     extern int vr_ring_class(const float lo[3], const float hi[3], uint64_t frame);
+    extern bool vr_ring_on(void);
     uint64_t inst = indexed ? r->x[6] : r->x[4];
     if (inst > 1 || !st.ubuf[0][2].addr) return 0;  // (instanced: grass and the like stay core)
     if (kind == 2 && (st.color_state[0] & 1)) return 0;  // (blended: decals, effects)
@@ -7665,28 +7741,58 @@ static int ring_class(CmdRec *r, bool indexed, int kind) {  // 0 core, 1 ring, 2
     static struct { uint64_t key, frame; int8_t c; } rc[RC];
     uint64_t frame = renderer_exec_frame();
     uint64_t key = ((st.ubuf[0][2].addr * 0x9E3779B97F4A7C15ull) ^ (r->x[3] * 0xBF58476D1CE4E5B9ull) ^ st.vbuf[0].addr ^ (r->x[2] << 40)) | 1;
+    int ph = ring_phase(frame);
+    bool eye = kind != 0;
+    if (ph != RP_NONE && eye) key ^= 0xD6E8FEB86659FD93ull;  // (around a capture the eyes' passes and the shared ones sort apart)
     uint32_t k = (uint32_t)(key ^ key >> 29) & (RC - 1);
-    if (rc[k].key == key && rc[k].frame == frame) return rc[k].c;
-    float lo[3], hi[3];
-    bool level = false;
-    int c = ring_world_box(r, indexed, lo, hi, &level) ? vr_ring_class(lo, hi, frame) : 0;
-    if (c == 3 && !level) c = 1;  // (lane scene: only room geometry is left out past the box; characters, props and sprites still draw)
-    rc[k].key = key, rc[k].frame = frame, rc[k].c = (int8_t)c;
+    int c;
+    if (rc[k].key == key && rc[k].frame == frame) c = rc[k].c;
+    else {
+        float lo[3], hi[3];
+        bool box = ring_world_box(r, indexed, lo, hi);
+        // (the frame before the wide culling: the draws from half a margin inside the footprint on, so that one the
+        // footprint moves away from in the frames that follow is known by then)
+        if (ph == RP_LEARN) {
+            if (box && ring_box_class(lo, hi, frame, -RING_MARGIN * 0.5f)) ring_known_draw(r, lo, hi, eye, true);
+            c = 0;
+        } else if (ph != RP_NONE) {
+            c = 0;
+            if (box && ring_box_class(lo, hi, frame, 0.0f) && !ring_known_draw(r, lo, hi, eye, false)) {
+                c = vr_ring_on() && vr_ring_class(lo, hi, frame) == 3 ? 3 : 1;
+                if (eye) ring_added++;
+            }
+        } else c = box ? vr_ring_class(lo, hi, frame) : 0;
+        rc[k].key = key, rc[k].frame = frame, rc[k].c = (int8_t)c;
+    }
+    // only room geometry is left out past the box; characters, props and sprites still draw. Which it is, a colour pass
+    // can tell (block 4 is the draw's own there); the depth-only passes leave both out alike
+    if (c == 3 && kind == 2) {
+        uint64_t s4 = st.ubuf[0][4].addr ? st.ubuf[0][4].size : 0;
+        if (!(s4 == 912 || s4 == 928)) c = 1;
+    }
     return c;
 }
-static void ring_dump(CmdRec *r, bool indexed, int kind, int c) {  // (LARECOMP_VR_RING_DUMP=<frame>, eye 0)
-    static int64_t at = -2;
+// (LARECOMP_VR_RING_DUMP=<frame>[,<frames>], eye 0; a draw the early route took shows the fragment shader of the draw before it)
+static void ring_dump(CmdRec *r, bool indexed, int kind, int c) {
+    static int64_t at = -2, frames = 1, cur = -1;
     static int n;
-    if (at == -2) at = getenv("LARECOMP_VR_RING_DUMP") ? atoll(getenv("LARECOMP_VR_RING_DUMP")) : -1;
-    if (at < 0 || g_eye != 0 || renderer_exec_frame() != (uint64_t)at || n >= 3000) return;
+    if (at == -2) {
+        const char *e = getenv("LARECOMP_VR_RING_DUMP"), *cm = e ? strchr(e, ',') : NULL;
+        at = e ? atoll(e) : -1;
+        if (cm && atoll(cm + 1) > 0) frames = atoll(cm + 1);
+    }
+    int64_t f = (int64_t)renderer_exec_frame();
+    if (at < 0 || g_eye != 0 || f < at || f >= at + frames) return;
+    if (f != cur) cur = f, n = 0;
+    if (n >= 3000) return;
     if (!n++) {
         extern bool vr_cull_core_box(float lo[3], float hi[3]);
         float lo[3] = {0}, hi[3] = {0};
         bool ok = vr_cull_core_box(lo, hi);
-        LOG("[ringdump] frame %lld core %d x %.2f..%.2f z %.2f..%.2f\n", (long long)at, ok, lo[0], hi[0], lo[2], hi[2]);
+        LOG("[ringdump] frame %lld core %d x %.2f..%.2f z %.2f..%.2f\n", (long long)f, ok, lo[0], hi[0], lo[2], hi[2]);
     }
     char b[512];
-    int l = snprintf(b, sizeof b, "[ringdump] kind %d class %d fs %016llx inst %llu n %llu blend %d depth %d/%d/%d |", kind, c,
+    int l = snprintf(b, sizeof b, "[ringdump] f%lld kind %d class %d fs %016llx inst %llu n %llu blend %d depth %d/%d/%d |", (long long)f, kind, c,
                      (unsigned long long)g_cur_fs_hash, (unsigned long long)(indexed ? r->x[6] : r->x[4]), (unsigned long long)r->x[2],
                      st.color_state[0] & 1, st.ds[0], st.ds[1], st.ds[2]);
     for (int i = 1; i < 5 && l < (int)sizeof b - 48; i++)
@@ -7694,7 +7800,7 @@ static void ring_dump(CmdRec *r, bool indexed, int kind, int c) {  // (LARECOMP_
     float lo[3], hi[3];
     if (ring_bounds(r, indexed, lo, hi) && l < (int)sizeof b - 96)
         l += snprintf(b + l, sizeof b - l, " | local %.1f,%.1f,%.1f..%.1f,%.1f,%.1f", lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
-    if (ring_world_box(r, indexed, lo, hi, NULL) && l < (int)sizeof b - 64)
+    if (ring_world_box(r, indexed, lo, hi) && l < (int)sizeof b - 64)
         l += snprintf(b + l, sizeof b - l, " world x %.1f..%.1f z %.1f..%.1f", lo[0], hi[0], lo[2], hi[2]);
     LOG("%s\n", b);
 }
@@ -7704,7 +7810,7 @@ static bool ring_route(CmdRec *r, bool indexed) {  // true: skip this draw
     g_ring_leq = false;
     static int log = -1;  // (vr_ring_on is read per draw: the VR tab's Surroundings row switches it live)
     if (log < 0) log = getenv("LARECOMP_VR_RING_LOG") != NULL;
-    if (g_eye < 0 || !vr_ring_on()) return false;
+    if (g_eye < 0 || !(vr_ring_on() || ring_phase(renderer_exec_frame()) != RP_NONE)) return false;
     if (!log) return ring_route_(r, indexed, 0);
     uint64_t t0 = SDL_GetTicksNS();
     bool skip = ring_route_(r, indexed, 1);
@@ -7719,6 +7825,7 @@ static bool ring_route_(CmdRec *r, bool indexed, int log) {
     int kind = !tw ? 0 : !nc ? 1 : 2;  // shared / an eye's depth-only pass / an eye's colour pass
     int c = ring_class(r, indexed, kind);
     bool skip = (kind == 0 && !nc && (c == 1 || c == 3)) || (kind == 1 && c >= 1) || (kind == 2 && c == 3);  // (shared: depth-only ones, the casters)
+    if (kind == 2 && c >= 1 && ring_phase(renderer_exec_frame()) == RP_WIDE) skip = true;  // (Backdrop: only the capture frame draws them)
     static int lowres = -1;  // LARECOMP_VR_RING_LOWRES=0: ring draws stay out of the eyes' smaller colour passes too
     if (lowres < 0) lowres = !getenv("LARECOMP_VR_RING_LOWRES") || atoi(getenv("LARECOMP_VR_RING_LOWRES")) != 0;
     if (!lowres && kind == 2 && c >= 1 && wx_scene_w && st.rt.color[0] && st.rt.color[0]->width * 4 < wx_scene_w * 3) skip = true;
@@ -7793,12 +7900,14 @@ static bool ring_early(CmdRec *r, bool indexed) {
     extern bool vr_ring_on(void);
     static int log = -1;
     if (log < 0) log = getenv("LARECOMP_VR_RING_LOG") != NULL;
-    if (g_eye < 0 || g_interp_log || g_interp_replaying || !st.rt.depth || !vr_ring_on()) return false;
+    if (g_eye < 0 || g_interp_log || g_interp_replaying || !st.rt.depth) return false;
+    if (!(vr_ring_on() || ring_phase(renderer_exec_frame()) != RP_NONE)) return false;
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) return false;
     uint64_t t0 = log ? SDL_GetTicksNS() : 0;
     bool tw = vk_tex_twinned(st.rt.depth);
     int c = ring_class(r, indexed, tw ? 1 : 0);
     bool skip = tw ? c >= 1 : (c == 1 || c == 3);
+    ring_dump(r, indexed, tw ? 1 : 0, c);
     if (skip) {
         if (tw) st_last_depth = st.rt.depth, memcpy(st_last_zr, st.depth_range[0], sizeof st_last_zr);
         if (g_eye == 1) eye1_skip_rt();  // (its counters)
@@ -10312,9 +10421,13 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
         uint32_t ly = lay ? (uint32_t)eye : 0;
         if (g_eye_posted[eye] != g_eye_out_n[eye]) {  // (a new output: the eye post hook, once)
             g_eye_posted[eye] = g_eye_out_n[eye];
-            StereoEyePost ep = {.eye = eye, .cb = cb, .color = b, .depth = g_eye_depth[eye], .width = b->width, .height = b->height,
-                                .layer = ly, .depth_layer = vk_b_layered(g_eye_depth[eye]) ? (uint32_t)eye : 0,
+            TexBackend *zb = g_eye_depth[eye];
+            StereoEyePost ep = {.eye = eye, .cb = cb, .color = b, .depth = zb, .width = b->width, .height = b->height,
+                                .layer = ly, .depth_layer = vk_b_layered(zb) ? (uint32_t)eye : 0,
                                 .ax = b->scalable && b->ax > 0 ? b->sx / b->ax : 1, .ay = b->scalable && b->ay > 0 ? b->sy / b->ay : 1,
+                                .dax = zb && zb->scalable && zb->ax > 0 ? zb->sx / zb->ax : 1,
+                                .day = zb && zb->scalable && zb->ay > 0 ? zb->sy / zb->ay : 1,
+                                .capture = g_eye_capture[eye], .added = g_eye_added[eye],
                                 .zn = g_eye_zr[eye][0], .zf = g_eye_zr[eye][1]};
             ep.have_matrices = stereo_eye_matrices(eye, ep.V, ep.P);
             if (!ep.have_matrices) for (int i = 0; i < 16; i++) ep.V[i] = ep.P[i] = i % 5 == 0;

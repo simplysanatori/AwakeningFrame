@@ -43,16 +43,21 @@ bool stereo_table(float anchor[3], bool *room, bool *zone, float lo[3], float hi
 // e->color in place (layout GENERAL; it must leave it GENERAL with its writes made visible to fragment reads: a full
 // barrier is fine). e->depth is that eye's scene depth (GENERAL; read only), or NULL when the frame had none.
 // Images are the executor's TexBackend (textures.c: ->image, ->view; raw_view() for the colour's plain view);
-// e->ax / e->ay is the part of the image the frame filled (the scalable targets' top-left part, 0..1).
+// e->ax / e->ay is the part of the colour image the frame filled (the scalable targets' top-left part, 0..1); the depth
+// is another image with its own size and its own filled part, e->dax / e->day (the game's quarter-size copy of the scene
+// depth, which is always whole, while dynamic resolution fills less of the colour).
 typedef struct {
     int eye;
     void *cb;                  // VkCommandBuffer
     void *color, *depth;       // TexBackend *
     uint32_t width, height;    // the eye output's image size (pixels)
-    float ax, ay;              // the filled part (0..1 of width / height)
+    float ax, ay;              // the filled part of color (0..1 of width / height)
+    float dax, day;            // the filled part of depth (0..1 of its own width / height)
     float V[16], P[16];        // stereo_eye_matrices (identity when none)
     bool have_matrices;
     float zn, zf;              // the scene pass's depth range (st.depth_range of its viewport 0)
     uint32_t layer, depth_layer;  // (LARECOMP_MV) the image layer of color / depth that is this eye's (0 otherwise)
+    bool capture;              // (Backdrop, scene.c) the output of a capture frame: it holds the draws past the table too
+    uint32_t added;            // (Backdrop) the draws the wide culling added to this output's frame (drawn only in a capture frame)
 } StereoEyePost;
 void stereo_eye_post(const StereoEyePost *e);
