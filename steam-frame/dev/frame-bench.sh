@@ -56,8 +56,10 @@ while [ $# -gt 0 ]; do
     shift
 done
 [ ${#APPS[@]} -gt 0 ] || { echo "usage: frame-bench.sh [--owner-ok] APP_DIR [APP_DIR ...]" >&2; exit 2; }
-for a in "${APPS[@]}"; do
+for i in "${!APPS[@]}"; do
+    a=${APPS[$i]}
     [ -x "$a/lasrecomp" ] && [ -f "$a/lasgame.so" ] || { echo "frame-bench: $a has no lasrecomp and lasgame.so" >&2; exit 2; }
+    APPS[$i]=$(cd "$a" && pwd)   # the programs start in the scratch data folder: a relative folder would not be found from there
 done
 case "$DWELL$SETTLE$HZ" in *[!0-9]*) echo "frame-bench: --dwell, --settle and --hz are whole numbers" >&2; exit 2 ;; esac
 # checked here, before anything is locked or written: a variant's values go into the program's environment as they are
