@@ -8,7 +8,7 @@
 #                   [--tree DIR] [--dwell FRAMES] [--eye WxH] [--pose SPEC] [--vvl] [--wait] [--wait-max S] [--plan]
 #   BIN=PATH        the binary to test (default <tree>/build/lasrecomp; its folder holds lasgame.so); also --bin PATH.
 #                   The game files come from --tree (default: this checkout, else the binary's own checkout)
-#   --mode mv       (default) base = LARECOMP_MV unset, cand = LARECOMP_MV=1
+#   --mode mv       (default) base = LARECOMP_MV=0 (multiview is on by default, so unset would compare it with itself), cand = LARECOMP_MV=1
 #   --mode passes   base = LARECOMP_MV=1 LARECOMP_MV_PASSES=0 (layered storage, double execution), cand = LARECOMP_MV=1
 #   --no-noise      skip the third session. By default a second base session measures the noise: the game is not
 #                   deterministic from run to run (two v1 runs differ by 0 - 18 % of the pixels: butterflies, grass,
@@ -86,7 +86,7 @@ fi
 START=900 STEP=$((DWELL + 120))
 # sessions: label|env words (base first)
 if [ $MODE = mv ]; then
-    BASE_ENV=(-u LARECOMP_MV -u LARECOMP_MV_PASSES);                 BASE_TXT="v1: LARECOMP_MV unset"
+    BASE_ENV=(-u LARECOMP_MV_PASSES LARECOMP_MV=0);                  BASE_TXT="v1: LARECOMP_MV=0"
     CAND_ENV=(-u LARECOMP_MV_PASSES LARECOMP_MV=1);                  CAND_TXT="LARECOMP_MV=1"
 else
     BASE_ENV=(-u LARECOMP_MV_PASSES LARECOMP_MV=1 LARECOMP_MV_PASSES=0); BASE_TXT="LARECOMP_MV=1 LARECOMP_MV_PASSES=0"
@@ -185,7 +185,7 @@ run_session() {   # <label> <env words...>   (a session: one game, every spot)
     (
         cd "$ROOT" || exit 99
         env -u LARECOMP_XR_QUAD -u LARECOMP_XR_EYE_SCALE -u LARECOMP_XR_YAW -u LARECOMP_XR_PREDICT -u LARECOMP_STEREO -u LARECOMP_XR_LAYOUT "$@" \
-            ENABLE_GAMESCOPE_WSI=0 SDL_VIDEODRIVER=offscreen LARECOMP_NO_LAUNCHER=1 LARECOMP_NO_AUDIO=1 LARECOMP_NO_UPDATE_CHECK=1 \
+            ENABLE_GAMESCOPE_WSI=0 SDL_VIDEODRIVER=offscreen LARECOMP_NO_LAUNCHER=1 LARECOMP_NO_AUDIO=1 LARECOMP_NO_UPDATE_CHECK=1 LARECOMP_VR_DYNRES=0 \
             LARECOMP_SETTINGS="$ROOT/settings.ini" LARECOMP_SAVE_DIR="$ROOT/save" LARECOMP_BLUR_REMOVAL=1 LARECOMP_CHEATS=hearts \
             LARECOMP_SYNC_SHADERS=1 LARECOMP_INPUT="$INPUT" LARECOMP_HOST_INPUT="$HOSTINPUT" LARECOMP_WARP_AT="${WARPS%,}" \
             LARECOMP_STEREO_DUMP_AT="${DUMPS%,}" LARECOMP_STEREO_DUMP_DIR="$S/eyes" \
