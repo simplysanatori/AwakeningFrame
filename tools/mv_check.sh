@@ -16,6 +16,10 @@
 #                   each compared in its own folder vs-cand<N>/)
 #   --env 'VAR=value ...'  added to every session (after the mode's), e.g. LARECOMP_VR_EDGE=fade
 #   --more          two more spots: the menu open in the house and in Tail Cave
+#   --spot 'NAME|LEVEL:LOCATOR|'  (repeatable) these spots instead of the list below, e.g. 'beach|Field:Field_16E|'
+#   --xr            compare the eye images as the runtime gets them (Table Edge applied: the mock's MOCK_XR_SHOT_REQ, a
+#                   few refreshes after each dump) instead of the eye outputs the game composited
+#   --base-bin PATH the base and noise sessions run this binary (the same lasgame.so next to it); the candidates run BIN
 #   --base-only     one session (the base) and no comparison: the eye images and the log of a run (an audit with
 #                   LARECOMP_PASSLOG / LARECOMP_COPY_READERS in --env; --plan prints the dump frames to log)
 #   --no-noise      skip the third session. By default a second base session measures the noise: the game is not
@@ -42,7 +46,7 @@ SAVE=${VR_TOUR_SAVE:-$HOME/.local/share/lasrecomp-smoketest/save}
 HEADSET=${AF_HEADSET_FLAG:-$HOME/.cache/headset-in-use}
 LOCK=${AF_BENCH_LOCK:-$HOME/.cache/af-bench-lock}
 PRIORITY=${AF_BENCH_PRIORITY:-$HOME/.cache/af-bench-priority}   # a run with priority on the lock: don't take the lock while this exists
-CAND_MORE=() MORE=0 BASE_XENV= CAND_XENV= ALL_ENV= BASE_ONLY=0 BIN= MODE=mv TAG= ONLY= LIMIT=1.5 NOISE=1 DWELL=420 EYE=1680x1760 POSE=static:0,1.6,0,0,-45 VVL=0 WAIT_HEADSET=0 WAIT_MAX=3600 PLAN=0 GTREE=
+CAND_MORE=() MORE=0 XR=0 BBIN= USPOTS=() BASE_XENV= CAND_XENV= ALL_ENV= BASE_ONLY=0 BIN= MODE=mv TAG= ONLY= LIMIT=1.5 NOISE=1 DWELL=420 EYE=1680x1760 POSE=static:0,1.6,0,0,-45 VVL=0 WAIT_HEADSET=0 WAIT_MAX=3600 PLAN=0 GTREE=
 fail() { echo "mv_check: $*" >&2; exit 2; }
 while [ $# -gt 0 ]; do
     case $1 in
@@ -53,6 +57,9 @@ while [ $# -gt 0 ]; do
         --base-env) shift; BASE_XENV=${1?} ;;
         --cand-env) shift; [ -z "$CAND_XENV" ] && CAND_XENV=${1?} || CAND_MORE+=("${1?}") ;;
         --more) MORE=1 ;;
+        --xr) XR=1 ;;
+        --spot) shift; USPOTS+=("${1:?}") ;;
+        --base-bin) shift; BBIN=$(readlink -f "${1:?}") ;;
         --env) shift; ALL_ENV=${1?} ;;
         --base-only) BASE_ONLY=1 ;;
         --tag) shift; TAG=${1:?} ;;
@@ -91,6 +98,7 @@ SPOTS=(
     "Menu open (Mabe Village)|Field:Field_11C|menu"
 )
 # (the menu opened at the spot before stays open: Home again would close it)
+[ ${#USPOTS[@]} -gt 0 ] && SPOTS=("${USPOTS[@]}")
 [ $MORE = 1 ] && SPOTS+=("Menu open (house)|MarinTarinHouse:MarinTarinHouse_01A|" "Menu open (Tail Cave 04B)|Lv01TailCave:Lv01TailCave_04B|")
 if [ -n "$ONLY" ]; then
     SEL=()
@@ -198,8 +206,10 @@ run_session() {   # <label> <env words...>   (a session: one game, every spot)
     local label=$1; shift
     local S=$OUT/$label; mkdir -p "$S/eyes"
     rm -rf "$ROOT/save" && cp -R "$SAVE" "$ROOT/save"
-    local runner=() vv=()
+    local runner=() vv=() sbin=$BIN
     [ $VVL = 1 ] && { runner=("$TREE/tools/vvl/vvl.sh"); vv=(VVL_NO_WSI=1); }
+    [ $XR = 1 ] && vv+=(LARECOMP_STEREO_DUMP_XR=1 MOCK_XR_SHOT_REQ="$S/eyes/xr.req")
+    [ -n "$BBIN" ] && { [ "$label" = base ] || [ "$label" = noise ]; } && sbin=$BBIN
     take_lock
     echo "mv_check: session $label: $*  (${#SPOTS[@]} spots)"
     local t0; t0=$(date +%s)
@@ -213,7 +223,7 @@ run_session() {   # <label> <env words...>   (a session: one game, every spot)
             LARECOMP_LOG_PACE=1 LARECOMP_FPS_INTERVAL=2 LARECOMP_WINDOW_SHOT=$LAST LARECOMP_SHOT_PATH="$ROOT/window_last.png" LARECOMP_EXIT_AFTER_SHOT=1 \
             XR_RUNTIME_JSON="$MOCK_JSON" LARECOMP_XR=1 LARECOMP_XR_HZ=90 MOCK_XR_HZ=90 MOCK_XR_EYE_SIZE="$EYE" \
             MOCK_XR_POSE="$POSE" MOCK_XR_SECONDS=0 "${vv[@]}" \
-            timeout 570 nice -n 5 "${runner[@]}" "$BIN" extracted > "$S/run.log" 2>&1
+            timeout 570 nice -n 5 "${runner[@]}" "$sbin" extracted > "$S/run.log" 2>&1
         echo "rc=$?" >> "$S/run.log"
     ) &
     CHILD=$!
@@ -235,12 +245,13 @@ for c in "${CAND_MORE[@]}"; do   # (more candidates: each its own session, compa
     cp "$OUT/spots.tsv" "$V/"; sed "s/^cand\t.*/cand\t$c/" "$OUT/sessions.tsv" > "$V/sessions.tsv"
     k=$((k + 1))
 done
-"$PY" -I "$SELF/mv_check.py" "$OUT" --limit "$LIMIT" --mode "$MODE: $BASE_TXT vs $CAND_TXT (bin $BIN)"
+XRA=(); [ $XR = 1 ] && XRA=(--xr)
+"$PY" -I "$SELF/mv_check.py" "$OUT" "${XRA[@]}" --limit "$LIMIT" --mode "$MODE: $BASE_TXT vs $CAND_TXT (bin $BIN)"
 rc=$?
 k=2
 for c in "${CAND_MORE[@]}"; do
     echo "mv_check: cand$k ($c):"
-    "$PY" -I "$SELF/mv_check.py" "$OUT/vs-cand$k" --limit "$LIMIT" --mode "$MODE: $BASE_TXT vs $c (bin $BIN)" || rc=1
+    "$PY" -I "$SELF/mv_check.py" "$OUT/vs-cand$k" "${XRA[@]}" --limit "$LIMIT" --mode "$MODE: $BASE_TXT vs $c (bin $BIN)" || rc=1
     k=$((k + 1))
 done
 exit $rc

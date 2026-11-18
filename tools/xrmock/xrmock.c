@@ -44,6 +44,10 @@
 //   MOCK_XR_SHOT_VIEW=1      with MOCK_XR_SHOT: also f<frame>_view.png, what the left eye sees (half size): its projection
 //                            image with the quad layers over it in order, each where its pose puts it (nearest sample)
 //   MOCK_XR_SHOT_DIR=<dir>   where (default .): f<frame>_proj<layer>_eye<0|1>.png, f<frame>_quad<layer>.png
+//   MOCK_XR_SHOT_REQ=<file>  a shot the app asks for: when <file> exists (its first line a path prefix), the projection
+//                            layer's eye images of the MOCK_XR_SHOT_REQ_DELAY'th frame ended after it (4) are written to
+//                            <prefix>_eye<0|1>.png and the file is removed (the game's LARECOMP_STEREO_DUMP_XR: the eye
+//                            images as the headset gets them, Table Edge applied, at its own dump frames)
 //   MOCK_XR_SHIFT=<file>     per refresh, the projection layer's pose against the head's at the display time; per new
 //                            eye image, its content's shift against a reference image, measured without stalling the
 //                            loop (tools/xrmock/shift-report.py, step-report.py)
@@ -280,6 +284,9 @@ static double gDeadlineMs = -1;
 static int gMaxFrames = 0;
 static const char* gShotDir = ".";
 static char gShotSpec[256] = "";
+static const char* gShotReq;     // MOCK_XR_SHOT_REQ
+static char gShotReqPath[400];   // (the asked shot's prefix, while it waits)
+static int gShotReqWait = -1;    // (frames still to end before it is taken; -1: none asked)
 
 static int shotWanted(int frame) {
     if (!gShotSpec[0]) return 0;
@@ -1456,6 +1463,16 @@ static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
     }
     int64_t end = nowNs();
     int frame = gBeginRec.id, want = shotWanted(frame);
+    char req[400] = "";  // (MOCK_XR_SHOT_REQ: this frame's projection images to that prefix)
+    if (gShotReq && gShotReqWait < 0) {
+        FILE* f = fopen(gShotReq, "r");
+        if (f) {
+            if (fgets(gShotReqPath, sizeof(gShotReqPath), f)) gShotReqPath[strcspn(gShotReqPath, "\r\n")] = 0, gShotReqWait = getenv("MOCK_XR_SHOT_REQ_DELAY") ? atoi(getenv("MOCK_XR_SHOT_REQ_DELAY")) : 4;
+            fclose(f);
+            remove(gShotReq);
+        }
+    }
+    if (gShotReqWait >= 0 && gShotReqWait-- == 0) snprintf(req, sizeof(req), "%s", gShotReqPath);
     if (ei->displayTime != gBeginRec.predicted) warnf("xrEndFrame displayTime differs from the predicted time of its xrWaitFrame (%+.3f ms)", (double)(ei->displayTime - gBeginRec.predicted) / 1e6);
     if (ei->environmentBlendMode != XR_ENVIRONMENT_BLEND_MODE_OPAQUE) xrmock_error("xrEndFrame blend mode %d not offered", (int)ei->environmentBlendMode);
     char buf[1024] = "";
@@ -1496,6 +1513,14 @@ static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
                 if (want) {
                     snprintf(nm, sizeof(nm), "proj%u_eye%u", i, v);
                     shot(frame, c, &pv->subImage, nm);
+                }
+                if (req[0] && c && c->lastReleased >= 0) {
+                    char path[512], stats[160] = "";
+                    snprintf(path, sizeof(path), "%s_eye%u.png", req, v);
+                    int rc = mockvk_dump_png(c->images, c->lastReleased, pv->subImage.imageArrayIndex, pv->subImage.imageRect.offset.x,
+                                             pv->subImage.imageRect.offset.y, pv->subImage.imageRect.extent.width, pv->subImage.imageRect.extent.height,
+                                             path, stats, sizeof(stats));
+                    trace("shot (asked) %s %s %s", path, rc ? "FAILED" : "ok", stats);
                 }
             }
             strcat(buf, "]");
@@ -1911,6 +1936,7 @@ static void init(void) {
     if ((v = getenv("MOCK_XR_CANT"))) gCant = (float)atof(v) * D2R;
     if ((v = getenv("MOCK_XR_SHOT"))) snprintf(gShotSpec, sizeof(gShotSpec), "%s", v);
     if ((v = getenv("MOCK_XR_SHOT_DIR"))) gShotDir = v;
+    if ((v = getenv("MOCK_XR_SHOT_REQ")) && *v) gShotReq = v;
     if ((v = getenv("MOCK_XR_VK_MAX"))) {
         unsigned a = 1, b = 3;
         if (sscanf(v, "%u.%u", &a, &b) == 2) mockvk_set_max_api(a, b);

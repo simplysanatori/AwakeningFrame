@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """mv_check.py: the comparator of tools/mv_check.sh (promoted from an earlier comparison script).
 
-mv_check.py OUT [--limit PCT] [--thr N] [--mode LABEL]
+mv_check.py OUT [--limit PCT] [--thr N] [--mode LABEL] [--xr]
 
 OUT is a mv_check.sh output folder: spots.tsv (index, name, dump frame), and per session (base, cand, optionally
 noise) a folder <session>/ holding eyes/stereo_<frame>_{eye0,eye1,hud}.png and run.log; sessions.tsv names them
@@ -21,6 +21,8 @@ def opt(name, default):
 LIMIT = opt('--limit', 1.5)      # % of pixels allowed to differ (the floor below it is the run-to-run noise)
 THR = opt('--thr', 24)           # a channel difference over this (of 255) counts
 MODE = opt('--mode', 'v1 vs MV')
+XR = '--xr' in args   # the eye images as the runtime got them (stereo_<frame>_xr_eye<n>.png), not the eye outputs
+if XR: args.remove('--xr')
 OUT = args[0]
 
 def rd(name):
@@ -32,6 +34,7 @@ sess = {r[0]: r[1] if len(r) > 1 else '' for r in rd('sessions.tsv')}
 BASE, CAND, NOISE = 'base', 'cand', 'noise'
 
 def img(sn, frame, what):
+    if XR and what.startswith('eye'): what = 'xr_' + what
     p = f'{OUT}/{sn}/eyes/stereo_{frame:05d}_{what}.png'
     return Image.open(p).convert('RGB') if os.path.exists(p) else None
 
