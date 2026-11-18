@@ -183,8 +183,10 @@ bool xr_session_create(void) {
     return true;
 }
 
-// The display's refresh: LARECOMP_XR_HZ (120 by default: two refreshes per 60 Hz game frame). SteamVR on the Frame
-// lists only the rate it runs at; the launch wrapper sets the per-app rate (preferredRefreshRate) before the start.
+// The display's refresh: LARECOMP_XR_HZ (120 by default: two refreshes per 60 Hz game frame; when it is not set and the
+// runtime offers no 120, 90: the game held at 30 shows every frame for three). SteamVR on the Frame lists only the rate
+// it runs at and refuses even that; the launch wrapper sets the per-app rate (preferredRefreshRate) before the start.
+// SteamVR on a PC takes the rate from its own settings (docs/af/PCVR.md); runtimes that take requests get this one.
 static void request_refresh_rate(void) {
     g_xr.display_hz = 0;
     if (!g_xr.has_refresh_fb) return;
@@ -195,8 +197,9 @@ static void request_refresh_rate(void) {
         for (uint32_t i = 0; i < n && i < 16; i++) snprintf(list + strlen(list), sizeof list - strlen(list), " %.0f", rates[i]);
     const char *e = getenv("LARECOMP_XR_HZ");
     float want = e ? (float)atof(e) : 120.0f;
-    bool offered = false;
-    for (uint32_t i = 0; i < n && i < 16; i++) offered |= fabsf(rates[i] - want) < 0.5f;
+    bool offered = false, has90 = false;
+    for (uint32_t i = 0; i < n && i < 16; i++) offered |= fabsf(rates[i] - want) < 0.5f, has90 |= fabsf(rates[i] - 90) < 0.5f;
+    if (!e && !offered && has90) want = 90, offered = true;
     XrResult r = offered ? p_xrRequestDisplayRefreshRateFB(g_xr.session, want) : XR_ERROR_DISPLAY_REFRESH_RATE_UNSUPPORTED_FB;
     float now = 0;
     if (p_xrGetDisplayRefreshRateFB && XR_SUCCEEDED(p_xrGetDisplayRefreshRateFB(g_xr.session, &now))) g_xr.display_hz = now;

@@ -19,11 +19,17 @@ import sys
 
 from PIL import Image, ImageChops, ImageDraw, ImageStat
 
+def nominal_fps(hz):
+    """The game's rate at a display rate (runtime/xr/hz_filter.h hz_rule): held at 30 at a multiple of 30 Hz that is not one
+    of 60 (90), else 60 (60, 120, and the uneven 72, 80, 144)."""
+    return 30 if hz % 60 and hz % 30 == 0 else 60
+
+
 # ---- thresholds (docs/af/TOUR.md explains each)
 SETTLE_S = 4.0           # seconds after a warp the timing window starts at the latest (else 1 s after the level's request object: loaded)
 SETTLE_LOADED_S = 1.0
 SHOT_SETTLE_S = 5.0      # a screenshot must be taken at least this long after the warp
-SLOW_FPS = 0.92          # game fps below this share of nominal (the game runs at 30 fps below 100 Hz, else 60)
+SLOW_FPS = 0.92          # game fps below this share of nominal (nominal_fps: 30 at 90 Hz, else 60)
 SLOW_SETS = 0.90         # sets shown per second below this share of the nominal game fps
 SLOW_MISSED = 2.0        # percent of refreshes missed
 SLOW_HITCHES = 3         # game frames over 1.5x nominal in a window
@@ -519,7 +525,7 @@ def build_report(out, keep_raw=False):
     for S in timing_S:
         if str(S['hz']) not in hzs:
             hzs.append(str(S['hz']))
-    nominal_of = {h: 30 if int(h) < 100 else 60 for h in hzs}
+    nominal_of = {h: nominal_fps(int(h)) for h in hzs}
     for spot in spots:
         i = spot['idx']
         spot['hz'] = {}
@@ -527,7 +533,7 @@ def build_report(out, keep_raw=False):
             spot['hz'][str(S['hz'])] = window_metrics(S, i, nominal_of[str(S['hz'])])
         spot['vvl'] = None
         for S in vvl_S:
-            m = window_metrics(S, i, 30 if S['hz'] < 100 else 60)
+            m = window_metrics(S, i, nominal_fps(int(S['hz'])))
             spot['vvl'] = {'vuids': m['vuids'] if m else None, 'unique': sorted({re.search(r'\[ ([\w-]+) \]', l).group(1) for t, l in S['vuids']
                                                                                  if re.search(r'\[ ([\w-]+) \]', l)
                                                                                  and S['windows'].get(i) and S['windows'][i][0] <= t < S['windows'][i][2]})}

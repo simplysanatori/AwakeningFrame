@@ -18,8 +18,6 @@
 
 void vi_external_vsync(uint64_t now_ns);  // runtime/hle/vi.c
 
-#define GAME_PERIOD_NS 16666667ll  // the game's vsync: 60 Hz
-
 static struct {  // (XR thread; the presenting thread's fields under g_xr.mu)
     uint64_t refreshes, missed, vsyncs, released, gpu_late, reshown, no_render;
     uint64_t waits, wait_ns, skipped;  // presenting thread: xr_set_begin waits for the last set's release
@@ -293,7 +291,7 @@ static void *xr_thread(void *arg) {
     (void)arg;
     plat_thread_realtime(8333333);
     plat_thread_perf_core(PLAT_PERF_VSYNC);
-    int64_t last_d = 0, acc = 0;
+    int64_t last_d = 0;
     uint64_t frame_no = 0;
     uint64_t stats_at = plat_now_ns();
     while (!g_xr.stop) {
@@ -336,41 +334,48 @@ static void *xr_thread(void *arg) {
                 blips_logged = hzf.rejected, blip_log_ns = now;
             }
         }
-        {   // below 100 Hz (90): the game held in its 30 fps mode (pace.c pace_xr_lock); 120 Hz: 60 as the pacer decides.
-            // LARECOMP_XR_FPS=60 (a test): below 100 Hz the pacer decides too, with a 16.67 ms game frame.
-            // About 60 Hz (SteamVR throttling 120 Hz, framesToThrottle=1): 60 as the pacer decides, one refresh a frame
-            // LARECOMP_XR_FPS=30 (a test): at 100 Hz and up too the game held at 30 fps (4 refreshes a frame at 120), as the
-            // pacer holds it on the headset when the GPU frame does not fit 60; the pacer's 120 Hz budgets stay
-            static int locked = -1;
+        // The game's rate at the display's (hz_filter.h hz_rule): 60 FPS at a multiple of 60 Hz, held at 30 FPS at a
+        // multiple of 30 (90), 60 FPS with an uneven cadence at the others (72, 80, 144). LARECOMP_XR_FPS=60 (a test):
+        // 60 FPS at 90 Hz too, uneven; =30 (a test): held at 30 at 120 Hz too, as the pacer holds it on the headset when
+        // the GPU frame does not fit 60, the pacer's 120 Hz budgets kept. The VR tab's Refresh Rate changes the 90 Hz
+        // choice while the game runs (xr_set_game_fps).
+        static HzCadence cad;
+        {
+            static int locked_key = -1;
             static int test60 = -1, test30 = -1;
             if (test60 < 0) test60 = getenv("LARECOMP_XR_FPS") && atoi(getenv("LARECOMP_XR_FPS")) == 60;
             if (test30 < 0) test30 = getenv("LARECOMP_XR_FPS") && atoi(getenv("LARECOMP_XR_FPS")) == 30;
             int fr = __atomic_exchange_n(&g_fps_req, -1, __ATOMIC_ACQ_REL);
             if (fr >= 0 && (fr == 60) != (test60 == 1)) test60 = fr == 60, LOG("[xr] game frame rate at 90 Hz: %s (VR settings)\n", test60 ? "60 fps (test)" : "30 fps");
-            bool hz60 = g_xr.display_hz > 0 && g_xr.display_hz < 75;
-            int want = hz60 ? 1 : g_xr.display_hz < 100 ? (test60 ? 60 : 30) : test30 ? 31 : 0;  // (1: 60 fps at 60 Hz; 31: the 30 test)
-            if (want != locked) {
-                pace_xr_lock(want == 30 || want == 31 ? 30 : 0);
-                pace_xr_frame_ms(want == 30 ? 0 : want == 60 ? 1e3 / 60 : (want == 1 ? 1e3 : 2e3) / g_xr.display_hz);
-                if (want == 60) LOG("[xr] test: 60 fps at %.0f Hz (uneven cadence)\n", g_xr.display_hz);
-                if (want == 31) LOG("[xr] test: the game held at 30 fps (LARECOMP_XR_FPS=30)\n");
-                LOG("[xr] display at %.0f Hz: the game %s\n", g_xr.display_hz, want == 30 ? "held at 30 fps (3 refreshes a frame)" : want == 31 ? "held at 30 fps (4 refreshes a frame)" : want == 60 ? "at 60 fps (1 or 2 refreshes a frame)" : want == 1 ? "at 60 fps (1 refresh a frame)" : "at 60 fps (2 refreshes a frame)");
-                locked = want;
+            HzRule rule = hz_rule(g_xr.display_hz, test60 ? 60 : test30 ? 30 : 0);
+            int key = (int)lroundf(g_xr.display_hz * 10) * 4 + test60 * 2 + test30;
+            if (key != locked_key) {
+                pace_xr_lock(rule.hold30 ? 30 : 0);
+                pace_xr_frame_ms(rule.frame_ms);
+                hz_cadence_set(&cad, &rule);
+                float per = rule.hold30 ? g_xr.display_hz / 30 : g_xr.display_hz / 60;
+                if (test60) LOG("[xr] test: 60 fps at %.0f Hz (uneven cadence)\n", g_xr.display_hz);
+                if (test30 && rule.hold30) LOG("[xr] test: the game held at 30 fps (LARECOMP_XR_FPS=30)\n");
+                if (rule.even) LOG("[xr] display at %.0f Hz: the game %s fps (%.0f refresh%s a frame)\n", g_xr.display_hz,
+                                   rule.hold30 ? "held at 30" : "at 60", per, per < 1.5f ? "" : "es");
+                else LOG("[xr] display at %.0f Hz: the game %s fps, %d or %d refreshes a frame (uneven: 120 Hz gives 60 fps "
+                         "and 90 Hz 30 fps evenly)\n", g_xr.display_hz, rule.hold30 ? "held at 30" : "at 60", (int)per,
+                         (int)per + 1);
+                locked_key = key;
             }
         }
         xr_input_frame();  // the controllers, once per refresh, just before the game's vsync
         pose_log(fs.predictedDisplayTime);
-        // The game's 60 Hz vsync from the display's refreshes: every second one at 120 Hz, two of three at 90 Hz (by
-        // display time, so a missed refresh doesn't slow the game down). The frame starting now is shown two refreshes on.
+        // The game's 60 Hz vsync from the display's refreshes (hz_cadence_step): every second one at 120 Hz, two of three
+        // at 90 Hz, by time at the uneven rates (by display time, so a missed refresh doesn't slow the game down). The
+        // frame starting now is shown two refreshes on.
         int64_t step = last_d ? fs.predictedDisplayTime - last_d : period;
-        if (last_d && step > period * 3 / 2) st.missed += (uint64_t)((step + period / 2) / period) - 1;
-        if (step > 100000000) step = period;  // (a pause: start over)
+        int64_t n_ref = last_d ? (step + period / 2) / period : 1;
+        if (last_d && step > period * 3 / 2) st.missed += (uint64_t)n_ref - 1;
+        if (step > 100000000) step = period, n_ref = 1;  // (a pause: start over)
         last_d = fs.predictedDisplayTime;
         st.refreshes++;
-        acc += step;
-        if (acc >= GAME_PERIOD_NS - 500000) {
-            acc -= GAME_PERIOD_NS;
-            if (acc > GAME_PERIOD_NS) acc = 0;
+        if (hz_cadence_step(&cad, step, n_ref < 1 ? 1 : (int)n_ref)) {
             atomic_store(&g_xr.target_time, fs.predictedDisplayTime + 2 * period);
             vi_external_vsync(now);
             st.vsyncs++;
