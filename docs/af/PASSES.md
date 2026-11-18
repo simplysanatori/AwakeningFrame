@@ -85,9 +85,59 @@ diet parts alone, and Tail Cave reached from the house were all clean. A profili
 
 Not done: AO / bloom at half size (they already are, see above); the idle gap - `LARECOMP_CHUNK_PASSES=4` made it longer
 (eye 0 16.2 vs 15.0 ms at Mabe), it is the render thread translating eye 0, not the chunking.
-Left for later: the scene -> RGBA16F copy (0.45 ms per eye) and the full-size depth copy (0.15) whose readers are not in
-the profiled frame (the next frame's water, or the menus' backdrop?); the depth prepass (1.2 ms per eye: Turnip's LRZ
-may make it redundant, but the main pass tests depth EQUAL against it).
+Left for later: the depth prepass (1.2 ms per eye: Turnip's LRZ may make it redundant, but the main pass tests depth
+EQUAL against it). The copies' readers are in "Clears and copies" below.
+
+## Clears and copies (VR mode only)
+
+What a game frame asks of the GPU, counted, and three savings on the clears and copies it holds, each behind its own
+switch (`vr_diet.c` `vr_saving`; the `[diet] VR savings:` line at start names the ones on).
+
+Tools:
+- `LARECOMP_PASSLOG=<frame>[,<frame>...]` (`passlog.c`; `LARECOMP_PASSLOG_FRAMES`, default 2): `[plog]` lines for
+  every pass (size, attachments, load ops, view mask, draws), clear, copy, snapshot and dispatch of those frames.
+  `tools/passlog.py run.log [--md] [--counts] [--frame N]` makes the per-pass and per-copy tables and the counts.
+- `LARECOMP_COPY_READERS=1`: every 10 s a `[copyread]` line per kind of copy: whether the destination was read (in the
+  same frame, the next, later) or overwritten first, and by whom, over the whole run.
+- `tools/mv_check.sh --mode env --base-env '...' --cand-env '...' [--cand-env '...'] [--env '...'] [--more]`: a switch
+  on and off, several candidates against one base and noise run; `--base-only` for an audit run.
+
+Mabe at frame 1320 (Frame-like profile, 1728² eyes): 41 passes (37 multiview), 15 of them only clears, 1087 draws, 14
+copies (7 full-size layer copies), 5 dispatches. The copies and their readers over a whole run:
+- main depth -> depth copy A: read by the water (Mabe; rarely in Tail Cave).
+- main depth -> depth copy B: its depth is cleared right after (stencil kept) and nothing reads it.
+- scene -> RGBA16F: read only at Mabe (~3 frames in 4); its source is cleared at the next frame's start, before the next
+  copy, so a lazy copy would be made at that clear anyway; formats differ, so no alias.
+- window image -> the presented texture (full size): never read in VR gameplay (the HUD clone is presented).
+- window image -> thumbnails (682x154, 777x243) -> 136x30 / 155x48: the last ones never read; small.
+
+The savings (all VR only, flat unchanged; on by default: the deferral and the alias):
+- `LARECOMP_VR_CLEAR_DEFER` (on; `0` off; it turns `LARECOMP_VR_CLEAR_FOLD` on, and `LARECOMP_VR_CLEAR_FOLD=0` turns
+  both off): a pass that only clears is not begun. Its clears wait and become the load op of the next pass on the same
+  view, view mask and area; otherwise they are made, as the pass they were, before anything else touches the texture
+  (a draw sampling it, a copy, a dispatch, an upload, the eye composite, weather, the end of each eye's list).
+  Mabe 41 -> 35 passes, forest 44 -> 37, house 31 -> 28, Tail Cave 38 -> 34; full-size passes at Mabe 14 -> 8.
+- `LARECOMP_VR_CLEAR_FOLD=1` alone (off by default): the pass begin waits for its first draw, so a whole clear before
+  it becomes that attachment's load op, and a pass with nothing in it is not recorded. It removes no pass by itself
+  (every empty pass holds a clear); PLAN 3.4 found load ops alone gain nothing on Turnip.
+- `LARECOMP_VR_COPY_ALIAS` (on; `0` off): the flat mode's depth copy alias (`LARECOMP_VK_COPY_OPT`) in a multiview
+  run: both layers of a layered texture at once, never with per-eye twins. At Mabe depth copy A becomes a rename at
+  the main depth's next clear and copy B a stencil-only copy at its own depth clear (7 -> 4 full-size layer copies).
+  In the forest the main depth is written after copy A, so A is copied then (no saving there).
+- `LARECOMP_VR_PRESENT_COPY=1` (off by default): the game's copy of its window image into the texture it presents is
+  left out while the HUD clone is presented (one full-size copy a frame). Off: the window is not compared by the image
+  checks, and the frames that present the texture itself (warps, loading) are not covered.
+
+Checked with `mv_check --mode env --more` (eight spots: Mabe, forest, the house, Tail Cave, the beach, the menu open at
+Mabe, in the house and in Tail Cave; the Frame-like profile `tools/frame_profile.env` + `frame_profile_copies.env`):
+the deferral and the alias each alone, and all four together, pass at every spot, both eyes; again with Table Edge
+Fade and Surroundings Backdrop, and in rain and snow at Mabe (one menu spot in rain failed by 0.1 % on chickens and a fox
+standing elsewhere: the game is not deterministic). The fold alone and the present copy alone failed spots the same
+way, on moving actors. Under the validation layer, a tour with all four on and the eye size stepping through 1152,
+1536 and 1680 gives the same messages as with all four off. `LARECOMP_CHUNK_PASSES=0` passes too.
+`LARECOMP_SHADOW_SCALE=0.5` changes the image (shadow edges: 11 % of the forest's pixels).
+Only the headset can show: the time saved (PLAN 3.4: load ops alone gained nothing on Turnip), the held pass begin with
+foveation's shading-rate attachment or Valve's density map layer (this desktop has no foveation), and Turnip's tiles.
 
 ## Dynamic eye resolution (off by default)
 

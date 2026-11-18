@@ -35,7 +35,7 @@ falls back to it for the lists it can't do in one run.
   once, in eye 0, and shared. Compute, counters and read-backs run in eye 0 only.
 - **Twins** (`vk_stereo_swap`): while eye 1 runs, each twinned texture's `backend` is its eye-1 image. Each swap bumps
   `vk_view_gen`, because the texture memo and cached descriptor sets would otherwise hand eye 1 the views of eye 0.
-  Copy aliases are off.
+  Copy aliases are made only in a multiview run, on layered textures (`LARECOMP_VR_COPY_ALIAS`, on by default; [PASSES](PASSES.md) "Clears and copies").
 - **Camera:** this is the free-camera probe's substitution, done once per eye. Kind `CAM_STEREO` rewrites the 320-byte
   camera: floats 0-47, the rotation block 48-63, back (64-67) and eye position (68-71). It finds them by matching the
   game's own axes at the latch. Every other block that holds the camera's matrices or eye position is rewritten too

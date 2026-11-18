@@ -149,15 +149,19 @@ bool vr_saving(int what) {
     if (mask < 0) {
         static const struct { int bit; const char *env; int def; } sw[] = {
             {VR_CLEAR_FOLD, "LARECOMP_VR_CLEAR_FOLD", 0},
-            {VR_COPY_ALIAS, "LARECOMP_VR_COPY_ALIAS", 0},
+            {VR_COPY_ALIAS, "LARECOMP_VR_COPY_ALIAS", 1},
             {VR_PRESENT_COPY, "LARECOMP_VR_PRESENT_COPY", 0},
-            {VR_CLEAR_DEFER, "LARECOMP_VR_CLEAR_DEFER", 0},
+            {VR_CLEAR_DEFER, "LARECOMP_VR_CLEAR_DEFER", 1},
         };
+        // On by default: the deferral and the alias (image-equal at every checked spot, docs/af/PASSES.md). Off: the
+        // fold alone (removes no pass) and the present copy (the window is not covered by the image checks).
         mask = 0;
         for (size_t i = 0; i < sizeof sw / sizeof sw[0]; i++) {
             const char *e = getenv(sw[i].env);
             if (e && *e ? atoi(e) != 0 : sw[i].def) mask |= sw[i].bit;
         }
+        const char *f = getenv("LARECOMP_VR_CLEAR_FOLD");
+        if (f && *f && !atoi(f)) mask &= ~VR_CLEAR_DEFER;   // (LARECOMP_VR_CLEAR_FOLD=0: no held begin, so no deferral)
         if (mask & VR_CLEAR_DEFER) mask |= VR_CLEAR_FOLD;  // (the deferral takes back the held begin)
         if (!stereo_wanted()) mask = 0;
         LOG("[diet] VR savings:%s%s%s%s%s (LARECOMP_VR_CLEAR_FOLD, _CLEAR_DEFER, _COPY_ALIAS, _PRESENT_COPY)\n",
