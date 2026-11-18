@@ -135,7 +135,9 @@ static bool pick_format(void) {
     return bgra || rgba;
 }
 
-bool xr_chain_create(XrChain *c, const char *what, uint32_t w, uint32_t h) {
+bool xr_chain_create(XrChain *c, const char *what, uint32_t w, uint32_t h) { return xr_chain_create_layers(c, what, w, h, 1); }
+
+bool xr_chain_create_layers(XrChain *c, const char *what, uint32_t w, uint32_t h, uint32_t layers) {
     VkFormat vf[2] = {(VkFormat)chain_fmt, chain_view_fmt};
     XrVulkanSwapchainFormatListCreateInfoKHR fl = {.type = XR_TYPE_VULKAN_SWAPCHAIN_FORMAT_LIST_CREATE_INFO_KHR,
                                                    .viewFormatCount = 2, .viewFormats = vf};
@@ -144,12 +146,12 @@ bool xr_chain_create(XrChain *c, const char *what, uint32_t w, uint32_t h) {
                                               XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT |
                                               XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT,
                                 .format = chain_fmt, .sampleCount = 1, .width = w, .height = h, .faceCount = 1,
-                                .arraySize = 1, .mipCount = 1};
+                                .arraySize = layers, .mipCount = 1};
     vk_queue_lock();  // (a runtime may use the queue to set the images up: the mock does)
     XrResult cr = XR_RT(p_xrCreateSwapchain(g_xr.session, &ci, &c->sc));
     vk_queue_unlock();
     if (!xr_ok_(cr, "xrCreateSwapchain")) return false;
-    c->fmt = chain_fmt, c->view_fmt = chain_view_fmt, c->w = w, c->h = h;
+    c->fmt = chain_fmt, c->view_fmt = chain_view_fmt, c->w = w, c->h = h, c->layers = layers;
     XrSwapchainImageVulkan2KHR im[8];
     for (int i = 0; i < 8; i++) im[i] = (XrSwapchainImageVulkan2KHR){.type = XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR};
     uint32_t n = 0;
@@ -159,11 +161,12 @@ bool xr_chain_create(XrChain *c, const char *what, uint32_t w, uint32_t h) {
     c->count = n;
     for (uint32_t i = 0; i < n; i++) {
         c->img[i] = im[i].image;
-        VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = c->img[i], .viewType = VK_IMAGE_VIEW_TYPE_2D,
-                                    .format = c->view_fmt, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = c->img[i],
+                                    .viewType = layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D,
+                                    .format = c->view_fmt, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers}};
         if (vkCreateImageView(g_xr.vdev, &vi, NULL, &c->view[i]) != VK_SUCCESS) { LOG("[xr] %s image view failed\n", what); return false; }
     }
-    LOG("[xr] %s swapchain %ux%u, %u images\n", what, w, h, n);
+    LOG("[xr] %s swapchain %ux%u%s, %u images\n", what, w, h, layers > 1 ? " x 2 layers (both eyes)" : "", n);
     return true;
 }
 
@@ -442,35 +445,43 @@ bool xr_reshow_views(int k, XrEyeView out[2]) {
 }
 
 bool xr_reshow_target(int k, int eye, XrEyeTarget *out) {
-    if (!g_xr.in_set || k < 1 || k > XR_RESHOW_MAX || eye < 0 || eye > 1) return false;
+    if (!g_xr.in_set || k < 1 || k > XR_RESHOW_MAX || eye < -1 || eye > 1) return false;
     XrSet *s = &g_xr.building;
-    int i = k - 1;
+    int i = k - 1, layered = eye < 0;
     if (!g_xr.rs[0][i][0].sc) {  // (both pairs and eyes at once: the next set uses the other pair)
         static bool failed[XR_RESHOW_MAX];
         if (failed[i]) return false;
         for (int p = 0; p < 2; p++)
-            for (int e = 0; e < 2; e++)
-                if (!xr_chain_create(&g_xr.rs[p][i][e], e ? "re-shown right eye" : "re-shown left eye", g_xr.eyes[p][e].w, g_xr.eyes[p][e].h)) {
+            for (int e = 0; e < (layered ? 1 : 2); e++)
+                if (!xr_chain_create_layers(&g_xr.rs[p][i][e], layered ? "re-shown eyes" : e ? "re-shown right eye" : "re-shown left eye",
+                                            g_xr.eyes[p][0].w, g_xr.eyes[p][0].h, layered ? 2 : 1)) {
                     LOG("[xr] no swapchains for re-shown refresh %d: those refreshes show the set's own images\n", k);
                     failed[i] = true;
                     return false;
                 }
-        LOG("[xr] swapchains for re-shown refresh %d: 2 pairs x 2 eyes of %ux%u, %u images each (%.0f MB)\n", k, g_xr.eyes[0][0].w,
-            g_xr.eyes[0][0].h, g_xr.rs[0][i][0].count, 4.0 * g_xr.rs[0][i][0].count * g_xr.eyes[0][0].w * g_xr.eyes[0][0].h * 4 / 1048576.0);
+        LOG("[xr] swapchains for re-shown refresh %d: 2 pairs x 2 eyes of %ux%u%s, %u images each (%.0f MB)\n", k, g_xr.eyes[0][0].w,
+            g_xr.eyes[0][0].h, layered ? " (one image of 2 layers a pair)" : "", g_xr.rs[0][i][0].count,
+            4.0 * g_xr.rs[0][i][0].count * g_xr.eyes[0][0].w * g_xr.eyes[0][0].h * 4 / 1048576.0);
     }
-    XrChain *c = &g_xr.rs[s->pair][i][eye];
-    if (!s->rs_has[i][eye]) {
-        if (!xr_chain_acquire(c, &s->rs_img[i][eye])) return false;
-        s->rs_has[i][eye] = true;
+    if ((g_xr.rs[0][i][0].layers > 1) != layered) return false;  // (made the other way this session)
+    int e = layered ? 0 : eye;
+    XrChain *c = &g_xr.rs[s->pair][i][e];
+    if (!s->rs_has[i][e]) {
+        if (!xr_chain_acquire(c, &s->rs_img[i][e])) return false;
+        s->rs_has[i][e] = true;
     }
-    *out = (XrEyeTarget){c->img[s->rs_img[i][eye]], c->view[s->rs_img[i][eye]], c->view_fmt, {c->w, c->h}};
+    *out = (XrEyeTarget){c->img[s->rs_img[i][e]], c->view[s->rs_img[i][e]], c->view_fmt, {c->w, c->h}};
     return true;
 }
 
-void xr_reshow_ready(int k) {
+void xr_reshow_ready(int k, uint64_t seq, uint32_t w, uint32_t h) {
     if (!g_xr.in_set || k < 1 || k > XR_RESHOW_MAX) return;
     XrSet *s = &g_xr.building;
-    if (s->rs_has[k - 1][0] && s->rs_has[k - 1][1]) s->rs_ok[k - 1] = true, s->rs_n = s->rs_n > k ? s->rs_n : k;
+    int i = k - 1;
+    if (!s->rs_has[i][0] || (g_xr.rs[s->pair][i][0].layers < 2 && !s->rs_has[i][1])) return;
+    s->rs_ok[i] = true, s->rs_seq[i] = seq, s->rs_w[i] = w, s->rs_h[i] = h;
+    s->reads = s->reads > seq ? s->reads : seq;
+    s->rs_n = s->rs_n > k ? s->rs_n : k;
 }
 
 bool xr_eye_size(uint32_t *w, uint32_t *h) {

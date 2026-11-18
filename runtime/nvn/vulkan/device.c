@@ -1635,6 +1635,8 @@ void vk_frame_end(const char *shot_path) {
         image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         seq = vk_pending_seq();
         vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE);
+        extern void reproj_submit(void);  // (LARECOMP_XR_REPROJ: the set's re-shown refreshes, each a submission of its own)
+        reproj_submit();
         xr_set_submit(seq);
     } else
 #endif

@@ -10762,6 +10762,7 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
     st_ts_resolve();
     if (!g_eye_out_ok || !g_eye_out.backend) return 0;
     int drawn = 0, fresh = 0;
+    uint32_t filled[2][2] = {{0}};  // (each eye's rendered size as its XR image shows it: reproj.c)
     for (int eye = 0; eye < 2; eye++) {
         TexBackend *b = g_eye_out.backend;
         bool lay = vk_b_layered(b);  // (multiview storage: eye 1 is layer 1)
@@ -10803,6 +10804,8 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
         VkImageView src = raw_view_layer(b, ly);
         float sfx = fx, sfy = fy;
         bool post = vr_eye_post(cb, b, ly, ext.width, ext.height, fx, fy, &src, &sfx, &sfy);
+        bool up = post && (sfx != fx || sfy != fy);  // (upscaled into the XR image's size: the whole of it)
+        filled[eye][0] = up ? ext.width : (uint32_t)lroundf(b->width * fx), filled[eye][1] = up ? ext.height : (uint32_t)lroundf(b->height * fy);
         edge_color_override(eye, post ? src : VK_NULL_HANDLE, sfx, sfy);
         if (edge_eye(cb, eye, view, fmt, ext.width, ext.height)) { drawn |= 1 << eye; continue; }  // (the edge pass instead of the present draw)
         VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = view,
@@ -10833,8 +10836,8 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
     }
     if (drawn == 3) {
         stereo_set_views();  // (the layer: the poses these outputs were rendered with)
-        extern void reproj_eyes(VkCommandBuffer cb, bool new_outputs);  // (LARECOMP_XR_REPROJ: the set's re-shown refreshes)
-        reproj_eyes(cb, fresh == 3);
+        extern void reproj_eyes(bool new_outputs, const uint32_t filled[2][2]);  // (LARECOMP_XR_REPROJ: the set's re-shown refreshes)
+        reproj_eyes(fresh == 3, filled);
     }
     return drawn;
 }

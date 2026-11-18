@@ -130,7 +130,8 @@ int xr_set_views(const uint64_t id[2], const XrEyeView rendered[2]);
 //   fresh   (a test) the refreshes after a set's first carry a pose located for that refresh, on the same images: a
 //           compositor that reprojects by the layer's pose then pins them to the head; one that does not, changes nothing
 //   rot / pos / follow  the refreshes after the first get eye images of their own, drawn at the present from the set's
-//           for the head pose of each (rotation; and position from the scene depth; and the table's follow motion)
+//           for the head pose of each (rotation; and position from the scene depth; and the table's follow motion),
+//           each in a submission of its own after the set's
 enum { XR_REPROJ_OFF, XR_REPROJ_FRESH, XR_REPROJ_ROT, XR_REPROJ_POS, XR_REPROJ_FOLLOW };
 int xr_reproj_mode(void);
 void xr_set_reproj_mode(int mode);  // (the VR tab; any thread: the next set)
@@ -141,10 +142,12 @@ int xr_reshow_times(int64_t times[4]);
 // The views for refresh k (1..3) of those, from one xrLocateViews at times[k] in the set's space.
 bool xr_reshow_views(int k, XrEyeView out[2]);
 // Eye `eye`'s image for refresh k (its own swapchains, made on the first call for k: the memory of 2 pairs x 2 eyes).
+// eye -1: both eyes as the two layers of one image (LARECOMP_XR_REPROJ_MV); the view is then a 2D_ARRAY view.
 bool xr_reshow_target(int k, int eye, XrEyeTarget *out);
-// Both eyes of refresh k are drawn (in this set's submission): from its display time on the layer shows them with
-// the views of xr_reshow_views.
-void xr_reshow_ready(int k);
+// Both eyes of refresh k are recorded into submission `seq` (one after the set's own: device.c vk_frame_end, before
+// xr_set_submit), drawn into the top left w x h of their images. Once that submission is done the layer shows them
+// for refresh k with the views of xr_reshow_views; until then the newest finished image of the set stays up.
+void xr_reshow_ready(int k, uint64_t seq, uint32_t w, uint32_t h);
 // The latch's display time (the one its views were located for), 0 when it is gone.
 int64_t xr_latch_time(uint64_t id);
 // The eye swapchains' size (false before xr_start).

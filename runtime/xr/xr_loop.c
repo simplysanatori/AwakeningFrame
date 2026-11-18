@@ -31,10 +31,12 @@ static struct {  // (XR thread; the presenting thread's fields under g_xr.mu)
     uint64_t end_n, end_slow, lock_slow, end_sum_ns, end_max_ns;
     // (LARECOMP_XR_REPROJ) re-shown refreshes: with an image drawn for them, without one (none due, skipped as too
     // small a change, or past the last due: a late next set), and (fresh) with a pose located for them; past: shown later
-    // than the last refresh drawn for (the image of that one, a period or more old); a set's first refresh on the
-    // display time its poses were located for, a period or more later, or earlier; held: refreshes a finished set
-    // waited for its own (xr_release_completed)
-    uint64_t rs_drawn, rs_none, rs_fresh, rs_past, first_on, first_late, first_early, held;
+    // than the last refresh drawn for (the image of that one, a period or more old); fell: the image drawn for it not
+    // finished by then (the newest finished one shown); a set's first refresh on the display time its poses were
+    // located for, a period or more later, or earlier; held: refreshes a finished set waited for its own
+    // (xr_release_completed); rs_ahead: the drawn images found finished 2 or more, 1, 0 refreshes before the one
+    // they are for, or after it
+    uint64_t rs_drawn, rs_none, rs_fresh, rs_past, rs_fell, first_on, first_late, first_early, held, rs_ahead[4];
 } st;
 
 // LARECOMP_XR_REPROJ=off|fresh|rot|pos|follow (xr.h; docs/af/STEREO.md "Re-shown refreshes"); the VR tab sets it live
@@ -139,15 +141,40 @@ static void lead_note(const XrSet *s, XrTime pdt) {
     atomic_store(&g_xr.lead, lead);
 }
 
+// (LARECOMP_XR_REPROJ, mu held) a set's re-shown refreshes' images whose submission is done (all of them: `all`, the set
+// being replaced, whose submissions came before its successor's), released: from then on a layer may name them
+static void reshow_release(XrSet *s, uint64_t done, XrTime pdt, bool all) {
+    for (int k = 0; k < XR_RESHOW_MAX; k++) {
+        if ((!s->rs_has[k][0] && !s->rs_has[k][1]) || s->rs_rel[k] || (!all && s->rs_seq[k] > done)) continue;
+        for (int i = 0; i < 2; i++) if (s->rs_has[k][i]) xr_chain_release(&g_xr.rs[s->pair][k][i]);
+        s->rs_rel[k] = true;
+        if (s->rs_ok[k] && pdt && s->grid0 && s->period > 0 && !all) {  // (how early: refreshes before the one it is for)
+            int64_t d = s->grid0 + (k + 1) * s->period - pdt, m = d >= 0 ? (d + s->period / 2) / s->period : -((-d + s->period / 2) / s->period);
+            st.rs_ahead[m >= 2 ? 0 : m == 1 ? 1 : m == 0 ? 2 : 3]++;
+        }
+    }
+}
+
 // The pending set, once the GPU finished its submission: its images released, and it becomes the one shown. Also
 // while the session isn't running (no frames, pdt 0), so the presenting thread never waits on a display that isn't
 // there. (LARECOMP_XR_REPROJ rot / pos / follow) A set finished before the refresh its poses were located for waits for
 // it (at most XR_RESHOW_MAX + 1 refreshes): shown earlier, its images would be a refresh ahead of the head; the set
-// shown meanwhile has its own image for that refresh.
+// shown meanwhile has its own image for that refresh. The images drawn for its later refreshes are submissions of
+// their own after the set's: released each once its own is done, whether the set is pending or shown.
 void xr_release_completed(XrTime pdt) {
     pthread_mutex_lock(&g_xr.mu);
+    uint64_t done = vk_completed_seq();
+    if (g_xr.shown_any) reshow_release(&g_xr.shown, done, pdt, false);
+    if (g_xr.pending.valid) reshow_release(&g_xr.pending, done, pdt, false);
     if (g_xr.pending.valid) {
-        if (vk_completed_seq() >= g_xr.pending.seq) {
+        // (its redraws read its eye images: released only once they are submitted, as the runtime asks; the recorder
+        // has them microseconds after the set's own, which takes the GPU milliseconds. LARECOMP_XR_REPROJ_JOINT=1:
+        // only once they are done too, the timing of redraws in the set's own submission, a comparison and a fallback
+        // should a runtime read a released image while they still read it)
+        static int joint = -1;
+        if (joint < 0) joint = getenv("LARECOMP_XR_REPROJ_JOINT") && atoi(getenv("LARECOMP_XR_REPROJ_JOINT")) > 0;
+        uint64_t need = joint && g_xr.pending.reads > g_xr.pending.seq ? g_xr.pending.reads : g_xr.pending.seq;
+        if (done >= need && rec_submitted() >= g_xr.pending.reads) {
             XrSet *p = &g_xr.pending;
             if (pdt && !p->ready) p->ready = pdt, lead_note(p, pdt);
             if (pdt && p->grid0 && p->period > 0 && xr_reproj_mode() >= XR_REPROJ_ROT && 2 * (p->grid0 - pdt) > p->period &&
@@ -159,8 +186,8 @@ void xr_release_completed(XrTime pdt) {
             XrSet s = g_xr.pending;
             xr_chain_release(&g_xr.hud[s.pair]);
             for (int i = 0; i < 2; i++) if (s.has_eye[i]) xr_chain_release(&g_xr.eyes[s.pair][i]);
-            for (int k = 0; k < XR_RESHOW_MAX; k++)
-                for (int i = 0; i < 2; i++) if (s.rs_has[k][i]) xr_chain_release(&g_xr.rs[s.pair][k][i]);
+            // (the redraws of the set shown until now were submitted before this one's own submission: done)
+            if (g_xr.shown_any) reshow_release(&g_xr.shown, done, pdt, true);
             g_xr.shown = s;
             g_xr.shown_any = true;
             g_xr.pending.valid = false;
@@ -284,7 +311,8 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
                 int64_t d = fs->predictedDisplayTime - s->grid0;
                 k = d <= 0 ? 0 : (int)((d + s->period / 2) / s->period);
                 if (k > s->rs_n) k = s->rs_n, st.rs_past++;
-                while (k > 0 && !s->rs_ok[k - 1]) k--;
+                if (k > 0 && s->rs_ok[k - 1] && !s->rs_rel[k - 1]) st.rs_fell++;  // (its submission not done yet)
+                while (k > 0 && !(s->rs_ok[k - 1] && s->rs_rel[k - 1])) k--;
             }
             XrView fresh[2];
             int mode = xr_reproj_mode();
@@ -317,10 +345,15 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
                     atomic_store(&g_xr.lat_ns, l ? l + (lat - l) / 8 : lat);
                 }
             }
-            for (int i = 0; i < 2; i++)
+            for (int i = 0; i < 2; i++) {
+                // (a drawn refresh: both eyes may be the layers of one image, and only its top left part drawn)
+                bool lay = k && ch[0]->layers > 1;
+                const XrChain *c = lay ? ch[0] : ch[i];
+                uint32_t w = k ? s->rs_w[k - 1] : c->w, h = k ? s->rs_h[k - 1] : c->h;
                 pv[i] = (XrCompositionLayerProjectionView){
                     .type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW, .pose = views[i].pose, .fov = views[i].fov,
-                    .subImage = {ch[i]->sc, {{0, 0}, {(int32_t)ch[i]->w, (int32_t)ch[i]->h}}, 0}};
+                    .subImage = {c->sc, {{0, 0}, {(int32_t)w, (int32_t)h}}, lay ? (uint32_t)i : 0}};
+            }
             proj.space = s->space;
             // (LARECOMP_VR_EDGE=passthrough: the eye images carry premultiplied alpha, 0 in the void: runtime/nvn/vulkan/edge.c)
             if (s->alpha) proj.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
@@ -379,11 +412,16 @@ static void log_stats(double secs) {
         st.end_max_ns / 1e6, (unsigned long long)st.end_slow, (unsigned long long)st.lock_slow);
     if (st.rs_drawn + st.rs_none + st.rs_fresh)
         LOG("[xr] re-shown refreshes: %llu with images drawn for their pose (%llu of them past the last drawn for: the next "
-            "set late), %llu with the set's own (none drawn: skipped), %llu with a fresh pose on the set's images; a set's first "
-            "refresh: %llu on its grid line, %llu later, %llu earlier; %llu refreshes a finished set waited for its own (lead %d)\n",
-            (unsigned long long)st.rs_drawn, (unsigned long long)st.rs_past, (unsigned long long)st.rs_none,
-            (unsigned long long)st.rs_fresh, (unsigned long long)st.first_on, (unsigned long long)st.first_late,
-            (unsigned long long)st.first_early, (unsigned long long)st.held, atomic_load(&g_xr.lead));
+            "set late; %llu an older one: the image for theirs not finished), %llu with the set's own (none drawn: skipped; or "
+            "none finished), "
+            "%llu with a fresh pose on the set's images; a set's first refresh: %llu on its grid line, %llu later, %llu earlier; "
+            "%llu refreshes a finished set waited for its own (lead %d); drawn images found finished 2+ / 1 / 0 refreshes "
+            "before theirs, or after: %llu / %llu / %llu / %llu\n",
+            (unsigned long long)st.rs_drawn, (unsigned long long)st.rs_past, (unsigned long long)st.rs_fell,
+            (unsigned long long)st.rs_none, (unsigned long long)st.rs_fresh, (unsigned long long)st.first_on,
+            (unsigned long long)st.first_late, (unsigned long long)st.first_early, (unsigned long long)st.held,
+            atomic_load(&g_xr.lead), (unsigned long long)st.rs_ahead[0], (unsigned long long)st.rs_ahead[1],
+            (unsigned long long)st.rs_ahead[2], (unsigned long long)st.rs_ahead[3]);
     memset(&st, 0, sizeof st);
     pthread_mutex_unlock(&g_xr.mu);
 }

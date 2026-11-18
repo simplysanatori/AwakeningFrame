@@ -57,8 +57,9 @@ typedef struct {
     int64_t fmt;            // the swapchain's (sRGB) format
     VkFormat view_fmt;      // its UNORM twin
     uint32_t w, h, count;
+    uint32_t layers;        // array layers (2: both eyes, layer = eye; the re-shown refreshes' LARECOMP_XR_REPROJ_MV)
     VkImage img[8];
-    VkImageView view[8];
+    VkImageView view[8];    // (layers > 1: a 2D_ARRAY view of all of them)
 } XrChain;
 
 #define XR_LEADS 8
@@ -86,13 +87,19 @@ typedef struct {
     XrTime vref;            // the latch's vsync target then (predict_time: the grid line the prediction counts from)
     bool alpha;             // its eye images carry alpha for passthrough (edge.c; the Table Edge can change between sets)
     // (LARECOMP_XR_REPROJ, runtime/nvn/vulkan/reproj.c) the refreshes after its first, each with eye images of its own
-    // drawn for that refresh's head pose: refresh k (1..rs_n) is due at grid0 + k periods
+    // drawn for that refresh's head pose: refresh k (1..rs_n) is due at grid0 + k periods. Each is its own submission
+    // after the set's (rs_seq); the XR thread releases its images once that one is done, and a layer names them only then
     XrTime grid0;           // the display time of its first refresh (on the display's grid); 0: none due
     int64_t period;
     int rs_n;
-    bool rs_ok[XR_RESHOW_MAX];        // both eyes drawn: the layer may name them
-    bool rs_has[XR_RESHOW_MAX][2];    // acquired (released with the set)
+    bool rs_ok[XR_RESHOW_MAX];        // both eyes recorded and submitted (rs_seq)
+    bool rs_has[XR_RESHOW_MAX][2];    // acquired ([k][0] only when both eyes are layers of one image)
+    bool rs_rel[XR_RESHOW_MAX];       // (XR thread) released: its submission is done, a layer may name it
+    uint64_t rs_seq[XR_RESHOW_MAX];   // the submission drawing it
+    uint64_t reads;                   // the last of those (they read its eye images): its own are released only once
+                                      // the driver has it too (rec_submitted), so every read was submitted before
     uint32_t rs_img[XR_RESHOW_MAX][2];
+    uint32_t rs_w[XR_RESHOW_MAX], rs_h[XR_RESHOW_MAX];  // the part drawn (LARECOMP_XR_REPROJ_RECT: smaller than the image)
     XrView rs_views[XR_RESHOW_MAX][2];
     XrTime ready;           // (XR thread) the first refresh it was found finished at (it may wait for grid0 then)
 } XrSet;
@@ -179,6 +186,7 @@ void xr_drain_gpu(const char *before);
 bool xr_chains_create(uint32_t hud_w, uint32_t hud_h);
 void xr_chains_destroy(void);
 bool xr_chain_create(XrChain *c, const char *what, uint32_t w, uint32_t h);  // (sRGB viewed as UNORM, one mip)
+bool xr_chain_create_layers(XrChain *c, const char *what, uint32_t w, uint32_t h, uint32_t layers);
 bool xr_chain_acquire(XrChain *c, uint32_t *index);
 void xr_chain_release(XrChain *c);
 // xr_loop.c
@@ -197,3 +205,4 @@ int xr_refreshes_per_frame(void);
 void vk_queue_lock(void);
 void vk_queue_unlock(void);
 uint64_t vk_completed_seq(void);  // (exec.c)
+uint64_t rec_submitted(void);     // (record.c) the latest submission handed to the driver
