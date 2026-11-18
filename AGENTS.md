@@ -187,6 +187,7 @@ over the VR tab (its row greys out). The VR tab's rows map onto `LARECOMP_VR_*` 
 | `LARECOMP_VR_HEIGHT/DISTANCE/SIZE/TILT/YAW` | the rig's start values |
 | `LARECOMP_XR_INFLIGHT=<n>` | cap GPU submissions in flight (experiment) |
 | `AF_THROTTLE=1` | sets SteamVR's `framesToThrottle`: SteamVR paces the game to every other refresh and makes the second one itself |
+| `AF_FDM=0` / `1` | `0` takes Valve's foveation layer (`VK_LAYER_VALVE_fdm_injection`) out: `DISABLE_VULKAN_FDM_INJECTION_LAYER=1` and the layer dropped from `VK_INSTANCE_LAYERS`; `1` and unset leave what Steam set. The run log names which and what `VK_INSTANCE_LAYERS` held |
 | `AF_VRTIMING=0` | no compositor timing log |
 | `LARECOMP_WARP_ON_LOAD`, `LARECOMP_WARP_AT` | warp to a spot for tests |
 

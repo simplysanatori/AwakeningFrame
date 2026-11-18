@@ -14,7 +14,8 @@
 # in <program folder>/../session.env (e.g. AF_REFRESH_HZ=90, LARECOMP_XR_EYE_SCALE=0.8).
 # Variables: AF_REFRESH_HZ (72, 90 or 120; default: the VR tab's Refresh Rate, else 120), AF_FPS=60 (a test: 60 fps at
 # 90 Hz, frames alternating one and two refreshes; the VR tab's third Refresh Rate choice does the same), AF_VRTIMING=0 (no compositor log), AF_THROTTLE=1 (a test: SteamVR
-# paces the game to every other refresh and makes the second refresh itself), AF_VRCMD,
+# paces the game to every other refresh and makes the second refresh itself), AF_FDM (0: Valve's foveation layer
+# VK_LAYER_VALVE_fdm_injection removed, 1: left as Steam set it; unset: as Steam set it), AF_VRCMD,
 # AF_HEADSET_FLAG, AF_LOGS, AF_KEEP (sessions of logs kept, default 12), LARECOMP_DATA_ROOT.
 HERE=$(dirname "$(readlink -f "$0")")
 ROOT=$(dirname "$HERE")
@@ -42,6 +43,24 @@ if [ -f "$ROOT/session.env" ]; then
     set -a; . "$ROOT/session.env"; set +a
     [ -n "${AF_FLAT:-}" ] && FLAT=$AF_FLAT
 fi
+
+# Valve's foveation layer (VK_LAYER_VALVE_fdm_injection, SteamVR's eye-tracked foveation). AF_FDM=0 takes it out
+# (DISABLE_VULKAN_FDM_INJECTION_LAYER=1, and it is dropped from VK_INSTANCE_LAYERS: Steam lists it there, which overrides
+# the variable); AF_FDM=1 and unset leave what Steam set. The log says which, and what the list held.
+log "AF_FDM=${AF_FDM:-unset}, VK_INSTANCE_LAYERS='${VK_INSTANCE_LAYERS:-}', DISABLE_VULKAN_FDM_INJECTION_LAYER='${DISABLE_VULKAN_FDM_INJECTION_LAYER:-}'"
+case "${AF_FDM:-}" in
+    0)
+        export DISABLE_VULKAN_FDM_INJECTION_LAYER=1
+        if [ -n "${VK_INSTANCE_LAYERS:-}" ]; then
+            VK_INSTANCE_LAYERS=$(printf '%s' "$VK_INSTANCE_LAYERS" | tr ':' '\n' | grep -v '^VK_LAYER_VALVE_fdm_injection$' | paste -sd: -)
+            if [ -n "$VK_INSTANCE_LAYERS" ]; then export VK_INSTANCE_LAYERS; else unset VK_INSTANCE_LAYERS; fi
+        fi
+        log "AF_FDM=0: Valve's foveation layer is off (VK_INSTANCE_LAYERS now '${VK_INSTANCE_LAYERS:-}')"
+        ;;
+    1) log "AF_FDM=1: Valve's foveation layer left as Steam set it" ;;
+    "") ;;
+    *) log "AF_FDM=$AF_FDM is not 0 or 1: left as Steam set it" ;;
+esac
 
 export LARECOMP_DATA_ROOT=${LARECOMP_DATA_ROOT:-$HOME/.local/share/lasrecomp}
 DATA=$LARECOMP_DATA_ROOT

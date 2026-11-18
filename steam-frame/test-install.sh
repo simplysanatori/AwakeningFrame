@@ -17,7 +17,7 @@ check() { local what=$1; shift; if "$@"; then ok "$what"; else bad "$what"; fi; 
 # ---- the scene: source tree, folders, stand-ins
 mkdir -p "$T/src/runtime" "$T/src/build" "$T/steam/userdata/1234/config" "$T/steam/userdata/0/config" "$T/data/extracted/exefs"
 echo "all:" > "$T/src/Makefile"
-printf '#!/bin/bash\necho "fake lasrecomp: XR=${LARECOMP_XR:-unset} HZ=${LARECOMP_XR_HZ:-unset} FPS=${LARECOMP_XR_FPS:-unset} root=$LARECOMP_DATA_ROOT args=$*"\necho "# LARECOMP_XR_HZ"\ncase "$FAKE_MODE" in sleep) exec sleep 30 ;; esac\n' > "$T/src/build/lasrecomp"
+printf '#!/bin/bash\necho "fake lasrecomp: XR=${LARECOMP_XR:-unset} HZ=${LARECOMP_XR_HZ:-unset} FPS=${LARECOMP_XR_FPS:-unset} root=$LARECOMP_DATA_ROOT args=$*"\necho "fake env: FDM_OFF=${DISABLE_VULKAN_FDM_INJECTION_LAYER:-unset} LAYERS=${VK_INSTANCE_LAYERS-unset}"\necho "# LARECOMP_XR_HZ"\ncase "$FAKE_MODE" in sleep) exec sleep 30 ;; esac\n' > "$T/src/build/lasrecomp"
 chmod +x "$T/src/build/lasrecomp"
 echo fake-library > "$T/src/build/lasgame.so"; echo fake-id > "$T/src/build/lasgame.so.id"
 touch "$T/data/extracted/exefs/main" "$T/steam/userdata/1234/config/shortcuts.vdf"
@@ -95,6 +95,24 @@ rm -f "$T/data/larecomp.ini"
 echo 'AF_FPS=60' > "$T/Games/AwakeningFrame/session.env"
 sleep 1; "$APP/awakeningframe.sh" > /dev/null; RUN5=$(ls -t "$T"/Games/AwakeningFrame/logs/run-*.log | head -1)
 check "session.env AF_FPS=60: LARECOMP_XR_FPS=60" grep -q "HZ=120 FPS=60" "$RUN5"
+rm -f "$T/Games/AwakeningFrame/session.env"
+# AF_FDM: Valve's foveation layer. Unset and 1 leave Steam's variables as they are, 0 removes the layer
+L=VK_LAYER_MESA_overlay:VK_LAYER_VALVE_fdm_injection:VK_LAYER_other
+sleep 1; VK_INSTANCE_LAYERS=$L "$APP/awakeningframe.sh" > /dev/null; RUN6=$(ls -t "$T"/Games/AwakeningFrame/logs/run-*.log | head -1)
+check "AF_FDM unset: the layer list is untouched" grep -qx "fake env: FDM_OFF=unset LAYERS=$L" "$RUN6"
+check "AF_FDM unset: the log names the list" grep -q "AF_FDM=unset, VK_INSTANCE_LAYERS='$L'" "$RUN6"
+echo 'AF_FDM=1' > "$T/Games/AwakeningFrame/session.env"
+sleep 1; VK_INSTANCE_LAYERS=$L "$APP/awakeningframe.sh" > /dev/null; RUN7=$(ls -t "$T"/Games/AwakeningFrame/logs/run-*.log | head -1)
+check "AF_FDM=1: the layer list is untouched" grep -qx "fake env: FDM_OFF=unset LAYERS=$L" "$RUN7"
+check "AF_FDM=1: logged" grep -q "AF_FDM=1: Valve's foveation layer left as Steam set it" "$RUN7"
+echo 'AF_FDM=0' > "$T/Games/AwakeningFrame/session.env"
+sleep 1; VK_INSTANCE_LAYERS=$L "$APP/awakeningframe.sh" > /dev/null; RUN8=$(ls -t "$T"/Games/AwakeningFrame/logs/run-*.log | head -1)
+check "AF_FDM=0: the layer is dropped from the list, the others kept" grep -qx "fake env: FDM_OFF=1 LAYERS=VK_LAYER_MESA_overlay:VK_LAYER_other" "$RUN8"
+check "AF_FDM=0: logged with the list it found" grep -q "AF_FDM=0, VK_INSTANCE_LAYERS='$L'" "$RUN8"
+sleep 1; VK_INSTANCE_LAYERS=VK_LAYER_VALVE_fdm_injection "$APP/awakeningframe.sh" > /dev/null; RUN9=$(ls -t "$T"/Games/AwakeningFrame/logs/run-*.log | head -1)
+check "AF_FDM=0, the layer alone in the list: the variable is unset" grep -qx "fake env: FDM_OFF=1 LAYERS=unset" "$RUN9"
+sleep 1; "$APP/awakeningframe.sh" > /dev/null; RUN10=$(ls -t "$T"/Games/AwakeningFrame/logs/run-*.log | head -1)
+check "AF_FDM=0, no list: only the disable variable is set" grep -qx "fake env: FDM_OFF=1 LAYERS=unset" "$RUN10"
 rm -f "$T/Games/AwakeningFrame/session.env"
 # the flag exists while the game runs, and goes when the wrapper is stopped
 sleep 1; FAKE_MODE=sleep "$APP/awakeningframe.sh" > /dev/null 2>&1 &
