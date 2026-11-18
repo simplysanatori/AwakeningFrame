@@ -136,7 +136,14 @@ In the VR mode (`stereo_wanted`) it is now on with copies:
 The pacer (pace.c, `pace_xr_frame_ms`): in the VR mode at 100 Hz and up a 30 fps hold ends when the GPU fits 90% of the
 two-refresh frame (15.0 ms at 120 Hz; 84%, 14.0, once a return failed), whatever started the hold - the desktop's
 13 / 10 ms limits for holds started by late frames leave room for a window image VR doesn't have, and kept the forest at
-30 for good. The CPU limits scale with the frame (unchanged at 120 Hz); the 90 Hz lock is untouched.
+30 for good. The CPU limits scale with the frame (unchanged at 120 Hz). Under the 90 Hz lock (`pace_xr_lock`) the pacer
+judges nothing: its frames are 33 ms because the game is held, and counted as shown late they started holds of the
+pacer's own that backed off under the lock (to 8x in a session on the Frame on 2026-11-18, which then switched to 120 Hz
+and stayed at 30 with the GPU at 11 ms). Each change of the display's rate or of the VR tab's 90 Hz choice (a
+`pace_xr_lock` / `pace_xr_frame_ms` call) starts the pacer afresh: hold, backoff and counted frames cleared, 60 tried,
+a second of grace for the switch's own frames. `tools/pace_replay.sh <log>` plays a `LARECOMP_LOG_PACE=1` log's frames
+through the pacer (`--as-logged`: as they were; by default a frame whose hold differs from the session's is remade from
+its work).
 
 Measured (xrmock 1728x1728, diet + foveation medium with the gaze mocked at the centre, `LARECOMP_LOG_PACE=1`; before
 -> after; gpu = the pacer's GPU time per game frame, rcpu = render thread CPU, busy = game thread):

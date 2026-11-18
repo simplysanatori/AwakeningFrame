@@ -25,5 +25,7 @@ void pace_xr_lock(int fps);
 // 90 Hz, LARECOMP_XR_FPS=60: one or two refreshes a frame); 0 otherwise (the 30 fps lock). The way back from a 30 fps
 // hold then takes the GPU fitting that frame (pace.c PACE_VR_GPU)
 void pace_xr_frame_ms(double ms);
+// (each call of the two in the VR mode is taken as a change of the display's rate or of the VR tab's choice: the hold,
+// its backoff and the frames counted start over, 60 gets a fresh try; call them on a change only)
 // whether the pacer chooses 60 or 30 in the VR mode (pace_xr_frame_ms set), false while the game is locked at 30
 bool pace_xr_free(void);
