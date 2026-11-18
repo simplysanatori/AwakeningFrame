@@ -291,6 +291,9 @@ void xr_poll_events(bool *quit) {
             }
             break;
         }
+        case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED:  // (a Quest's Touch controllers, the Frame's, SteamVR's binding)
+            xr_input_profile_changed();
+            break;
         case XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB: {
             const XrEventDataDisplayRefreshRateChangedFB *rc = (const XrEventDataDisplayRefreshRateChangedFB *)&ev;
             LOG("[xr] display refresh rate %.0f -> %.0f Hz\n", rc->fromDisplayRefreshRate, rc->toDisplayRefreshRate);
