@@ -88,7 +88,9 @@ and it works in both of Turnip's modes (sysmem and GMEM).
   circle) stands in for the gaze. `LARECOMP_VR_GAZE_MOCK_DROP=on,off` (seconds) drops it in a cycle, to test the lost
   and ramp-in path.
 - **Rings** (NDC radius from the focus; density per axis): low: 1 inside 0.6, 2x1 to 0.95, then 2x2. medium: 1 inside
-  0.45, 2x2 to 0.8, then 4x2. high: 1 inside 0.35, 2x2 to 0.65, then 4x4.
+  0.45, 2x2 to 0.8, then 4x2. high: 1 inside 0.35, 2x2 to 0.65, then 4x4. Tests (off by default):
+  `LARECOMP_VR_FOVEATION_CAP=2` shades no block coarser than 2x2, `LARECOMP_VR_FOVEATION_RINGS=<f>` multiplies the radii
+  (the edge pass's block smoothing follows both).
 - **Maps:** R8_UINT, optimal tiling (Turnip has no linear shading-rate images), one per eye and pass size. A change (a
   focus move of 8 px or more, the ramp) is copied in from transient memory at the start of the pending submission, at
   most once per submission. Every game pipeline gets `VK_PIPELINE_CREATE_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR`
@@ -101,6 +103,45 @@ and it works in both of Turnip's modes (sysmem and GMEM).
   environment leaves the extension out, and then there is nothing to turn on.
 - **Log:** `[fov] eye gaze in N of M game frames ... ; X of Y eye passes foveated` every 10 s.
   `LARECOMP_VR_FOVEATION_LOG=1` logs each pass decision (the first 400).
+
+## Anti-aliasing of the eyes (off by default)
+
+The game has no anti-aliasing of its own, and the runtime's SMAA runs on the window image, which in VR holds the HUD
+only (and the VR diet leaves it out there: PASSES.md). Silhouettes, the table's cut and the fade's outline are drawn
+with one sample a pixel. `LARECOMP_VR_AA` and `LARECOMP_VR_UPSCALE` (the VR tab's Anti-aliasing and Upscaler rows, live)
+run a pass or more on each eye's output in `vk_stereo_eyes` (exec.c `vr_eye_post`), before it is drawn into the XR eye
+image by the present or by the edge pass (which reads the processed colour: `edge_color_override`):
+
+| Value | Passes per eye | Reads per pixel |
+|---|---|---|
+| `LARECOMP_VR_AA=fxaa` | 1 full-size (`vr_fxaa.frag`: an FXAA-style edge search, written for this) | 5 where flat, up to about 25 on an edge |
+| `LARECOMP_VR_AA=smaa` | 3 full-size (SMAA 1x, High preset; colour edges, where the flat present uses luma; no stencil) | edges 7; weights 1 off an edge, searches on it; blending 2 to 3 |
+| `LARECOMP_VR_UPSCALE=fsr` | 2 at the XR image's size (EASU, RCAS), only below full eye size | 12, then 5 |
+
+SMAA looks for edges by colour: the cut against the black void is often a saturated blue sea, 0.08 in luma against
+the High preset's threshold of 0.1, so luma edges left it untouched (Field_16E, 2026-11-18). FXAA's luma is the usual
+weighted sum and finds that edge (0.08 is over its 0.031 floor) but blends it weakly.
+
+Under foveation the passes that draw the eye output shade 4 x 4 blocks in the outer ring, so an outline there,
+the table's cut included, is a stair of 4-pixel steps in the output itself. Neither FXAA nor SMAA undoes steps that
+large (Field_16E at 1728 px: SMAA blends the cut with foveation off, not with High). The edge pass's block smoothing
+does (Fade, or `LARECOMP_VR_EDGE_SMOOTH=all` with Table Edge off; EDGE.md).
+
+Each pass writes an RGBA8 image (gamma-encoded, like the eye output) and the eye's draw reads it instead of the
+output. The images are the flat post passes' (`post_image`), used one eye after the other in the same command buffer.
+With multiview the eye's layer is read through a 2D view of it. The HUD is a layer of its own and is untouched. The
+foveated passes' blocks keep their mapping in the edge pass (its `fz`: the eye output's filled part in the foveated
+passes' pixels), so the block smoothing still works with FSR's full-size image.
+
+Cost: a full-size pass is about 0.25 to 0.3 ms an eye on the Frame (PASSES.md: AO apply 0.29, tonemap 0.29, bloom
+composite 0.26). FXAA is one such pass, SMAA three (its weights pass costs more on edges), FSR two. Measured on the
+headset 2026-11-18 (Valve's foveation layer off): the eyes took 14.2 ms of a 14.5 ms budget, so any of them makes the
+dynamic resolution step down.
+
+Limits: Passthrough turns void pixels transparent after the anti-aliasing, so the ramp on the void's side of an outline
+is dropped and the geometry's side keeps its blend toward black (a dark rim against the room). In the foveated rings the
+edge pass's block smoothing replaces the anti-aliased colour with block-centre interpolation. The alpha Passthrough
+gives is 0 or 1 per pixel from the depth, so the outline against the room is not anti-aliased either way.
 
 ## Tiled lights (interiors and caves)
 
@@ -240,6 +281,8 @@ most n older ones are on the GPU. It also stops the doubling, but at 30 fps, so 
 | `LARECOMP_XR_INFLIGHT=<n>` | cap the submissions on the GPU behind the newest (off; above) |
 | `LARECOMP_GPU_OVERLAP=0\|1` | the CPU / GPU overlap (VR default on, flat off on Turnip; docs/af/PASSES.md) |
 | `LARECOMP_VR_FOVEATION=off\|low\|medium\|high` | eye-tracked foveation of the eye passes (above) |
+| `LARECOMP_VR_FOVEATION_CAP=2`, `LARECOMP_VR_FOVEATION_RINGS=<f>` | tests: no rate coarser than 2x2; the rings' radii times f (above) |
+| `LARECOMP_VR_AA=fxaa\|smaa`, `LARECOMP_VR_UPSCALE=fsr` | anti-aliasing and upscale of the eyes (off; above) |
 | `LARECOMP_VR_LIGHT_TILES=0` | the game's own light tiles in the VR mode (default: one wide frustum per tile; above) |
 | `LARECOMP_MV=0\|1` | multiview stereo (default: on where the device has multiview): twins as layer 1, one run per list (above); 0: stereo v1; 1: the layered twins even without multiview |
 | `LARECOMP_MV_PASSES=0` | with `LARECOMP_MV=1`: the layered twins, but each list still runs once per eye |

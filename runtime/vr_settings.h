@@ -20,6 +20,10 @@ enum { VRS_REFRESH_120, VRS_REFRESH_90, VRS_REFRESH_90_60, VRS_N_REFRESH };
 enum { VRS_HAND_RIGHT, VRS_HAND_LEFT, VRS_N_HAND };                          // LARECOMP_VR_POINTER_HAND (the menu laser)
 // LARECOMP_VR_SCENE = off, low, backdrop, full: the overworld past the table (vr_cull.h VR_SCENE_*, the same order)
 enum { VRS_SCENE_OFF, VRS_SCENE_LOW, VRS_SCENE_BACKDROP, VRS_SCENE_FULL, VRS_N_SCENE };
+// LARECOMP_VR_AA = off, fxaa, smaa; LARECOMP_VR_UPSCALE = off, fsr: the eyes' anti-aliasing and their upscale below full
+// size (exec.c vr_eye_post; the same order as there)
+enum { VRS_AA_OFF, VRS_AA_FXAA, VRS_AA_SMAA, VRS_N_AA };
+enum { VRS_UP_PLAIN, VRS_UP_FSR, VRS_N_UP };
 
 typedef struct {
     int refresh;       // VRS_REFRESH_*: the headset's refresh and the game's rate (120 Hz: 60 FPS, 90 Hz: 30 FPS or, as a test, 60); a relaunch
@@ -37,6 +41,8 @@ typedef struct {
     float hud_dist;    // the HUD / menu panel: metres from the head
     float hud_width;   // and its width in metres (LARECOMP_XR_QUAD=dist,width)
     int pointer_hand;  // VRS_HAND_*: the controller whose laser points at the menu (xr_input.c reads it live)
+    int aa;            // VRS_AA_*: the eyes' anti-aliasing
+    int upscale;       // VRS_UP_*: the eyes' upscale when dynamic resolution renders them smaller
 } VrSettings;
 
 #define VR_DEFAULTS {.refresh = VRS_REFRESH_120, .layout = VRS_LAYOUT_SWITCH, .turn = VRS_TURN_SMOOTH, .follow = VRS_FOLLOW_SMOOTH, \
@@ -49,13 +55,13 @@ extern "C" {
 
 typedef enum {
     VRO_REFRESH, VRO_LAYOUT, VRO_TURN, VRO_FOLLOW, VRO_HEIGHT, VRO_DIST, VRO_SIZE, VRO_TILT, VRO_RECENTRE, VRO_EDGE, VRO_SCENE, VRO_FOVEATION, VRO_DYNRES,
-    VRO_HUD_DIST, VRO_HUD_WIDTH, VRO_POINTER_HAND, VRO_COUNT
+    VRO_HUD_DIST, VRO_HUD_WIDTH, VRO_POINTER_HAND, VRO_AA, VRO_UPSCALE, VRO_COUNT
 } VrOpt;
 
 // the choices' names for the menu, and their larecomp.ini words
 extern const char *const g_vr_refresh_names[VRS_N_REFRESH], *const g_vr_layout_names[VRS_N_LAYOUT],
     *const g_vr_follow_names[VRS_N_FOLLOW], *const g_vr_edge_names[VRS_N_EDGE], *const g_vr_scene_names[VRS_N_SCENE], *const g_vr_fov_names[VRS_N_FOV],
-    *const g_vr_turn_names[VRS_N_TURN], *const g_vr_hand_names[VRS_N_HAND];
+    *const g_vr_turn_names[VRS_N_TURN], *const g_vr_hand_names[VRS_N_HAND], *const g_vr_aa_names[VRS_N_AA], *const g_vr_up_names[VRS_N_UP];
 
 // settings.c: one ini line (true: it was a VR key) / the VR keys
 bool vr_settings_parse(const char *key, const char *val);
@@ -78,7 +84,8 @@ void vr_settings_sync_rig(void);
 void vr_settings_recentre(void);
 // (test hook, once per game frame: hle/warp.c) LARECOMP_VR_SET_AT=<frame>:<key>=<value>[,<frame>:<key>=<value>...]: at
 // that game frame, the change as the VR tab makes it (g_settings.vr, the ini saved, vr_settings_changed). Keys: the ini's
-// without vr_ (edge_style, surroundings, foveation, dynamic_resolution, follow, layout, turn, panel_distance, panel_width, refresh, fps)
+// without vr_ (edge_style, surroundings, foveation, dynamic_resolution, follow, layout, turn, panel_distance, panel_width, refresh, fps,
+// antialias, upscaler)
 // and edge, dynres, label (Buttons Match Labels, 0 / 1); values as in the ini. Frames in increasing order.
 void vr_settings_test_tick(uint64_t frame);
 

@@ -368,10 +368,13 @@ static const char *builtin_src(const char *name, int *stage) {
     // with an entry point per pass. a = SMAA_RT_METRICS (1 / size, size). The vertex-stage offset helpers run per
     // pixel here. Luma edges (t0 = colour) -> blending weights (t0 = edges, t1 = area, t2 = search) -> neighbourhood
     // blending (t0 = colour, t1 = weights). Vulkan's texture origin is top-left, as SMAA expects (no flips).
+    // smaa_edgec.frag: colour edges instead of luma (the VR eyes: a saturated blue sea against the black void is below
+    // the luma threshold, 0.08 against 0.1).
     if (!strncmp(name, "smaa_", 5)) {
         *stage = STAGE_FRAGMENT;
-        static char *src[3];
-        int k = !strcmp(name, "smaa_edge.frag") ? 0 : !strcmp(name, "smaa_weight.frag") ? 1 : !strcmp(name, "smaa_blend.frag") ? 2 : -1;
+        static char *src[4];
+        int k = !strcmp(name, "smaa_edge.frag") ? 0 : !strcmp(name, "smaa_weight.frag") ? 1 : !strcmp(name, "smaa_blend.frag") ? 2
+              : !strcmp(name, "smaa_edgec.frag") ? 3 : -1;
         if (k < 0) return NULL;
         if (!src[k]) {
             extern const char smaa_hlsl_src[];
@@ -381,7 +384,7 @@ static const char *builtin_src(const char *name, int *stage) {
                 "#define SMAA_RT_METRICS pc.a\n"
                 "#define SMAA_GLSL_4\n"
                 "#define SMAA_PRESET_HIGH\n";
-            static const char *mains[3] = {
+            static const char *mains[4] = {
                 "layout(set = 0, binding = 0) uniform sampler2D t0;\n"
                 "layout(location = 0) out vec4 o;\n"
                 "void main() {\n"
@@ -408,6 +411,14 @@ static const char *builtin_src(const char *name, int *stage) {
                 "  vec4 off;\n"
                 "  SMAANeighborhoodBlendingVS(uv, off);\n"
                 "  o = vec4(SMAANeighborhoodBlendingPS(uv, off, t0, t1).rgb, 1.0);\n"
+                "}\n",
+                "layout(set = 0, binding = 0) uniform sampler2D t0;\n"
+                "layout(location = 0) out vec4 o;\n"
+                "void main() {\n"
+                "  vec2 uv = gl_FragCoord.xy * SMAA_RT_METRICS.xy;\n"
+                "  vec4 off[3];\n"
+                "  SMAAEdgeDetectionVS(uv, off);\n"
+                "  o = vec4(SMAAColorEdgeDetectionPS(uv, off, t0), 0.0, 0.0);\n"
                 "}\n"};
             size_t n = strlen(head) + strlen(smaa_hlsl_src) + strlen(mains[k]) + 1;
             src[k] = malloc(n);
@@ -489,6 +500,56 @@ static const char *builtin_src(const char *name, int *stage) {
     }
     // FSR 1 RCAS: contrast-adaptive sharpening of the EASU output (same size). a.x = sharpness (exp2(-stops)),
     // b.xy = image size. The lobe is limited so the result stays inside the neighbours' range; noise is damped.
+    // (VR eyes, LARECOMP_VR_AA=fxaa) one-pass edge anti-aliasing in the manner of FXAA: where the luma's local contrast
+    // is high, the edge's direction (horizontal / vertical) from the 3x3 luma, a search along it (up to 8 steps, 1 to
+    // 8 px) for its two ends, and a sample moved across the edge by how near the pixel is to the nearer end (the long
+    // stairs of a shallow edge become a ramp); a subpixel term for single-pixel features. a = 1 / size, size; b.xy = the
+    // filled part's last texel centre (uv: the reads stay inside it). 5 reads where flat, about 25 on an edge.
+    if (!strcmp(name, "vr_fxaa.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "vec3 at(vec2 uv) { return textureLod(t, min(uv, pc.b.xy), 0.0).rgb; }\n"
+               "float lum(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }\n"
+               "float la(vec2 uv) { return lum(at(uv)); }\n"
+               "void main() {\n"
+               "  vec2 px = pc.a.xy, uv = gl_FragCoord.xy * px;\n"
+               "  vec3 cM = at(uv);\n"
+               "  float lM = lum(cM), lN = la(uv - vec2(0.0, px.y)), lS = la(uv + vec2(0.0, px.y));\n"
+               "  float lW = la(uv - vec2(px.x, 0.0)), lE = la(uv + vec2(px.x, 0.0));\n"
+               "  float mn = min(lM, min(min(lN, lS), min(lW, lE))), mx = max(lM, max(max(lN, lS), max(lW, lE)));\n"
+               "  float rng = mx - mn;\n"
+               "  if (rng < max(0.0312, mx * 0.125)) { o = vec4(cM, 1.0); return; }\n"
+               "  float lNW = la(uv - px), lSE = la(uv + px), lNE = la(uv + vec2(px.x, -px.y)), lSW = la(uv + vec2(-px.x, px.y));\n"
+               "  float eh = abs(lNW + lNE - 2.0 * lN) + 2.0 * abs(lW + lE - 2.0 * lM) + abs(lSW + lSE - 2.0 * lS);\n"
+               "  float ev = abs(lNW + lSW - 2.0 * lW) + 2.0 * abs(lN + lS - 2.0 * lM) + abs(lNE + lSE - 2.0 * lE);\n"
+               "  bool hor = eh >= ev;\n"
+               "  float l1 = hor ? lN : lW, l2 = hor ? lS : lE, g1 = abs(l1 - lM), g2 = abs(l2 - lM);\n"
+               "  bool first = g1 >= g2;\n"
+               "  float stp = (hor ? px.y : px.x) * (first ? -1.0 : 1.0);\n"
+               "  float ll = 0.5 * ((first ? l1 : l2) + lM), grad = 0.25 * max(g1, g2);\n"
+               "  vec2 e = uv + (hor ? vec2(0.0, 0.5 * stp) : vec2(0.5 * stp, 0.0));\n"
+               "  vec2 dir = hor ? vec2(px.x, 0.0) : vec2(0.0, px.y);\n"
+               "  vec2 p1 = e - dir, p2 = e + dir;\n"
+               "  float d1 = la(p1) - ll, d2 = la(p2) - ll;\n"
+               "  bool r1 = abs(d1) >= grad, r2 = abs(d2) >= grad;\n"
+               "  for (int i = 1; i < 8 && !(r1 && r2); i++) {\n"
+               "    float q = i < 3 ? 1.0 : i == 3 ? 1.5 : i < 6 ? 2.0 : i == 6 ? 4.0 : 8.0;\n"
+               "    if (!r1) { p1 -= dir * q; d1 = la(p1) - ll; r1 = abs(d1) >= grad; }\n"
+               "    if (!r2) { p2 += dir * q; d2 = la(p2) - ll; r2 = abs(d2) >= grad; }\n"
+               "  }\n"
+               "  float s1 = hor ? uv.x - p1.x : uv.y - p1.y, s2 = hor ? p2.x - uv.x : p2.y - uv.y;\n"
+               "  bool n1 = s1 < s2;\n"
+               "  float off = ((n1 ? d1 : d2) < 0.0) != (lM - ll < 0.0) ? 0.5 - min(s1, s2) / (s1 + s2) : 0.0;\n"
+               "  float avg = (2.0 * (lN + lS + lW + lE) + lNW + lNE + lSW + lSE) / 12.0;\n"
+               "  float sb = clamp(abs(avg - lM) / rng, 0.0, 1.0);\n"
+               "  sb = (-2.0 * sb + 3.0) * sb * sb;\n"
+               "  off = max(off, sb * sb * 0.75);\n"
+               "  o = vec4(at(uv + (hor ? vec2(0.0, off * stp) : vec2(off * stp, 0.0))), 1.0);\n"
+               "}\n";
+    }
     if (!strcmp(name, "rcas.frag")) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"

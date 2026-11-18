@@ -45,8 +45,12 @@ static struct {
     float room_margin;         // fade in a room: the radius reaches at least this past the room's farthest corner
     float pivot_default;
     bool smooth_off;           // LARECOMP_VR_EDGE_SMOOTH=0: the foveated passes' coarse blocks are left as they are
+    bool smooth_all;           // LARECOMP_VR_EDGE_SMOOTH=all: with Table Edge off too, the blocks smoothed (no fade)
     bool fit;                  // fade, overworld: fitted inside the floor the culling draws (LARECOMP_VR_EDGE_FIT=0: not)
 } cfg;
+
+// LARECOMP_VR_EDGE_DEPTH=quarter: the passes read the game's quarter-size depth copy, as before (a comparison)
+static bool g_depth_quarter;
 
 // fade's defaults (game units; a screen is about 15 x 12, a tile 1.5; docs/af/EDGE.md "Fade")
 #define FADE_RADIUS 13.0f
@@ -98,8 +102,10 @@ static void cfg_init(void) {
     cfg.radius = (e = getenv("LARECOMP_VR_EDGE_RADIUS")) && atof(e) > 0 ? (float)atof(e) : FADE_RADIUS;
     cfg.width = (e = getenv("LARECOMP_VR_EDGE_WIDTH")) && atof(e) > 0 ? (float)atof(e) : FADE_WIDTH;
     cfg.room_margin = FADE_ROOM_MARGIN;
-    cfg.smooth_off = (e = getenv("LARECOMP_VR_EDGE_SMOOTH")) && atoi(e) == 0;
+    cfg.smooth_off = (e = getenv("LARECOMP_VR_EDGE_SMOOTH")) && !strcmp(e, "0");
+    cfg.smooth_all = (e = getenv("LARECOMP_VR_EDGE_SMOOTH")) && !strcmp(e, "all");
     cfg.fit = !((e = getenv("LARECOMP_VR_EDGE_FIT")) && atoi(e) == 0);
+    g_depth_quarter = (e = getenv("LARECOMP_VR_EDGE_DEPTH")) && !strcmp(e, "quarter");
     float s = (e = getenv("LARECOMP_VR_SCALE")) && atof(e) > 0 ? (float)atof(e) : 0.067f;
     float d = (e = getenv("LARECOMP_VR_DIST")) && atof(e) > 0 ? (float)atof(e) : 1.0f;
     cfg.pivot_default = d / s;
@@ -175,6 +181,7 @@ void edge_set_mode(int vrs) {
     "  vec4 dq[2]; // fade: the floor the culling draws: x0 z0 x1 z1 / x2 z2 x3 z3 (counter-clockwise)\n"              \
     "  vec4 dk;    // fade: that floor on, the fade band inside its edges, the margin (units)\n"                        \
     "  vec4 ls;    // fade, foveated: the block-centre images' sizes (middle ring w h, outer w h)\n"                    \
+    "  vec4 fz;    // foveated: the filled part in the foveated passes' pixels (w h), and that over the colour read's (zw)\n" \
     "} u;\n"                                                                                                           \
     "layout(set = 0, binding = 1) uniform sampler2D dt;\n"                                                             \
     "layout(set = 0, binding = 2) uniform sampler2D ct;\n"                                                             \
@@ -203,12 +210,12 @@ void edge_set_mode(int vrs) {
     "vec3 colour(vec2 q) {\n"                                                                                         \
     "  vec2 uv = q * u.cc.xy;\n"                                                                                      \
     "  if (u.va.x < 0.5) return texture(ct, uv).rgb;\n"                                                               \
-    "  vec2 sp = uv * u.vd.zw;\n"                                                                                     \
+    "  vec2 sp = q * u.fz.xy;\n"                                                                                     \
     "  ivec2 lr = vrs_rate(sp);\n"                                                                                    \
     "  if (lr.x + lr.y == 0) return texture(ct, uv).rgb;\n"                                                           \
     "  vec2 b = vec2(float(1 << lr.x), float(1 << lr.y));\n"                                                          \
     "  vec2 f = sp / b - 0.5, i0 = floor(f), t = f - i0;\n"                                                           \
-    "  vec2 c0 = (i0 + 0.5) * b / u.vd.zw, c1 = (i0 + 1.5) * b / u.vd.zw;\n"                                          \
+    "  vec2 c0 = (i0 + 0.5) * b * u.fz.zw, c1 = (i0 + 1.5) * b * u.fz.zw;\n"                                          \
     "  vec3 a = mix(texture(ct, c0).rgb, texture(ct, vec2(c1.x, c0.y)).rgb, t.x);\n"                                   \
     "  vec3 e = mix(texture(ct, vec2(c0.x, c1.y)).rgb, texture(ct, c1).rgb, t.x);\n"                                   \
     "  return mix(a, e, t.y);\n"                                                                                      \
@@ -283,6 +290,7 @@ static const char *tint_fs =
 // most of the eye)
 #define FADE_FUNCS \
     "float fade_k(vec2 p, float d, bool geo) {\n" \
+    "  if (u.fl.z > 4.5) return 1.0;\n"  /* (smoothing only: Table Edge off, LARECOMP_VR_EDGE_SMOOTH=all) */ \
     "  vec2 q = qmap(p);\n" \
     "  vec2 nd = vec2(p.x * 2.0 - 1.0, 1.0 - 2.0 * q.y);\n" \
     "  vec2 xy = vec2((nd.x + u.proj.z) / u.proj.x, (nd.y + u.proj.w) / u.proj.y);\n" \
@@ -310,12 +318,13 @@ static const char *tint_fs =
     "  vec2 q = qmap(p);\n" \
     "  vec3 s = texture(ct, q * u.cc.xy).rgb;\n" \
     "  k = 0.0;\n" \
+    "  if (u.fl.z > 4.5) { k = 1.0; return s; }\n" \
     "  if (max(s.r, max(s.g, s.b)) <= 0.0) return s;\n" \
     "  float d = dsample(q);\n" \
     "  k = fade_k(p, d, is_geo(d));\n" \
     "  return s * k;\n" \
     "}\n" \
-    "vec2 out_pos(vec2 sp) { return qmap(sp / (u.vd.zw * u.cc.xy)); }\n"  /* (colour pixel -> output position) */ \
+    "vec2 out_pos(vec2 sp) { return qmap(sp / u.fz.xy); }\n"  /* (colour pixel -> output position) */ \
     ""
 
 // (fade, foveated) the treated colour (rgb) and fade factor (a) at the centre of each block of 2^fw.y x 2^fw.z pixels
@@ -339,7 +348,7 @@ static const char *main_fs =
     // between the block centres, so neither the blocks nor the stairs they leave at a silhouette show
     "  if (u.fl.z > 3.5 && u.mi.z < 0.5) {\n"
     "    vec2 p = gl_FragCoord.xy / u.sz.xy, q = qmap(p);\n"
-    "    vec2 sp = q * u.cc.xy * u.vd.zw;\n"
+    "    vec2 sp = q * u.fz.xy;\n"
     "    ivec2 lr = u.va.x > 0.5 ? vrs_rate(sp) : ivec2(0);\n"
     "    float k;\n"
     "    vec3 c;\n"
@@ -597,7 +606,7 @@ static void begin(VkCommandBuffer cb, VkImageView view, VkImageLayout layout, ui
     }
 }
 
-typedef struct { float proj[4], zt[4], fl[4], up[4], cc[4], sz[4], fog[4], top[4], bot[4], mi[4], vr[3][4], rq[2][4], rc[4], rb[4], sky[4], fd[4], fw[4], pf[4], va[4], vc[4], vb[4], vd[4], dq[2][4], dk[4], ls[4]; } UBlock;
+typedef struct { float proj[4], zt[4], fl[4], up[4], cc[4], sz[4], fog[4], top[4], bot[4], mi[4], vr[3][4], rq[2][4], rc[4], rb[4], sky[4], fd[4], fw[4], pf[4], va[4], vc[4], vb[4], vd[4], dq[2][4], dk[4], ls[4], fz[4]; } UBlock;
 
 static VkDescriptorSet make_set(const UBlock *ub, VkImageView depth, VkImageView color, VkImageView mask, VkImageView tint) {
     VkSpan s = vk_transient_copy(ub, sizeof *ub, 256);
@@ -677,10 +686,18 @@ static struct {
     bool have;
     TexBackend *color, *depth;
     uint32_t layer, depth_layer;  // (LARECOMP_MV: the eye's layer of each)
-    float ax, ay, V[16], P[16], zn, zf;
+    float ax, ay, dax, day, V[16], P[16], zn, zf;  // (ax, ay: the colour's filled part; dax, day: the depth's own)
     bool vrs;       // the passes that made it were foveated (fov_shade): their coarse blocks are smoothed
     FovShade sh;
 } noted[2];
+
+// (exec.c vk_stereo_eyes, before edge_eye) the eye's colour as anti-aliased / upscaled (LARECOMP_VR_AA, _UPSCALE): read
+// in place of the eye output, with its own filled part; VK_NULL_HANDLE: the eye output
+static struct { VkImageView v; float fx, fy; } g_cover[2];
+void edge_color_override(int eye, VkImageView view, float fx, float fy) {
+    if (eye < 0 || eye > 1) return;
+    g_cover[eye].v = view, g_cover[eye].fx = fx, g_cover[eye].fy = fy;
+}
 
 void stereo_eye_post(const StereoEyePost *e) {
     if (e->eye < 0 || e->eye > 1) return;
@@ -688,7 +705,15 @@ void stereo_eye_post(const StereoEyePost *e) {
     // (noted in every mode, black too: a switch from the VR tab then finds the current images, never stale ones)
     __typeof__(noted[0]) *n = &noted[e->eye];
     n->have = e->depth && e->have_matrices;
-    n->color = e->color, n->depth = e->depth, n->layer = e->layer, n->depth_layer = e->depth_layer, n->ax = e->ax, n->ay = e->ay, n->zn = e->zn, n->zf = e->zf;
+    n->color = e->color, n->layer = e->layer, n->ax = e->ax, n->ay = e->ay;
+    // the depth: the scene's own at full eye size when the frame had one, else the game's quarter-size copy (480 x 270,
+    // always whole). Each is read through its own filled part: with dynamic resolution the colour fills 0.89 of its image
+    // at 1536 px while the copy fills all of its own, so the colour's part put every depth sample of the copy 11% toward
+    // the corner. The copy's texels are 3.6 x 6.4 eye pixels: the fade read through it fell off in steps a few pixels tall
+    // on a surface seen at a shallow angle (the sea at the table's edge) and its outline came out blocky.
+    if (e->depth_full && !g_depth_quarter)
+        n->depth = e->depth_full, n->depth_layer = e->depth_full_layer, n->dax = e->fax, n->day = e->fay, n->zn = e->fzn, n->zf = e->fzf;
+    else n->depth = e->depth, n->depth_layer = e->depth_layer, n->dax = e->dax, n->day = e->day, n->zn = e->zn, n->zf = e->zf;
     memcpy(n->V, e->V, 64), memcpy(n->P, e->P, 64);
     n->vrs = fov_shade(&n->sh) && n->sh.w == e->width && n->sh.h == e->height;
     {
@@ -697,6 +722,21 @@ void stereo_eye_post(const StereoEyePost *e) {
         if (!said_vrs && fov_shade(&sh) && !n->vrs)
             LOG("[edge] foveated passes %ux%u, eye output %ux%u: their blocks are not smoothed\n", sh.w, sh.h, e->width, e->height), said_vrs = true;
     }
+    {   // (once per eye and change of the depth read, not of the filled parts: dynamic resolution changes those often)
+        static const void *said_d[2];
+        static uint32_t said_dw[2];
+        static int nsaid;  // (at most 24 lines: a frame without the scene's own depth falls back to the copy and back)
+        const TexBackend *d = e->depth_full && !g_depth_quarter ? e->depth_full : e->depth;
+        int i = e->eye;
+        if (d && (said_d[i] != (const void *)d || said_dw[i] != d->width) && nsaid < 24) {
+            nsaid++;
+            bool full = d != e->depth;
+            LOG("[edge] eye %d output %ux%u filled %.3f x %.3f; reads the %s scene depth %ux%u fmt %d layer %u filled %.3f x %.3f\n", i,
+                e->width, e->height, e->ax, e->ay, full ? "full-size" : "quarter-size", d->width, d->height, (int)d->format,
+                full ? e->depth_full_layer : e->depth_layer, full ? e->fax : e->dax, full ? e->fay : e->day);
+            said_d[i] = d, said_dw[i] = d->width;
+        }
+    }
     static bool said;
     if (!said && edge_mode() != EDGE_BLACK && (!e->depth || !e->have_matrices)) LOG("[edge] eye %d: no %s noted: the edge pass waits for it\n", e->eye, e->depth ? "matrices" : "depth"), said = true;
 }
@@ -704,7 +744,7 @@ void stereo_eye_post(const StereoEyePost *e) {
 typedef struct {
     int eye;
     VkImageView color, depth;
-    float color_crop[2], depth_crop[2], V[16], P[16], zn, zf, pivot_dist;
+    float color_crop[2], depth_crop[2], color_px[2], V[16], P[16], zn, zf, pivot_dist;  // (color_px: the eye output's filled part, pixels)
     bool origin_lower_left, depth_minus1;
 } EdgeEye;
 
@@ -774,11 +814,15 @@ static bool g_tint_restart;
 bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uint32_t w, uint32_t h) {
     EdgeMode mode = edge_mode();
     if (g_mode_changed) g_mode_changed = false, g_tint_restart = true;  // (a switch: the backdrop colours start from the scene again)
-    if (mode == EDGE_BLACK || eye < 0 || eye > 1 || !noted[eye].have) return false;
+    if (eye < 0 || eye > 1 || !noted[eye].have) return false;
+    // (LARECOMP_VR_EDGE_SMOOTH=all, a test) Table Edge off, but the foveated passes' blocks smoothed as Fade does: the
+    // fade's passes with every pixel kept whole (fl.z 5), in place of the present draw
+    bool smooth_only = mode == EDGE_BLACK && cfg.smooth_all && !cfg.smooth_off && noted[eye].vrs;
+    if (mode == EDGE_BLACK && !smooth_only) return false;
     // outdoors only: an interior or a dungeon (or the title) keeps its dark void and the game's own glow, drawn by the present as before
     extern int game_level_overworld(void);  // (widescreen.c) 1 the overworld, 0 another level, -1 not in play
     int ow = game_level_overworld();
-    if (mode == EDGE_FADE ? ow < 0 : !cfg.indoors && ow != 1) return false;  // (fade: everywhere in play)
+    if (mode == EDGE_FADE || smooth_only ? ow < 0 : !cfg.indoors && ow != 1) return false;  // (fade: everywhere in play)
     float fade_c[3] = {0}, fade_r = cfg.radius, fade_w = cfg.width;  // (fade) the table's centre, the clear radius, the width
     float drawn[4][2];
     bool fitted = false, cut = false;
@@ -812,7 +856,9 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
                     : n->color->format == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_B8G8R8A8_UNORM : n->color->format;
         ein.color = vk_image_view(n->color, VK_IMAGE_VIEW_TYPE_2D, cf, 0, 1, n->layer, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
         ein.depth = vk_image_view(n->depth, VK_IMAGE_VIEW_TYPE_2D, n->depth->format, 0, 1, n->depth_layer, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
-        ein.color_crop[0] = ein.depth_crop[0] = n->ax, ein.color_crop[1] = ein.depth_crop[1] = n->ay;
+        ein.color_crop[0] = n->ax, ein.color_crop[1] = n->ay, ein.depth_crop[0] = n->dax, ein.depth_crop[1] = n->day;
+        ein.color_px[0] = n->ax * n->color->width, ein.color_px[1] = n->ay * n->color->height;
+        if (g_cover[eye].v) ein.color = g_cover[eye].v, ein.color_crop[0] = g_cover[eye].fx, ein.color_crop[1] = g_cover[eye].fy;
         memcpy(ein.V, n->V, 64), memcpy(ein.P, n->P, 64);
         ein.zn = n->zn, ein.zf = n->zf, ein.pivot_dist = 0;
         ein.origin_lower_left = renderer_origin_lower_left();
@@ -838,7 +884,7 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
     u.proj[0] = P[0], u.proj[1] = P[5], u.proj[2] = P[2], u.proj[3] = P[6];
     u.zt[0] = P[10], u.zt[1] = P[11], u.zt[2] = in->zn, u.zt[3] = in->zf - in->zn;
     u.fl[0] = in->depth_minus1 ? 1.0f : 0.0f, u.fl[1] = in->origin_lower_left ? 1.0f : 0.0f;
-    u.fl[2] = mode == EDGE_FOG ? 1.0f : mode == EDGE_GRADIENT ? 2.0f : mode == EDGE_PASSTHROUGH ? 3.0f : 4.0f;
+    u.fl[2] = smooth_only ? 5.0f : mode == EDGE_FOG ? 1.0f : mode == EDGE_GRADIENT ? 2.0f : mode == EDGE_PASSTHROUGH ? 3.0f : 4.0f;
     u.fl[3] = (float)(g.frame++ % 64);
     u.up[0] = V[1], u.up[1] = V[5], u.up[2] = V[9];  // the world's up in eye space (the view's second column)
     float pd = in->pivot_dist > 0 ? in->pivot_dist : cfg.pivot_default;
@@ -885,6 +931,8 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
         u.dk[0] = 1, u.dk[1] = FADE_CUT_BAND, u.dk[2] = FADE_CUT_MARGIN;
     }
     screen_filter_params(u.pf);
+    // (foveated) a pixel of the foveated passes from the output position: q * fz.xy; a block centre there read at * fz.zw
+    u.fz[0] = in->color_px[0], u.fz[1] = in->color_px[1], u.fz[2] = in->color_crop[0] / u.fz[0], u.fz[3] = in->color_crop[1] / u.fz[1];
     if (noted[eye].vrs && !(cfg.smooth_off)) {  // (the foveated passes' shading: edge.c colour())
         const FovShade *sh = &noted[eye].sh;
         u.va[0] = 1, u.va[1] = (float)sh->nfoci, u.va[2] = sh->r0, u.va[3] = sh->r1;
@@ -918,7 +966,7 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
     vk_full_barrier(cb);  // (the scene and the eye output)
     static int bench = -1;  // (LARECOMP_VR_EDGE_BENCH: 1 no backdrop colours, 2 no mask, 4 no main pass: timing only)
     if (bench < 0) bench = getenv("LARECOMP_VR_EDGE_BENCH") ? atoi(getenv("LARECOMP_VR_EDGE_BENCH")) : 0;
-    bool fade = mode == EDGE_FADE;  // (fade: the main pass alone, no backdrop colours or mask)
+    bool fade = mode == EDGE_FADE || smooth_only;  // (fade: the main pass alone, no backdrop colours or mask)
     if (in->eye == 0 && !(bench & 1) && !fade) {
         VkDescriptorSet set = make_set(&u, in->depth, in->color, g.mask[0].view, g.tint[prev].view);
         begin(cb, g.tint[cur].view, VK_IMAGE_LAYOUT_GENERAL, 2, 1);

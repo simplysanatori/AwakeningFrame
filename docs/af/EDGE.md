@@ -44,6 +44,19 @@ screen's edge to the culling rectangle's, so `LARECOMP_VR_CULL_RECT` bigger than
 The eye output is B10G11R11 (no alpha, 5-6 mantissa bits), so the result is not written back into it: a smooth gradient
 would band. The pass draws straight into the XR eye image instead (UNORM view, sRGB bytes, as the present did).
 
+**Which depth.** The eye post hook hands over two depths: the latest twinned depth target drawn into before the
+composite, which is the game's quarter-size copy made after the scene for its ambient occlusion (480 x 270, always
+whole), and the latest twinned depth target of the window image's size drawn into with depth writes on, the scene's
+own (`depth_full`: as large as the eye output and filled like it). Writes on, because the frame's last pass tests
+against another depth of that size without writing it, and in the dungeons that one is empty when the eyes are
+composited (Tail Cave 04B: every pixel read as void). The passes read the scene's own, each image through its own filled part; the copy only
+when a frame had none. Read through the copy, as before 2026-11-18, every depth texel covered 3.6 x 6.4 eye pixels: the
+fade fell off in steps a few pixels tall on any surface seen at a shallow angle (the sea at the table's edge) and the
+outlines followed the copy's texels, with or without foveation. Read through the colour's filled part, as it also was,
+every sample of the copy came from 11% nearer the image's corner at 1536 px. `LARECOMP_VR_EDGE_DEPTH=quarter` reads the
+copy again (through its own part), for comparison. `[edge] eye N output ... reads the full-size scene depth ...` in the
+log says which.
+
 ## Fade (`LARECOMP_VR_EDGE=fade`)
 
 A round fade to black around the table's centre, like a spotlight on a tabletop: the world ends in a soft round edge
@@ -93,6 +106,7 @@ everywhere: the overworld, interiors, dungeons, side views.
 | `LARECOMP_VR_EDGE_WIDTH=<units>` | width of the fade past it (12) |
 | `LARECOMP_VR_EDGE_FIT=0` | overworld: the fixed circle about the anchor (as before), no fit, no fade to the culled floor |
 | `LARECOMP_VR_EDGE_SMOOTH=0` | foveation's blocks left as they are |
+| `LARECOMP_VR_EDGE_SMOOTH=all` | (a test) with Table Edge off too: the fade's main pass with every pixel kept whole, only to smooth foveation's blocks (one full-size pass per eye, plus the block-centre images) |
 | `LARECOMP_VR_EDGE_DEBUG=6` | the factor in red, geometry in green, over the dimmed eye (unsmoothed, no fit's floor fade) |
 
 ## The Mysterious Woods' fog: the dome and the edge curtain
@@ -140,6 +154,7 @@ Other variables:
 | `LARECOMP_VR_EDGE_RECT=<f>` | fade to the culling's floor quadrilateral, share of its band (off; 1 = the whole band) |
 | `LARECOMP_VR_EDGE_INDOORS=1` | run in interiors and dungeons too (default: the overworld only) |
 | `LARECOMP_VR_EDGE_DEBUG=<n>` | 1 depth, 2 nearness to the void, 3 rect / fog / edge, 4 elevation, 5 backdrop, 8 before / after split (left half untreated), 9 2x2 mosaic, 10 untreated eye inside a box (x .55-.95, y .5-.9), treated outside, one frame, 11 the pass's change x8 (white where it changed a pixel) |
+| `LARECOMP_VR_EDGE_DEPTH=quarter` | read the game's quarter-size depth copy instead of the scene's own (comparison; above) |
 | `LARECOMP_VR_EDGE_BENCH=<mask>` | timing only: 1 no tint pass, 2 no mask passes, 4 no main pass |
 
 ## Cost
@@ -195,7 +210,9 @@ code gives (unmeasured):
   against the raw trapezoid of each frame, not a filtered one, and `cut` switches on and off by a threshold, so that band
   pops in and out. Only the centre and radius are filtered (0.4 s).
 - Dynres (1536-1728) only changes the filled part. The rings, the block-centre images and the dither use the same
-  coordinates in the map and in the edge pass, so no mismatch was found there.
+  coordinates in the map and in the edge pass, so no mismatch was found there. The depth did not: it was read through
+  the colour's filled part ("Which depth" above, fixed 2026-11-18), so the fade's position moved by up to 11% of the
+  image whenever the eye size stepped.
 
 Next steps: xrmock with `MOCK_XR_GAZE` (a moving, jittering gaze), the pose file
 `build/flick/sway25.pose` (yaw +-25 degrees at 1.5 Hz) and `LARECOMP_VR_EDGE_LOG=1` (one line per eye-0 fade pass:
