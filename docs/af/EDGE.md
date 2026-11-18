@@ -125,7 +125,8 @@ The other modes (Black, fog, gradient, passthrough) use the same ray expression 
 
 `LARECOMP_VR_EDGE_ROUND=1` takes the row from the output position (`p`, as the colour is shown), in the Fade mode only
 (`fw.w`): the top rows go black past the radius, the corners darken. It changes the picture (at Mabe, seated: the
-houses past the weathercock go black), so it is off by default; the owner chooses. Only with it does `edge_fade_disc` answer, and so only then do the
+houses past the weathercock go black; in Marin and Tarin's house a blue glow lit above the back wall goes), so it is
+off by default; the owner chooses. Only with it does `edge_fade_disc` answer, and so only then do the
 eyes' passes leave out the draws past the circle (PASSES.md "Draws the eyes cannot see") and the table's culling camera
 take no more than the square the fade can light (`vr_cull_note_fade`, `LARECOMP_VR_CULL_FADE=0`: not). Without it a
 smaller black radius (`LARECOMP_VR_EDGE_BLACK`) would cut the culling to a square the fade does not end inside: a
