@@ -162,6 +162,7 @@ static void pose_log(XrTime t) {
         const char *e = getenv("LARECOMP_XR_POSE_LOG");
         plog_on = e && *e;
         if (plog_on && !(plog = fopen(e, "w"))) LOG("[xr] cannot write the pose log %s\n", e), plog_on = 0;
+        if (plog_on) setvbuf(plog, NULL, _IOLBF, 0);  // (whole lines: the game can leave by _exit)
         if (plog_on)
             fprintf(plog, "# LARECOMP_XR_POSE_LOG: t x y z yaw pitch roll gaze_yaw gaze_pitch (VIEW in LOCAL at each refresh's display "
                           "time; seconds since xrBeginSession, metres, degrees; xrmock MOCK_XR_POSE=file:, MOCK_XR_GAZE=file)\n");
