@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # A LARECOMP_LOG_PACE=1 session log replayed through the frame pacer (tools/pace_replay.c says what it prints).
-# tools/pace_replay.sh <log> [--as-logged] [--rates] [-q]
+# tools/pace_replay.sh <log> [--as-logged] [--rates] [--cadence [--idle <ms>] [--from <text>]] [-q]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 exe=$(mktemp -t pace-replay.XXXXXX)
