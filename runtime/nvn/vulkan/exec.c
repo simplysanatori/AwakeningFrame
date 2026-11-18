@@ -10422,6 +10422,85 @@ done:
     }
 }
 
+// ---- the VR eyes' anti-aliasing and upscale (docs/af/STEREO.md "Anti-aliasing of the eyes"; off by default)
+// The game has no anti-aliasing of its own and the flat present's SMAA runs on the window image, which in VR holds the
+// HUD only. These run on each eye's output before it is drawn into the XR eye image (by the present or the edge pass),
+// with the post passes above (RGBA8 images, gamma-encoded like the eye output; one eye after the other in the same
+// command buffer, each image read by its own eye's draw before the next eye writes it):
+//   LARECOMP_VR_AA=fxaa   one pass (vr_fxaa.frag);  =smaa  SMAA 1x, three passes (edges, weights, blending)
+//   LARECOMP_VR_UPSCALE=fsr  below full eye size (dynamic resolution) FSR 1 (EASU, then RCAS) to the XR image's size
+//                            in place of the present's bilinear stretch
+// The VR tab's Anti-aliasing and Upscaler rows set them while the game runs (vk_vr_eye_post_set).
+static int vr_aa = -1, vr_up = -1;  // (VRS_AA_* / VRS_UP_*: 0 off, 1 fxaa, 2 smaa; 0 off, 1 fsr)
+static void vr_post_cfg(void) {
+    if (vr_aa >= 0) return;
+    const char *e = getenv("LARECOMP_VR_AA");
+    vr_aa = e && !strcmp(e, "fxaa") ? 1 : e && !strcmp(e, "smaa") ? 2 : 0;
+    e = getenv("LARECOMP_VR_UPSCALE");
+    vr_up = e && !strcmp(e, "fsr") ? 1 : 0;
+    if (vr_aa || vr_up) LOG("[vrpost] eyes: anti-aliasing %s, upscale %s\n", vr_aa == 1 ? "fxaa" : vr_aa == 2 ? "smaa" : "off", vr_up ? "fsr1" : "off");
+}
+void vk_vr_eye_post_set(int aa, int up) {
+    vr_post_cfg();
+    if (aa >= 0 && aa <= 2 && aa != vr_aa) LOG("[vrpost] anti-aliasing %s (VR settings)\n", aa == 1 ? "fxaa" : aa == 2 ? "smaa" : "off"), vr_aa = aa;
+    if (up >= 0 && up <= 1 && up != vr_up) LOG("[vrpost] upscale %s (VR settings)\n", up ? "fsr1" : "off"), vr_up = up;
+}
+// Eye output b (its layer ly, filled fx x fy) for an XR image of ow x oh: the view to draw from instead of the output's
+// own and its filled part, or false (nothing to do: the output as it is).
+static bool vr_eye_post(VkCommandBuffer cb, TexBackend *b, uint32_t ly, uint32_t ow, uint32_t oh, float fx, float fy,
+                        VkImageView *view, float *ofx, float *ofy) {
+    vr_post_cfg();
+    uint32_t cw = (uint32_t)lroundf(b->width * fx), ch = (uint32_t)lroundf(b->height * fy);
+    bool fsr = vr_up == 1 && (ow > cw + 1 || oh > ch + 1);
+    if (!vr_aa && !fsr) return false;
+    VkImageView v = raw_view_layer(b, ly);
+    float w = (float)b->width, h = (float)b->height;
+    if (vr_aa == 2) {  // SMAA 1x, as post_process (no stencil): the filled part and 64 px past it
+        float m[8] = {1.0f / w, 1.0f / h, w, h};
+        TexBackend *edges = post_image(0, b->width, b->height), *weights = post_image(1, b->width, b->height);
+        TexBackend *out = post_image(2, b->width, b->height);
+        post_area_w = cw + 64, post_area_h = ch + 64;
+        VkImageView in[3] = {v};
+        post_pass(cb, "smaa_edge.frag", in, 1, edges, m, true);
+        VkImageView wi[3] = {post_view(edges), smaa_lut(0), smaa_lut(1)};
+        post_pass(cb, "smaa_weight.frag", wi, 3, weights, m, true);
+        VkImageView bi[3] = {v, post_view(weights)};
+        post_pass(cb, "smaa_blend.frag", bi, 2, out, m, false);
+        post_area_w = post_area_h = 0;
+        v = post_view(out);
+    } else if (vr_aa == 1) {
+        TexBackend *out = post_image(2, b->width, b->height);
+        float m[8] = {1.0f / w, 1.0f / h, w, h, (cw - 0.5f) / w, (ch - 0.5f) / h};
+        post_area_w = cw + 1, post_area_h = ch + 1;
+        VkImageView in[3] = {v};
+        post_pass(cb, "vr_fxaa.frag", in, 1, out, m, false);
+        post_area_w = post_area_h = 0;
+        v = post_view(out);
+    }
+    *ofx = fx, *ofy = fy;
+    if (fsr) {  // the filled part to the whole XR image: EASU, then RCAS (AMD's default sharpness)
+        float iw = (float)cw, ih = (float)ch;
+        TexBackend *e = post_image(3, ow, oh), *r = post_image(4, ow, oh);
+        float pe[8] = {iw / ow, ih / oh, 0.5f * iw / ow - 0.5f, 0.5f * ih / oh - 0.5f, iw, ih};
+        VkImageView ei[3] = {v};
+        post_pass(cb, "easu.frag", ei, 1, e, pe, false);
+        float pr[8] = {exp2f(-0.2f), 0, 0, 0, (float)ow, (float)oh};
+        VkImageView ri_[3] = {post_view(e)};
+        post_pass(cb, "rcas.frag", ri_, 1, r, pr, false);
+        v = post_view(r);
+        *ofx = *ofy = 1;
+    }
+    vk_full_barrier(cb);
+    *view = v;
+    {
+        static int said_aa = -1, said_up = -1;
+        if (said_aa != vr_aa || said_up != (int)fsr)
+            LOG("[vrpost] eye %ux%u (filled %ux%u)%s%s -> %ux%u\n", b->width, b->height, cw, ch, vr_aa == 2 ? " smaa" : vr_aa == 1 ? " fxaa" : "",
+                fsr ? " fsr1" : "", ow, oh), said_aa = vr_aa, said_up = fsr;
+    }
+    return true;
+}
+
 // (device.c vk_frame_end, VR mode, between xr_set_begin and xr_set_submit, outside any rendering) each eye's output
 // into its eye swapchain image (the present shader: any size, the bytes as they are, the flat present's orientation).
 // The eyes this frame drew no composite into keep the last one. Returns the eyes drawn (bit mask).
@@ -10464,6 +10543,10 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
         if (!eye_target(eye, &img, &view, &fmt, &ext)) continue;
         vk_full_barrier(cb);
         float fx = b->scalable && b->ax > 0 ? b->sx / b->ax : 1, fy = b->scalable && b->ay > 0 ? b->sy / b->ay : 1;
+        VkImageView src = raw_view_layer(b, ly);
+        float sfx = fx, sfy = fy;
+        bool post = vr_eye_post(cb, b, ly, ext.width, ext.height, fx, fy, &src, &sfx, &sfy);
+        edge_color_override(eye, post ? src : VK_NULL_HANDLE, sfx, sfy);
         if (edge_eye(cb, eye, view, fmt, ext.width, ext.height)) { drawn |= 1 << eye; continue; }  // (the edge pass instead of the present draw)
         VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = view,
                                         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -10475,7 +10558,7 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
         rec_CmdSetScissor(cb, 0, 1, &sc);
         VkPipeline p = present_pipeline_ex(fmt, false);
         VkDescriptorSet ds = vk_alloc_set(present_set_layout);
-        VkDescriptorImageInfo ii = {vk_default_sampler(true), raw_view_layer(b, ly), VK_IMAGE_LAYOUT_GENERAL};
+        VkDescriptorImageInfo ii = {vk_default_sampler(true), src, VK_IMAGE_LAYOUT_GENERAL};
         VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,
                                   .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
         rec_UpdateDescriptorSets(1, &w);
@@ -10483,7 +10566,7 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
         rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, present_layout, 0, 1, &ds, 0, NULL);
         VkViewport vp = {0, 0, (float)ext.width, (float)ext.height, 0, 1};
         rec_CmdSetViewport(cb, 0, 1, &vp);
-        float pc[12] = {renderer_origin_lower_left() ? 1.0f : 0.0f, 0, 0, 0, 0, 0, fx, fy};
+        float pc[12] = {renderer_origin_lower_left() ? 1.0f : 0.0f, 0, 0, 0, 0, 0, sfx, sfy};
         screen_filter_params(pc + 8);
         rec_CmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, pc);
         fullscreen_vertex_bind(cb);

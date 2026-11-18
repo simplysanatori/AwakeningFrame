@@ -116,6 +116,17 @@ extern "C" void vr_tab_draw(float scale) {
                    desc(VRO_SCENE, "Shows the world around the table. Low Quality and Full run best at 90 Hz.")))
         changed(VRO_SCENE);
 
+    opt_section("Picture");
+    grey(VRO_AA);
+    if (opt_choice("Anti-aliasing", &v.aa, g_vr_aa_names, VRS_N_AA, VRS_AA_OFF,
+                   desc(VRO_AA, "Smooths jagged edges. FXAA is quicker, SMAA keeps textures sharper. Both cost GPU time.")))
+        changed(VRO_AA);
+    grey(VRO_UPSCALE);
+    if (opt_choice("Upscaler", &v.upscale, g_vr_up_names, VRS_N_UP, VRS_UP_PLAIN,
+                   desc(VRO_UPSCALE, "How the picture is scaled up when Dynamic Resolution renders it smaller. AMD FSR 1 "
+                                     "sharpens edges as it scales and costs GPU time, Bilinear is plain and soft.")))
+        changed(VRO_UPSCALE);
+
     opt_section("Performance");
     grey(VRO_FOVEATION);
     if (opt_choice("Foveation", &v.foveation, g_vr_fov_names, VRS_N_FOV, VRS_FOV_HIGH,

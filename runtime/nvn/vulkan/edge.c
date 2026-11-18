@@ -179,6 +179,7 @@ void edge_set_mode(int vrs) {
     "  vec4 dq[2]; // fade: the floor the culling draws: x0 z0 x1 z1 / x2 z2 x3 z3 (counter-clockwise)\n"              \
     "  vec4 dk;    // fade: that floor on, the fade band inside its edges, the margin (units)\n"                        \
     "  vec4 ls;    // fade, foveated: the block-centre images' sizes (middle ring w h, outer w h)\n"                    \
+    "  vec4 fz;    // foveated: the filled part in the foveated passes' pixels (w h), and that over the colour read's (zw)\n" \
     "} u;\n"                                                                                                           \
     "layout(set = 0, binding = 1) uniform sampler2D dt;\n"                                                             \
     "layout(set = 0, binding = 2) uniform sampler2D ct;\n"                                                             \
@@ -207,12 +208,12 @@ void edge_set_mode(int vrs) {
     "vec3 colour(vec2 q) {\n"                                                                                         \
     "  vec2 uv = q * u.cc.xy;\n"                                                                                      \
     "  if (u.va.x < 0.5) return texture(ct, uv).rgb;\n"                                                               \
-    "  vec2 sp = uv * u.vd.zw;\n"                                                                                     \
+    "  vec2 sp = q * u.fz.xy;\n"                                                                                     \
     "  ivec2 lr = vrs_rate(sp);\n"                                                                                    \
     "  if (lr.x + lr.y == 0) return texture(ct, uv).rgb;\n"                                                           \
     "  vec2 b = vec2(float(1 << lr.x), float(1 << lr.y));\n"                                                          \
     "  vec2 f = sp / b - 0.5, i0 = floor(f), t = f - i0;\n"                                                           \
-    "  vec2 c0 = (i0 + 0.5) * b / u.vd.zw, c1 = (i0 + 1.5) * b / u.vd.zw;\n"                                          \
+    "  vec2 c0 = (i0 + 0.5) * b * u.fz.zw, c1 = (i0 + 1.5) * b * u.fz.zw;\n"                                          \
     "  vec3 a = mix(texture(ct, c0).rgb, texture(ct, vec2(c1.x, c0.y)).rgb, t.x);\n"                                   \
     "  vec3 e = mix(texture(ct, vec2(c0.x, c1.y)).rgb, texture(ct, c1).rgb, t.x);\n"                                   \
     "  return mix(a, e, t.y);\n"                                                                                      \
@@ -319,7 +320,7 @@ static const char *tint_fs =
     "  k = fade_k(p, d, is_geo(d));\n" \
     "  return s * k;\n" \
     "}\n" \
-    "vec2 out_pos(vec2 sp) { return qmap(sp / (u.vd.zw * u.cc.xy)); }\n"  /* (colour pixel -> output position) */ \
+    "vec2 out_pos(vec2 sp) { return qmap(sp / u.fz.xy); }\n"  /* (colour pixel -> output position) */ \
     ""
 
 // (fade, foveated) the treated colour (rgb) and fade factor (a) at the centre of each block of 2^fw.y x 2^fw.z pixels
@@ -343,7 +344,7 @@ static const char *main_fs =
     // between the block centres, so neither the blocks nor the stairs they leave at a silhouette show
     "  if (u.fl.z > 3.5 && u.mi.z < 0.5) {\n"
     "    vec2 p = gl_FragCoord.xy / u.sz.xy, q = qmap(p);\n"
-    "    vec2 sp = q * u.cc.xy * u.vd.zw;\n"
+    "    vec2 sp = q * u.fz.xy;\n"
     "    ivec2 lr = u.va.x > 0.5 ? vrs_rate(sp) : ivec2(0);\n"
     "    float k;\n"
     "    vec3 c;\n"
@@ -601,7 +602,7 @@ static void begin(VkCommandBuffer cb, VkImageView view, VkImageLayout layout, ui
     }
 }
 
-typedef struct { float proj[4], zt[4], fl[4], up[4], cc[4], sz[4], fog[4], top[4], bot[4], mi[4], vr[3][4], rq[2][4], rc[4], rb[4], sky[4], fd[4], fw[4], pf[4], va[4], vc[4], vb[4], vd[4], dq[2][4], dk[4], ls[4]; } UBlock;
+typedef struct { float proj[4], zt[4], fl[4], up[4], cc[4], sz[4], fog[4], top[4], bot[4], mi[4], vr[3][4], rq[2][4], rc[4], rb[4], sky[4], fd[4], fw[4], pf[4], va[4], vc[4], vb[4], vd[4], dq[2][4], dk[4], ls[4], fz[4]; } UBlock;
 
 static VkDescriptorSet make_set(const UBlock *ub, VkImageView depth, VkImageView color, VkImageView mask, VkImageView tint) {
     VkSpan s = vk_transient_copy(ub, sizeof *ub, 256);
@@ -686,6 +687,14 @@ static struct {
     FovShade sh;
 } noted[2];
 
+// (exec.c vk_stereo_eyes, before edge_eye) the eye's colour as anti-aliased / upscaled (LARECOMP_VR_AA, _UPSCALE): read
+// in place of the eye output, with its own filled part; VK_NULL_HANDLE: the eye output
+static struct { VkImageView v; float fx, fy; } g_cover[2];
+void edge_color_override(int eye, VkImageView view, float fx, float fy) {
+    if (eye < 0 || eye > 1) return;
+    g_cover[eye].v = view, g_cover[eye].fx = fx, g_cover[eye].fy = fy;
+}
+
 void stereo_eye_post(const StereoEyePost *e) {
     if (e->eye < 0 || e->eye > 1) return;
     if (!cfg.init) cfg_init();
@@ -729,7 +738,7 @@ void stereo_eye_post(const StereoEyePost *e) {
 typedef struct {
     int eye;
     VkImageView color, depth;
-    float color_crop[2], depth_crop[2], V[16], P[16], zn, zf, pivot_dist;
+    float color_crop[2], depth_crop[2], color_px[2], V[16], P[16], zn, zf, pivot_dist;  // (color_px: the eye output's filled part, pixels)
     bool origin_lower_left, depth_minus1;
 } EdgeEye;
 
@@ -838,6 +847,8 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
         ein.color = vk_image_view(n->color, VK_IMAGE_VIEW_TYPE_2D, cf, 0, 1, n->layer, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
         ein.depth = vk_image_view(n->depth, VK_IMAGE_VIEW_TYPE_2D, n->depth->format, 0, 1, n->depth_layer, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
         ein.color_crop[0] = n->ax, ein.color_crop[1] = n->ay, ein.depth_crop[0] = n->dax, ein.depth_crop[1] = n->day;
+        ein.color_px[0] = n->ax * n->color->width, ein.color_px[1] = n->ay * n->color->height;
+        if (g_cover[eye].v) ein.color = g_cover[eye].v, ein.color_crop[0] = g_cover[eye].fx, ein.color_crop[1] = g_cover[eye].fy;
         memcpy(ein.V, n->V, 64), memcpy(ein.P, n->P, 64);
         ein.zn = n->zn, ein.zf = n->zf, ein.pivot_dist = 0;
         ein.origin_lower_left = renderer_origin_lower_left();
@@ -910,6 +921,8 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
         u.dk[0] = 1, u.dk[1] = FADE_CUT_BAND, u.dk[2] = FADE_CUT_MARGIN;
     }
     screen_filter_params(u.pf);
+    // (foveated) a pixel of the foveated passes from the output position: q * fz.xy; a block centre there read at * fz.zw
+    u.fz[0] = in->color_px[0], u.fz[1] = in->color_px[1], u.fz[2] = in->color_crop[0] / u.fz[0], u.fz[3] = in->color_crop[1] / u.fz[1];
     if (noted[eye].vrs && !(cfg.smooth_off)) {  // (the foveated passes' shading: edge.c colour())
         const FovShade *sh = &noted[eye].sh;
         u.va[0] = 1, u.va[1] = (float)sh->nfoci, u.va[2] = sh->r0, u.va[3] = sh->r1;

@@ -39,6 +39,9 @@ bool edge_passthrough_wanted(void);
 // in and out) in place of the present draw (exec.c vk_stereo_eyes, one line). false: mode black, no depth noted, or a
 // failure (logged once): the caller draws the eye as before and nothing was recorded.
 bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uint32_t w, uint32_t h);
+// (exec.c, before edge_eye) the eye's colour to read in place of its output, with its own filled part (the eyes'
+// anti-aliasing / upscale, LARECOMP_VR_AA / LARECOMP_VR_UPSCALE); VK_NULL_HANDLE: the eye output itself
+void edge_color_override(int eye, VkImageView view, float fx, float fy);
 
 // The Mysterious Woods' fog (fragment shader hashes), made for the stock camera and wrong from the diorama, so the VR
 // eyes leave them out (exec.c) unless LARECOMP_VR_WOODS_FOG=1: the dome round the game camera, drawn without a depth test
