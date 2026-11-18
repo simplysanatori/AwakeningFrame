@@ -4,10 +4,12 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include <SDL3/SDL.h>
 
 #include "../rt.h"
+#include "../settings.h"
 #include "xr_input.h"
 #include "xr_internal.h"
 
@@ -24,13 +26,28 @@ PFN_xrGetDisplayRefreshRateFB p_xrGetDisplayRefreshRateFB;
 PFN_xrRequestDisplayRefreshRateFB p_xrRequestDisplayRefreshRateFB;
 PFN_xrConvertTimeToTimespecTimeKHR p_xrConvertTimeToTimespecTimeKHR;
 
+// LARECOMP_XR=1 (the Frame's launcher sets it; --vr, xr_args), read once. A PC VR package (LARECOMP_PCVR, make PCVR=1)
+// is in VR unless LARECOMP_XR=0 (--flat), or xr_pc_start turned it off.
+static int g_wanted = -1;
 bool xr_wanted(void) {
-    static int on = -1;
-    if (on < 0) {
+    if (g_wanted < 0) {
         const char *e = getenv("LARECOMP_XR");
-        on = e && *e && atoi(e) != 0;
+#ifdef LARECOMP_PCVR
+        g_wanted = !e || !*e || atoi(e) != 0;
+#else
+        g_wanted = e && *e && atoi(e) != 0;
+#endif
     }
-    return on;
+    return g_wanted;
+}
+
+// --vr / --flat on the command line (main.c, first thing: before anything reads LARECOMP_XR). The re-exec of a start
+// whose guest window was taken keeps the command line, so it keeps the choice.
+void xr_args(int argc, char **argv) {
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--vr")) setenv("LARECOMP_XR", "1", 1);
+        else if (!strcmp(argv[i], "--flat")) setenv("LARECOMP_XR", "0", 1);
+    }
 }
 
 const char *xr_result_str(XrResult r) {
@@ -336,4 +353,40 @@ void xr_session_destroy(void) {
 // The session ended (EXITING, or the runtime is going away): the app closes as when its window is closed.
 void xr_request_app_quit(void) {
     rt_request_quit("the XR session ended");
+}
+
+// A PC VR package's start (main.c, once the data folder is known; nothing in other builds). It starts in VR unless told
+// otherwise, so a double click or a Steam library entry needs no options, but:
+//   - no game files yet: the start screen opens in the window, where its folder picker (a desktop dialog) can be seen;
+//     VR from the next start (--vr: VR now);
+//   - no OpenXR runtime, or none with a headset (the instance or the system fails): the window, with a log line, instead
+//     of a start that stops. Asked for with --vr or LARECOMP_XR=1, a failure still stops with the error.
+// The start screen's update check is off: it names upstream's flat releases, not this package's.
+void xr_pc_start(const char *game_dir) {
+#ifdef LARECOMP_PCVR
+    setenv("LARECOMP_NO_UPDATE_CHECK", "1", 0);
+    if (!xr_wanted()) { LOG("[xr] PC VR package: in the window (--flat or LARECOMP_XR=0)\n"); return; }
+    const char *e = getenv("LARECOMP_XR");
+    if (e && *e) { LOG("[xr] PC VR package: VR mode (asked for)\n"); return; }
+    char p[1100];
+    struct stat st;
+    snprintf(p, sizeof p, "%s/exefs/main", game_dir);
+    if (stat(p, &st) != 0) {
+        LOG("[xr] PC VR package: no game files yet: the start screen opens in the window to set them up; VR from the next "
+            "start (--vr: VR now)\n");
+        g_wanted = 0;
+        return;
+    }
+    settings_load();  // (the VR tab's rows into the environment first: xr_input_init reads the layout)
+    if (!xr_instance_create()) {
+        LOG("[xr] PC VR package: no OpenXR runtime with a headset (see above): starting in the window. Start SteamVR with "
+            "the headset connected, then start the game again (--vr: stop with the error instead)\n");
+        if (g_xr.inst) p_xrDestroyInstance(g_xr.inst), g_xr.inst = XR_NULL_HANDLE;
+        g_wanted = 0;
+        return;
+    }
+    LOG("[xr] PC VR package: VR mode (--flat for the window)\n");
+#else
+    (void)game_dir;
+#endif
 }

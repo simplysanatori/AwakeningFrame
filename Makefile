@@ -164,18 +164,6 @@ SHADERC  ?= $(shell pkg-config --libs shaderc 2>/dev/null || echo -lshaderc)
 LDFLAGS  := -fuse-ld=lld -rdynamic $(if $(DEPS),-L$(DEPS)/lib -Wl$(comma)-rpath$(comma)$(abspath $(DEPS))/lib) \
             -lSDL3 -lavformat -lavcodec -lavutil -lswscale -lvulkan $(SHADERC) -lpthread -ldl -lm
 BACKEND_SRC := $(wildcard runtime/nvn/vulkan/*.c) $(wildcard runtime/nvn/vulkan/*.cpp)
-# The VR mode (runtime/xr, LARECOMP_XR=1) when DEPS has the OpenXR headers (tools/fetch_openxr.sh); the OpenXR loader
-# is opened at run time (the runtime's own), so nothing more is linked. Without the headers: no VR mode.
-XR_HDR   := $(if $(DEPS),$(wildcard $(DEPS)/include/openxr/openxr.h))
-ifneq ($(XR_HDR),)
-BACKEND_SRC += $(wildcard runtime/xr/*.c)
-$(B)/rt/nvn/vulkan/device.o: RTFLAGS += -DLARECOMP_HAVE_XR
-$(B)/rt/nvn/vulkan/stereo.o: RTFLAGS += -DLARECOMP_HAVE_XR
-$(B)/rt/nvn/vulkan/foveation.o: RTFLAGS += -DLARECOMP_HAVE_XR
-$(B)/rt/hle/input.o: RTFLAGS += -DLARECOMP_HAVE_XR
-$(B)/rt/main.o: RTFLAGS += -DLARECOMP_HAVE_XR
-RT_HDRS  += $(wildcard runtime/xr/*.h)
-endif
 BACKEND_OBJ := $(patsubst runtime/%.cpp,$(B)/rt/%.o,$(patsubst runtime/%.c,$(B)/rt/%.o,$(BACKEND_SRC)))
 IMGUI_OBJ += $(B)/imgui/imgui_impl_vulkan.o
 UIFLAGS  := -x c++  # the .mm UI sources are plain C++ apart from __APPLE__ blocks
@@ -212,6 +200,34 @@ GAMELIB  := $(B)/lasgame.dll
 LDFLAGS  += -Wl,--export-all-symbols -Wl,--out-implib,$(B)/lasrecomp.dll.a
 GAMELIB_LDFLAGS := -shared -fuse-ld=lld $(B)/lasrecomp.dll.a
 GAMELIB_SHARED := -shared  # (+ the import library: runtime/gamebuild.c)
+endif
+
+# The VR mode (runtime/xr, docs/af/PCVR.md), Linux and Windows. XR=auto (default): built in when DEPS has the OpenXR
+# headers (tools/fetch_openxr.sh: the Steam Frame build, the desktop tests); XR=0: never; XR=1: stops without them. The
+# OpenXR loader is opened at run time (the runtime's own, or the one a package carries), so nothing more is linked.
+# PCVR=1: the PC VR packages (make appimage, make dist, which pass XR=0 otherwise): in VR unless started with --flat.
+# A build folder holds one or the other: make does not rebuild an object when only its flags change.
+XR       ?= auto
+PCVR     ?= 0
+ifneq ($(filter linux windows,$(PLATFORM)),)
+ifneq ($(XR),0)
+XR_HDR   := $(if $(DEPS),$(wildcard $(DEPS)/include/openxr/openxr.h))
+ifeq ($(XR)$(XR_HDR),1)
+$(error XR=1: no OpenXR headers in $(DEPS)/include/openxr (tools/fetch_openxr.sh; Windows: pcvr/fetch-openxr-windows.sh))
+endif
+ifneq ($(XR_HDR),)
+BACKEND_OBJ += $(patsubst runtime/%.c,$(B)/rt/%.o,$(wildcard runtime/xr/*.c))
+$(B)/rt/nvn/vulkan/device.o: RTFLAGS += -DLARECOMP_HAVE_XR
+$(B)/rt/nvn/vulkan/stereo.o: RTFLAGS += -DLARECOMP_HAVE_XR
+$(B)/rt/nvn/vulkan/foveation.o: RTFLAGS += -DLARECOMP_HAVE_XR
+$(B)/rt/hle/input.o: RTFLAGS += -DLARECOMP_HAVE_XR
+$(B)/rt/main.o: RTFLAGS += -DLARECOMP_HAVE_XR
+RT_HDRS  += $(wildcard runtime/xr/*.h)
+ifeq ($(PCVR),1)
+$(B)/rt/main.o $(B)/rt/xr/xr_session.o: RTFLAGS += -DLARECOMP_PCVR
+endif
+endif
+endif
 endif
 
 # DYN_BASE=1: the guest window starts where the process has room instead of at 0x70_0000_0000 (runtime/rt.h), as on

@@ -163,7 +163,7 @@ bool rt_quit_requested(void) {
 // VR mode, XR session running: a window close SDL reports (gamescope closing or re-moding its window, a stray SIGTERM
 // SDL would turn into SDL_EVENT_QUIT) is not a quit; it is logged and ignored. Flat mode and every other state: false.
 bool rt_ignore_window_close(const char *what) {
-#ifdef LARECOMP_HAVE_XR
+#if defined(LARECOMP_HAVE_XR) && !defined(LARECOMP_PCVR)  // (a PC VR package: closing the window quits, as in flat mode)
     if (xr_wanted() && xr_session_running()) {
         LOG("[quit] %s from the window ignored (VR session running) at %llu ms\n", what, (unsigned long long)SDL_GetTicks());
         return true;
@@ -411,6 +411,9 @@ int main(int argc, char **argv) {
 #ifdef __APPLE__
     metal_hud_relaunch();
 #endif
+#ifdef LARECOMP_HAVE_XR
+    xr_args(argc, argv);  // (--vr / --flat)
+#endif
 #ifndef _WIN32
     cli_keep_stdout(argc, argv);
 #endif
@@ -456,6 +459,9 @@ int main(int argc, char **argv) {
         else if (argv[i][0] != '-') root = arg_root;
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
+#ifdef LARECOMP_HAVE_XR
+    xr_pc_start(root);  // (a PC VR package: VR or the window)
+#endif
 #ifndef _WIN32
     if (build_only) return build_game_code_cli(root);
     if (status_only) {
