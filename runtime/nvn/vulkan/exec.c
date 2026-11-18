@@ -10336,9 +10336,12 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
         uint32_t ly = lay ? (uint32_t)eye : 0;
         if (g_eye_posted[eye] != g_eye_out_n[eye]) {  // (a new output: the eye post hook, once)
             g_eye_posted[eye] = g_eye_out_n[eye];
-            StereoEyePost ep = {.eye = eye, .cb = cb, .color = b, .depth = g_eye_depth[eye], .width = b->width, .height = b->height,
-                                .layer = ly, .depth_layer = vk_b_layered(g_eye_depth[eye]) ? (uint32_t)eye : 0,
+            TexBackend *zb = g_eye_depth[eye];
+            StereoEyePost ep = {.eye = eye, .cb = cb, .color = b, .depth = zb, .width = b->width, .height = b->height,
+                                .layer = ly, .depth_layer = vk_b_layered(zb) ? (uint32_t)eye : 0,
                                 .ax = b->scalable && b->ax > 0 ? b->sx / b->ax : 1, .ay = b->scalable && b->ay > 0 ? b->sy / b->ay : 1,
+                                .dax = zb && zb->scalable && zb->ax > 0 ? zb->sx / zb->ax : 1,
+                                .day = zb && zb->scalable && zb->ay > 0 ? zb->sy / zb->ay : 1,
                                 .zn = g_eye_zr[eye][0], .zf = g_eye_zr[eye][1]};
             ep.have_matrices = stereo_eye_matrices(eye, ep.V, ep.P);
             if (!ep.have_matrices) for (int i = 0; i < 16; i++) ep.V[i] = ep.P[i] = i % 5 == 0;

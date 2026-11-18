@@ -62,18 +62,21 @@ static void cfg_init(void) {
     "layout(std140, set = 0, binding = 0) uniform U {\n"                                                               \
     "  layout(row_major) mat4 inv;  // the capture: clip (game convention) -> world\n"                                 \
     "  layout(row_major) mat4 cur;  // this eye: world -> clip (game convention)\n"                                    \
-    "  vec4 grid;  // cells x, cells y, the capture's filled part x, y\n"                                              \
+    "  vec4 grid;  // cells x, cells y, the filled part x, y of the capture's colour\n"                                \
     "  vec4 cz;    // the capture's depth range: zn, zf - zn, depth in -1..1, the cell jump share\n"                    \
     "  vec4 ce;    // the capture's eye (world)\n"                                                                     \
-    "  vec4 sz;    // this eye's output size w h\n"                                                                    \
+    "  vec4 sz;    // this eye's filled size w h (pixels), the filled part x, y of its scene depth\n"                  \
+    "  vec4 cdp;   // the filled part x, y of the capture's depth\n"                                                   \
     "} u;\n"
 
 static const char *vs_src =
     "#version 450\n" UBLOCK
     "layout(set = 0, binding = 1) uniform sampler2D cd;\n"  // the capture's depth (nearest)
     "layout(location = 0) out vec2 v_uv;\n"
-    "vec3 world(vec2 g) {\n"  // a grid point (0..1 over the capture's filled part) -> world; w < 0: no geometry
-    "  float d = textureLod(cd, g * u.grid.zw, 0.0).r;\n"
+    // a grid point (0..1 over the capture's view) -> world; 1e30: no geometry. The depth image has its own size and its
+    // own filled part, not the colour's (the last column and row: the texel inside it)
+    "vec3 world(vec2 g) {\n"
+    "  float d = textureLod(cd, min(g * u.cdp.xy, u.cdp.xy - 0.5 / vec2(textureSize(cd, 0))), 0.0).r;\n"
     "  if (d >= 0.9999) return vec3(1e30);\n"
     "  float z = (d - u.cz.x) / u.cz.y;\n"
     "  if (u.cz.z > 0.5) z = z * 2.0 - 1.0;\n"
@@ -108,27 +111,29 @@ static const char *fs_src =
     "layout(location = 0) in vec2 v_uv;\n"
     "layout(location = 0) out vec4 o;\n"
     "void main() {\n"
-    "  if (texture(sd, gl_FragCoord.xy / u.sz.xy).r < 0.9999) discard;\n"  // (the live scene has something here: it wins)
+    "  if (texture(sd, gl_FragCoord.xy / u.sz.xy * u.sz.zw).r < 0.9999) discard;\n"  // (the live scene has something here: it wins)
     "  o = vec4(texture(cc, v_uv).rgb, 1.0);\n"
     "}\n";
 
-// The edge fill (the void past the drawn world): seed = each texel of an eighth-size image is an 8x8 block of the eye: the
-// average colour of every other pixel each way with something drawn (the live scene's depth, or the backdrop's own) times their share, and
-// that share (premultiplied colour); its mips (blits) average that out; the fill reads, for an empty pixel, the levels from
+// The edge fill (the void past the drawn world): seed = an image an eighth of the eye image's size laid over the eye's
+// view (the filled part of the eye image, whatever dynamic resolution made it: the fill is the same at every eye size).
+// Each texel is a block of the view (8x8 pixels at full size): the average colour of 16 points of it with something
+// drawn (the live scene's depth, or the backdrop's own) times their share, and that share (premultiplied colour); its mips (blits) average that out; the fill reads, for an empty pixel, the levels from
 // the coarsest down, each laid over the coarser ones where it has colour (pull-push): the colour of the nearest drawn world,
 // smoothly spread; it fades to black with the share of drawn pixels around (a coarse level), so the colour bleeds a little
 // way out and the world ends softly instead of at a hard black edge.
 #define EBLOCK                                                                                                         \
     "layout(std140, set = 0, binding = 0) uniform E {\n"                                                               \
-    "  vec4 sz;   // eye w h, seed w h\n"                                                                              \
-    "  vec4 cr;   // filled part x y, levels, the fade's level\n"                                                      \
-    "  vec4 fl;   // backdrop drawn this eye (its depth is binding 3)\n"                                               \
+    "  vec4 sz;   // the eye's filled size w h (pixels), seed w h\n"                                                   \
+    "  vec4 cr;   // the colour's filled part x y, levels, the fade's level\n"                                         \
+    "  vec4 fl;   // backdrop drawn this eye (its depth is binding 3), -, the scene depth's filled part x y\n"         \
     "} u;\n"                                                                                                           \
     "layout(set = 0, binding = 1) uniform sampler2D sd;\n"  /* the scene depth (nearest) */                             \
     "layout(set = 0, binding = 2) uniform sampler2D ec;\n"  /* the eye output (nearest), or the seed's mips */          \
     "layout(set = 0, binding = 3) uniform sampler2D bd;\n"  /* the backdrop's depth (nearest) */                        \
     "layout(location = 0) out vec4 o;\n"                                                                               \
-    "bool drawn(vec2 q) { return texture(sd, q).r < 0.9999 || (u.fl.x > 0.5 && texture(bd, q).r < 0.9999); }\n"
+    /* q: 0..1 over the eye's view; each image through its own filled part (the backdrop's depth has the colour's) */    \
+    "bool drawn(vec2 q) { return texture(sd, q * u.fl.zw).r < 0.9999 || (u.fl.x > 0.5 && texture(bd, q * u.cr.xy).r < 0.9999); }\n"
 
 static const char *fvs_src =
     "#version 450\n"
@@ -144,9 +149,8 @@ static const char *seed_fs =
     "  vec3 c = vec3(0.0);\n"
     "  float n = 0.0;\n"
     "  for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++) {\n"
-    "    vec2 q = (b + vec2(float(i), float(j)) * 2.0 + 0.5) / u.sz.xy;\n"
-    "    if (q.x > u.cr.x || q.y > u.cr.y) continue;\n"
-    "    if (drawn(q)) { c += texture(ec, q).rgb; n += 1.0; }\n"
+    "    vec2 q = (b + vec2(float(i), float(j)) * 2.0 + 0.5) / (u.sz.zw * 8.0);\n"
+    "    if (drawn(q)) { c += texture(ec, q * u.cr.xy).rgb; n += 1.0; }\n"
     "  }\n"
     "  o = vec4(c / 16.0, n / 16.0);\n"
     "}\n";
@@ -191,7 +195,8 @@ static struct {
 
 static struct {
     bool valid;
-    float inv[16], eye[3], fwd[3], anchor[3], ax, ay, zn, zf;
+    float inv[16], eye[3], fwd[3], anchor[3], zn, zf;
+    float ax, ay, dax, day;  // the filled part of the capture's colour, and of its depth (another image: its own)
     bool dm1;
     double t;
     int level;
@@ -381,16 +386,17 @@ static void capture(const StereoEyePost *e) {
     extern int game_level_overworld(void);
     extern uint32_t nvn_depth_mode(void);
     cap.level = game_level_overworld();
-    cap.ax = e->ax, cap.ay = e->ay, cap.zn = e->zn, cap.zf = e->zf, cap.dm1 = nvn_depth_mode() == 0;
+    cap.ax = e->ax, cap.ay = e->ay, cap.dax = e->dax, cap.day = e->day, cap.zn = e->zn, cap.zf = e->zf, cap.dm1 = nvn_depth_mode() == 0;
     cap.t = plat_now_ns() / 1e9;
     cap.valid = true;
     if (need > 0 && --need > 0) settle_until = cap.t + cfg.settle;
     n_caps++;
-    if (cfg.log) LOG("[scene] backdrop capture %u: eye (%.1f %.1f %.1f) table (%.1f %.1f) fwd (%.2f %.2f %.2f), filled %.2f x %.2f\n", n_caps,
-                     cap.eye[0], cap.eye[1], cap.eye[2], cap.anchor[0], cap.anchor[2], cap.fwd[0], cap.fwd[1], cap.fwd[2], cap.ax, cap.ay);
+    if (cfg.log) LOG("[scene] backdrop capture %u: eye (%.1f %.1f %.1f) table (%.1f %.1f) fwd (%.2f %.2f %.2f), filled %.2f x %.2f of %ux%u, "
+                     "depth %.2f x %.2f of %ux%u\n", n_caps, cap.eye[0], cap.eye[1], cap.eye[2], cap.anchor[0], cap.anchor[2], cap.fwd[0], cap.fwd[1],
+                     cap.fwd[2], cap.ax, cap.ay, c->width, c->height, cap.dax, cap.day, d->width, d->height);
 }
 
-typedef struct { float inv[16], cur[16], grid[4], cz[4], ce[4], sz[4]; } UBlock;
+typedef struct { float inv[16], cur[16], grid[4], cz[4], ce[4], sz[4], cdp[4]; } UBlock;
 
 static bool fill(const StereoEyePost *e) {
     TexBackend *c = e->color, *d = e->depth;
@@ -402,6 +408,8 @@ static bool fill(const StereoEyePost *e) {
     VkImageView cv = vk_image_view(c, VK_IMAGE_VIEW_TYPE_2D, c->format, 0, 1, e->layer, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
     VkImageView dv = vk_image_view(d, VK_IMAGE_VIEW_TYPE_2D, d->format, 0, 1, e->depth_layer, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
     if (!cv || !dv) return false;
+    uint32_t w = (uint32_t)lroundf(e->ax * (float)c->width), h = (uint32_t)lroundf(e->ay * (float)c->height);
+    if (!w || !h) return false;
     UBlock u;
     memset(&u, 0, sizeof u);
     memcpy(u.inv, cap.inv, 64);
@@ -409,7 +417,8 @@ static bool fill(const StereoEyePost *e) {
     u.grid[0] = u.grid[1] = (float)cfg.grid, u.grid[2] = cap.ax, u.grid[3] = cap.ay;
     u.cz[0] = cap.zn, u.cz[1] = cap.zf - cap.zn, u.cz[2] = cap.dm1 ? 1.0f : 0.0f, u.cz[3] = cfg.jump;
     memcpy(u.ce, cap.eye, 12);
-    u.sz[0] = (float)c->width, u.sz[1] = (float)c->height;
+    u.sz[0] = (float)w, u.sz[1] = (float)h, u.sz[2] = e->dax, u.sz[3] = e->day;
+    u.cdp[0] = cap.dax, u.cdp[1] = cap.day;
     VkSpan s = vk_transient_copy(&u, sizeof u, 256);
     VkDescriptorSet set = vk_alloc_set(g.sl);
     VkSampler nearest = vk_default_sampler(false), lin = vk_default_sampler(true);
@@ -425,8 +434,6 @@ static bool fill(const StereoEyePost *e) {
     rec_UpdateDescriptorSets(4, wr);
     VkCommandBuffer cb = e->cb;
     vk_full_barrier(cb);
-    uint32_t w = (uint32_t)lroundf(e->ax * (float)c->width), h = (uint32_t)lroundf(e->ay * (float)c->height);
-    if (!w || !h) return false;
     VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = cv, .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
                                     .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
     VkRenderingAttachmentInfo za = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g.zb.view, .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
@@ -600,9 +607,11 @@ static void edge_fill(const StereoEyePost *e, bool backdrop_drawn) {
     VkImageView cv = vk_image_view(c, VK_IMAGE_VIEW_TYPE_2D, c->format, 0, 1, e->layer, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
     VkImageView dv = vk_image_view(d, VK_IMAGE_VIEW_TYPE_2D, d->format, 0, 1, e->depth_layer, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
     if (!cv || !dv) return;
-    EBlock eb = {.sz = {(float)c->width, (float)c->height, (float)sw, (float)sh}, .cr = {e->ax, e->ay, 0, 0}, .fl = {backdrop_drawn ? 1.0f : 0.0f}};
-    // the fade's level: where a seed texel covers about the reach (share of the eye's height, in eighth-size texels)
-    float reach = cfg.edge_reach * (float)c->height / 8.0f;
+    uint32_t w = (uint32_t)lroundf(e->ax * (float)c->width), h = (uint32_t)lroundf(e->ay * (float)c->height);
+    if (!w || !h) return;
+    EBlock eb = {.sz = {(float)w, (float)h, (float)sw, (float)sh}, .cr = {e->ax, e->ay, 0, 0}, .fl = {backdrop_drawn ? 1.0f : 0.0f, 0, e->dax, e->day}};
+    // the fade's level: where a seed texel covers about the reach (share of the view's height, in seed texels)
+    float reach = cfg.edge_reach * (float)sh;
     eb.cr[2] = (float)g.seed.levels, eb.cr[3] = fminf(log2f(fmaxf(reach, 1.0f)), (float)g.seed.levels - 1);
     VkCommandBuffer cb = e->cb;
     vk_full_barrier(cb);
@@ -615,8 +624,7 @@ static void edge_fill(const StereoEyePost *e, bool backdrop_drawn) {
         rec_CmdBlitImage(cb, g.seed.img, VK_IMAGE_LAYOUT_GENERAL, g.seed.img, VK_IMAGE_LAYOUT_GENERAL, 1, &r, VK_FILTER_LINEAR);
     }
     vk_full_barrier(cb);
-    uint32_t w = (uint32_t)lroundf(e->ax * (float)c->width), h = (uint32_t)lroundf(e->ay * (float)c->height);
-    if (w && h) epass(cb, cv, w, h, bp, eset(&eb, dv, g.seed.all, mip_sampler(), g.zb.view));
+    epass(cb, cv, w, h, bp, eset(&eb, dv, g.seed.all, mip_sampler(), g.zb.view));
     vk_full_barrier(cb);
 }
 
@@ -627,6 +635,15 @@ void scene_eye_post(const StereoEyePost *e) {
     if (mode != VR_SCENE_BACKDROP && (state || cap.valid || settle_until >= 0))
         vr_scene_backdrop_wide(false), state = 0, cap.valid = false, settle_until = -1, have_last_anchor = false;
     if (mode == VR_SCENE_OFF || e->eye < 0 || e->eye > 1 || !e->depth || !e->color) return;
+    if (cfg.log && e->eye == 0) {  // (each change of the eye's size: what a draw reads its two images with)
+        static float was[4];
+        const TexBackend *c = e->color, *d = e->depth;
+        float now[4] = {e->ax * (float)c->width, e->ay * (float)c->height, e->dax * (float)d->width, e->day * (float)d->height};
+        if (memcmp(was, now, sizeof now))
+            LOG("[scene] eye output filled %.4f x %.4f of %ux%u, its scene depth %.4f x %.4f of %ux%u\n", e->ax, e->ay, c->width, c->height,
+                e->dax, e->day, d->width, d->height);
+        memcpy(was, now, sizeof now);
+    }
     extern int game_level_overworld(void);
     bool edge = cfg.edge && game_level_overworld() == 1;  // (indoors the dark around a room is the game's look)
     if (mode != VR_SCENE_BACKDROP || !e->have_matrices || !init()) {
