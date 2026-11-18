@@ -69,6 +69,14 @@ rows. The hooks exist in VR builds only; in a flat build the rows keep their def
 `larecomp.ini` files from before may still hold `vr_table_height` / `_size` / `_tilt`: they are read and ignored (the
 next save drops them).
 
+## Launcher switches without a row
+
+`AF_FDM=0` in `session.env` takes Valve's foveation layer (`VK_LAYER_VALVE_fdm_injection`, SteamVR's eye-tracked foveation) out of the
+game: the wrapper sets `DISABLE_VULKAN_FDM_INJECTION_LAYER=1` and drops the layer from `VK_INSTANCE_LAYERS`, which Steam fills and
+which overrides the variable. `AF_FDM=1` leaves what Steam set, and so does no value. Every run log (`logs/run-<time>.log`) has a line
+with the value and what `VK_INSTANCE_LAYERS` held, which says whether the layer was on. It is separate from the game's own Foveation
+row, which sets the shading-rate map the game submits.
+
 ## Defaults and the saved file
 
 Defaults: Refresh Rate 120 Hz (60 FPS), Foveation High, Dynamic Resolution On (floor 1152 px; 10 ms budget at 120 Hz), Table Edge Off, Turning

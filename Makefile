@@ -272,6 +272,9 @@ $(B)/rt/gamebuild.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"' -DGAMELIB_BASE_ID
                                 -DGAMELIB_IOS_CFLAGS='"$(strip $(filter-out -Iruntime,$(GENFLAGS_IOS)))"' \
                                 -DIOS_MIN='"$(IOS_MIN)"'
 
+# AF_BUILD_STAMP=<text>: the program's log says it ([info] build ...); steam-frame/dev/make-dev-app.sh sets it for a test build
+$(B)/rt/main.o: RTFLAGS += $(if $(AF_BUILD_STAMP),-DAF_BUILD_STAMP='"$(AF_BUILD_STAMP)"')
+
 $(B)/rt/%.o: runtime/%.c $(RT_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(RTFLAGS) -c $< -o $@

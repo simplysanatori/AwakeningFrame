@@ -107,3 +107,7 @@ allowed in loops`); no pipeline has failed in the driver.
 
 The program's own shader preparation (`shader_prep.c`) finds each shader by its hash in the player's game files, so it needs
 them; whether it ends under the shim is not known yet.
+
+The Dev kit (`docs/af/DEVKIT.md`) builds the game code for the Frame here too: `steam-frame/dev/make-dev-app.sh` runs `make ARCH=aarch64 gen`
+and the Arm64 `lasgame.so`, and `lasrecomp --game-code-status` under qemu accepts it. Under qemu the program loads it and runs the game's
+start (the intro movie); the shim draws nothing and qemu is far too slow to reach a level.

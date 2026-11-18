@@ -14,8 +14,10 @@
 # in <program folder>/../session.env (e.g. AF_REFRESH_HZ=90, LARECOMP_XR_EYE_SCALE=0.8).
 # Variables: AF_REFRESH_HZ (72, 90 or 120; default: the VR tab's Refresh Rate, else 120), AF_FPS=60 (a test: 60 fps at
 # 90 Hz, frames alternating one and two refreshes; the VR tab's third Refresh Rate choice does the same), AF_VRTIMING=0 (no compositor log), AF_THROTTLE=1 (a test: SteamVR
-# paces the game to every other refresh and makes the second refresh itself), AF_VRCMD,
-# AF_HEADSET_FLAG, AF_LOGS, AF_KEEP (sessions of logs kept, default 12), LARECOMP_DATA_ROOT.
+# paces the game to every other refresh and makes the second refresh itself), AF_FDM (0: Valve's foveation layer
+# VK_LAYER_VALVE_fdm_injection removed, 1: left as Steam set it; unset: as Steam set it), AF_VRCMD,
+# AF_HEADSET_FLAG, AF_LOGS, AF_KEEP (sessions of logs kept, default 12), LARECOMP_DATA_ROOT. session.env is sourced by the shell,
+# so a value may use $STAMP (the launch time) and $LOGS: LARECOMP_XR_POSE_LOG=$LOGS/pose-$STAMP.log is one file per launch.
 HERE=$(dirname "$(readlink -f "$0")")
 ROOT=$(dirname "$HERE")
 LOGS=${AF_LOGS:-$ROOT/logs}
@@ -37,14 +39,44 @@ for a in "$@"; do
 done
 
 log "wrapper, session $STAMP, steam appid '${SteamAppId:-unset}', program $HERE"
+[ -f "$HERE/VERSION" ] && log "version $(head -n 1 "$HERE/VERSION"), $(head -n 1 "$HERE/.af-install" 2> /dev/null || echo 'no install marker')"
 if [ -f "$ROOT/session.env" ]; then
     log "session.env:"; cat "$ROOT/session.env"
+    cp -f "$ROOT/session.env" "$LOGS/session-$STAMP.env" 2> /dev/null   # (as it was for this launch)
     set -a; . "$ROOT/session.env"; set +a
     [ -n "${AF_FLAT:-}" ] && FLAT=$AF_FLAT
 fi
 
+# Valve's foveation layer (VK_LAYER_VALVE_fdm_injection, SteamVR's eye-tracked foveation). AF_FDM=0 takes it out
+# (DISABLE_VULKAN_FDM_INJECTION_LAYER=1, and it is dropped from VK_INSTANCE_LAYERS: Steam lists it there, which overrides
+# the variable); AF_FDM=1 and unset leave what Steam set. The log says which, and what the list held.
+log "AF_FDM=${AF_FDM:-unset}, VK_INSTANCE_LAYERS='${VK_INSTANCE_LAYERS:-}', DISABLE_VULKAN_FDM_INJECTION_LAYER='${DISABLE_VULKAN_FDM_INJECTION_LAYER:-}'"
+case "${AF_FDM:-}" in
+    0)
+        export DISABLE_VULKAN_FDM_INJECTION_LAYER=1
+        if [ -n "${VK_INSTANCE_LAYERS:-}" ]; then
+            VK_INSTANCE_LAYERS=$(printf '%s' "$VK_INSTANCE_LAYERS" | tr ':' '\n' | grep -v '^VK_LAYER_VALVE_fdm_injection$' | paste -sd: -)
+            if [ -n "$VK_INSTANCE_LAYERS" ]; then export VK_INSTANCE_LAYERS; else unset VK_INSTANCE_LAYERS; fi
+        fi
+        log "AF_FDM=0: Valve's foveation layer is off (VK_INSTANCE_LAYERS now '${VK_INSTANCE_LAYERS:-}')"
+        ;;
+    1) log "AF_FDM=1: Valve's foveation layer left as Steam set it" ;;
+    "") ;;
+    *) log "AF_FDM=$AF_FDM is not 0 or 1: left as Steam set it" ;;
+esac
+
 export LARECOMP_DATA_ROOT=${LARECOMP_DATA_ROOT:-$HOME/.local/share/lasrecomp}
 DATA=$LARECOMP_DATA_ROOT
+# A session the wrapper did not see end (killed, power loss) has no copies of the game's logs yet, and this launch rewrites
+# them: keep what the data folder still holds.
+for f in xr_timing.log lasrecomp.log; do
+    [ -f "$DATA/$f" ] || continue
+    newest=$(ls -1t "$LOGS/${f%.log}"-*.log 2> /dev/null | head -n 1)
+    if [ -z "$newest" ] || [ "$DATA/$f" -nt "$newest" ]; then
+        cp -f "$DATA/$f" "$LOGS/${f%.log}-$(date -r "$DATA/$f" +%Y%m%d-%H%M%S)-unsaved.log" 2> /dev/null &&
+            log "kept the earlier $f, which no run copied"
+    fi
+done
 cd "$HERE" || exit 1   # (no extracted/ here, so the data root is never taken for a source checkout)
 
 # ---- what is there
@@ -174,7 +206,7 @@ for f in xr_timing.log lasrecomp.log; do
 done
 rm -f "$SESSION_START"
 KEEP=${AF_KEEP:-12}
-for pfx in run xr_timing lasrecomp vrtiming; do
-    ls -1t "$LOGS/$pfx"-*.log 2> /dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -f --
+for pfx in run xr_timing lasrecomp vrtiming pose session; do
+    ls -1t "$LOGS/$pfx"-*.log "$LOGS/$pfx"-*.env 2> /dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -f --
 done
 exit $rc

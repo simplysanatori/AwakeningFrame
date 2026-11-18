@@ -114,6 +114,7 @@ Further reading:
 - [docs/TECHNICAL.md](docs/TECHNICAL.md): how the Steam Frame port works.
 - [docs/af/](docs/af/): the design notes for each part (stereo, rig, edge, surroundings, passes, settings, tooling).
 - [docs/af/BUILD-frame.md](docs/af/BUILD-frame.md) and [docs/af/INSTALL.md](docs/af/INSTALL.md): building and installing on the Frame.
+- [docs/af/DEVKIT.md](docs/af/DEVKIT.md): test builds made on the desktop, copied to the Frame beside the release (`steam-frame/dev/`), their logs and the bench.
 - [docs/CONTROLS.md](docs/CONTROLS.md): every control and layout.
 - [docs/USER_GUIDE.md](docs/USER_GUIDE.md): the user-facing detail (install details, full controls, settings, files, troubleshooting).
 - [README.upstream.md](README.upstream.md): LAS Recomp's README. Leave it untouched.
@@ -187,6 +188,7 @@ over the VR tab (its row greys out). The VR tab's rows map onto `LARECOMP_VR_*` 
 | `LARECOMP_VR_HEIGHT/DISTANCE/SIZE/TILT/YAW` | the rig's start values |
 | `LARECOMP_XR_INFLIGHT=<n>` | cap GPU submissions in flight (experiment) |
 | `AF_THROTTLE=1` | sets SteamVR's `framesToThrottle`: SteamVR paces the game to every other refresh and makes the second one itself |
+| `AF_FDM=0` / `1` | `0` takes Valve's foveation layer (`VK_LAYER_VALVE_fdm_injection`) out: `DISABLE_VULKAN_FDM_INJECTION_LAYER=1` and the layer dropped from `VK_INSTANCE_LAYERS`; `1` and unset leave what Steam set. The run log names which and what `VK_INSTANCE_LAYERS` held |
 | `AF_VRTIMING=0` | no compositor timing log |
 | `LARECOMP_WARP_ON_LOAD`, `LARECOMP_WARP_AT` | warp to a spot for tests |
 
