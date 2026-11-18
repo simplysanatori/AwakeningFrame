@@ -8,17 +8,17 @@ How the overworld is loaded and what limits it: `docs/af/STREAM.md`.
 ## What is in memory
 
 The game keeps the 7 x 7 rooms around Link's room resident (`STREAM.md`); rooms are 15 x 12 units. Everything in that
-block is loaded and only culled on the CPU, once per frame, by a frustum from the game's own camera
-(`CULL_ASPECT` / `FOVY_SITES` in `tools/patches.py`, `rt_cull_aspect` / `rt_fovy`). So a reach of up to 3 rooms needs
-nothing loaded. Past 3 rooms nothing exists until Link gets closer.
+block is loaded and only culled on the CPU, once per frame (`STREAM.md` "What the table draws": by default with the
+table's own culling camera; in the modes below with a frustum from the game's own camera, `CULL_ASPECT` / `FOVY_SITES`
+in `tools/patches.py`, `rt_cull_aspect` / `rt_fovy`). So a reach of up to 3 rooms needs nothing loaded. Past 3 rooms nothing exists until Link gets closer.
 
 ## The modes (`LARECOMP_VR_SCENE`, ini `vr_surroundings`)
 
 | Row choice | Value | What it does |
 |---|---|---|
-| Off | `off` | the table fit as before (1.2 x 1 screens, the eyes' frusta) |
+| Off | `off` | the table's culling camera (`STREAM.md`: +-22.3 x +-23.6 units about the centre, the eyes' frusta) |
 | Low Quality | `low` | as Full, with the draws past the table shaded in 2 x 2 fragments |
-| Backdrop | `backdrop` | the table fit live; the rest from a still picture taken now and then (below) |
+| Backdrop | `backdrop` | the table as Off live; the rest from a still picture taken now and then (below) |
 | Full | `full` | every resident room within the reach, every frame |
 
 A number (`LARECOMP_VR_SCENE=3`) is Full with that many rooms. `LARECOMP_VR_SCENE_ROOMS=<n>` sets the reach of

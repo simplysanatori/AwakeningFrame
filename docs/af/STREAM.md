@@ -22,19 +22,107 @@ on the overworld, how to measure it and which levers exist. Addresses are for v1
 
 There are three limits, from the nearest to the farthest:
 
-1. **The game's CPU frustum culling** (the visibility pass culls with the game camera's aspect `+0x570` and fovy `+0x564`,
-   patched to `rt_cull_aspect` / `rt_fovy`). In VR, `runtime/nvn/vr_cull.c` widens that frustum to fit a table rectangle
-   (1.2 x 1 stock screens). Geometry that is loaded but outside this rectangle is not drawn. This made most of
-   phase 2's "zone edge" cuts: the forest's rooms 05C/04C are resident but drawn black.
+1. **The game's CPU culling.** The game culls once per frame with two frustums, both built by `f_700112f5c0` from a
+   camera matrix and a fovy, aspect, near and far: the visibility pass's (`f_70008529b0`, the camera's `+0x610`, the
+   `CULL_ASPECT` / `FOVY_SITES_1` values), which culls the level's own models (a room's ground and walls are a few big
+   models), and the engine main camera's (its `+0xe0`, built at `0x7001026830`), which culls everything else: trees,
+   houses, characters, props, effects. In VR `runtime/nvn/vr_cull.c` decides what both take in (below). Geometry that is
+   loaded but outside it is not drawn.
 2. **The streamer's 7 x 7 block**. Past +-3 rooms nothing is loaded. You only see this once the culling is widened.
 3. The camera far plane (100 outdoors, 45 indoors; floats 72-75 of the camera buffer). This matters only for long
    pull-backs.
+
+## What the table draws (`vr_cull.c`)
+
+A frustum from the game's own camera is symmetric about that camera's line of sight, and the camera stands 17.7 units
+south of its floor point and as high, looking down at 45 degrees. Fitted to the stock screen's footprint as both eyes see
+it, its floor reached 23 units north of the table's centre and 7 to 10 south; to reach as far south it would have had to
+open to 37 units north. From the game's own side that was enough. From the table's other sides, or over a flat tilt, the
+world ended in a straight cut close behind Link, and what it showed north changed with the head (looking down at the near
+edge widened the far one). With Link in the north part of a room, the whole room south of his was missing: Mabe
+Village's weathercock plaza (Field_10C, Link at 30.4, 108.6) seen from the north had black where Marin's house is.
+
+So the default hands both frustums another camera (`table_fit`, `vr_cull_camera`; `tools/patches.py`
+`CULL_FRUSTUM_SITE`, `MAIN_FRUSTUM_SITE`): 200 units above the table, looking straight down, just wide enough for a
+rectangle about the table's centre along the game camera's ground axes.
+
+- The footprint: 1.5 x the stock screen's widest half-width and 2 x its far reach on the floor, on every side
+  (`LARECOMP_VR_CULL_TABLE`; outdoors +-22.3 x +-23.6 units, 3 x 4 rooms). 23.6 is what the game camera's fit showed north.
+- Each frame it is cut down to the part both eyes can see (their frusta widened by `LARECOMP_VR_CULL_MARGIN`, 5% and half
+  a unit more), and never below the stock screen about the game camera's floor point: the main camera's frustum also
+  culls characters and effects, and those must not come and go with the head.
+- It is kept relative to the game camera's floor point, so the frame or two between the fit and its use, and a camera
+  cut, do not move it. `vr_cull_drawn` gives the edge fade the footprint (the cut only leaves out what no eye sees).
+- The main camera's frustum is built for every camera of the engine's kind; only one whose matrix is the visibility
+  pass's camera (within a frame's movement) is replaced. A reflection's keeps its own.
+- The fitted tangents of the game camera's frustum are still made and still widen the game camera's own projection, as
+  before; nothing is culled with them.
+- `LARECOMP_VR_CULL=camera` is the fit before this (the game camera's frustum on the stock screen's footprint). The
+  Surroundings' box (`LARECOMP_VR_CULL_EXTENT`, Low, Full, Backdrop's capture frames) and side views keep the game
+  camera's frustum too.
+- `LARECOMP_LOG_CULL=<n>` logs every n frames (1: every 120): the game camera, the floor rectangles, each eye's position
+  and view-projection, the fitted tangents and the table's rectangle with the frustums built from it.
+
+### Checking it (`tools/cull_check/`)
+
+`sweep.sh <out> <Field locator>` runs one mock session at a spot through 32 views: table yaw 0 / 90 / 180 / 270, tilt
+0 / 15 / 30 / 50, the head where a seated player's is (0.8 m from the table's centre, looking at it) and leaning low
+(20 cm nearer, 10 cm lower). The rig stays at tilt 30 and yaw 0; the head is moved instead, which puts the eyes at the
+same place in the game world (`cases.py`). `report.py <test> <reference> <base>` then gives, per view and eye, the share
+of the pixels whose floor point lies inside a footprint that are black here and drawn in the reference (every resident
+room: `LARECOMP_VR_CULL_TABLE_UNITS=52,42 LARECOMP_VR_CULL_EYES=0`). A dump counts only while the cull log shows a
+live camera latch and a still head. `overview.sh` shows the table from 2 m above.
+
+Measured (xrmock, 120 Hz, 1728 x 1728 eyes, fov +-48 degrees, dynamic resolution off, RTX 3080):
+
+| spot | the game camera's fit: worst views, missing in the table's footprint | the table's camera, same views |
+|---|---|---|
+| Mabe's weathercock plaza, Link at its north side (30.4, 108.6) | yaw 180 tilt 50: 9.5%; yaw 90 tilt 50: 6.0%; yaw 180 tilt 30: 4.3% (the room south, Field_11C, not drawn) | 0.0%, 0.1%, 0.0% |
+| the woods' edge, Field_09C (38.3, 104) | yaw 180 tilt 50: 11.2%; yaw 180 tilt 30: 6.3%; yaw 90 tilt 50: 5.8% (Mabe's houses and trees past the old frustum) | 0.7%, 0.6%, 0.0% |
+| Mabe's centre (38.3, 128.3) | 1.4% at most | 1.0% at most |
+| Field_07C | 0.6% at most | 0.4% at most |
+
+Inside the old fit's own floor quadrilateral (the stock screen x 1.2 x 1) neither misses anything: what was missing lay
+south of it and beside its narrow south end. A whole room south of Link's goes missing only while Link stands in the
+north part of his room (more than about 8 units from its south side): the level's models are a room big, so nearer
+the boundary the room south reached into the old frustum anyway, but its trees and houses still did not. Views with the
+head inside a tree read up to 5% from near-black pixels in either fit (checked by eye: nothing missing).
+
+Cost at the stock view (yaw 0, tilt 30, the seated head; three sessions each, mean and range):
+
+| spot | draws per game frame, before | after |
+|---|---|---|
+| Mabe's centre | 941 (934-954) | 1001 (994-1005), +6% |
+| woods' edge, Field_09C | 1012 (999-1021) | 988 (981-993), -2% |
+| Mysterious Forest, Field_06C | 747 (741-757) | 683 (681-686), -9% |
+
+The game thread's time moved with the draws and stayed inside the spread between sessions on a shared machine (Mabe:
+2.7 to 4.8 ms before, 2.9 to 5.8 after; the quietest sessions 2.68 and 2.90).
+
+From the other sides the table now holds what the old fit left out, and that costs. At the weathercock plaza, where the
+old fit drew nothing south of Link (`views_cost.py`, each view held three times, no dumps):
+
+| views | draws per game frame, before -> after | game thread ms on this desktop, before -> after |
+|---|---|---|
+| from the south (yaw 0) | 773-777 -> 807-939, +4 to +21% | 1.9 -> 2.3-2.7 |
+| from the north (yaw 180) | 713-752 -> 889-957, +20 to +28% | 1.8 -> 2.6-2.7 |
+| from east or west (yaw 90, 270) | 773-782 -> 1001-1036, +29 to +33% | 1.9 -> 2.9-3.2 |
+
+`LARECOMP_VR_CULL_TABLE=1.25,1.5` (+-18.6 x +-17.7 units, about the old fit's floor area made symmetric) is the cheaper
+table: the same views take 3 to 24% fewer draws than the old fit and 1.8-2.4 ms of game thread, at the price of 6 units
+less to the north and 4 to each side than the default. Draws undercount the village's instanced grass and its actors,
+which is why the game thread rises more than the draws.
+
+Limit: the game's shadow map covers the stock view. South-east of it (from about 12 units out) the ground now drawn
+samples past the map's edge and shows the edge's shadows drawn out in stripes, as with the Surroundings' box before.
 
 ## Levers
 
 | Variable | Effect | Default |
 |---|---|---|
-| `LARECOMP_VR_CULL_EXTENT=<x>,<z>` | the VR culling rectangle becomes the world-axis box of these half-extents about the table centre; `52,42` covers the resident 7 x 7 | off (the 1.2 x 1 table fit) |
+| `LARECOMP_VR_CULL=fit\|camera\|wide\|stock` | the table's culling camera; the game camera's frustum fitted to the stock screen's footprint; a fixed 3.2 : 1.5 widening; the game's own | `fit` |
+| `LARECOMP_VR_CULL_TABLE=<kx>,<kz>` | the table's half-extents: the stock screen's widest half-width and far reach times these (`_TABLE_UNITS=<x>,<z>`: in units; `52,42` with `LARECOMP_VR_CULL_EYES=0` draws the resident 7 x 7) | 1.5,2 |
+| `LARECOMP_VR_CULL_EXTENT=<x>,<z>` | the game camera's frustum fitted to the world-axis box of these half-extents about the table centre; `52,42` covers the resident 7 x 7 | off |
 | `LARECOMP_VR_CULL_TMAX=<tan>` | the widest half-angle tangent the fit may ask for | 4 (76 degrees) |
 | `LARECOMP_VR_RING=<margin>` | ring draws (below): draws whose world box misses the table fit's footprint grown by this go into the eye colour passes only | off |
 | `LARECOMP_VR_RING_CAST=<margin>` | ring draws within this of the footprint still cast shadows | 0 (none) |
@@ -44,6 +132,8 @@ There are three limits, from the nearest to the farthest:
 Both VR overrides change only what is drawn. Nothing extra is loaded and no game logic sees them.
 
 ### Measured (xrmock, 90 Hz, 1680 x 1760 eyes, head static 45 degrees down; `tools/stream_vr.sh`)
+
+These tables are from the game camera's fit ("table fit" is `LARECOMP_VR_CULL=camera` now).
 
 | spot | culling | draws / game frame | GPU ms / game frame (both eyes) | game fps | eye void % | RSS MB |
 |---|---|---|---|---|---|---|

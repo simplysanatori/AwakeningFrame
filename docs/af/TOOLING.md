@@ -13,6 +13,7 @@ makes sense on the headset with a real session running. Builds refuse to run whi
 | `tools/vvl/vvl.sh <cmd>` | Runs a command with the Khronos validation layer on. `tools/vvl/build-vvl.sh` builds it if it is missing (it is installed on this Frame already, 1.4.309). |
 | `tools/desk_tests.sh [--list] [--only text]` | Every unit test that needs no game files, headset or GPU (CI's Linux list, the pacer, dynres, settings, translator, camera override, display period filter), one pass/fail table. Three stale tests are marked as known failures. Logs in `build/desk_tests/`. |
 | `tools/session-report.py` | One table of frame pacing from the logs of one or more sessions. |
+| `tools/cull_check/` | What the culling draws on the table, measured (docs/af/STREAM.md "Checking it"): `sweep.sh` (32 view cases at a spot with eye dumps), `report.py` (per case: the share of each footprint's pixels that are black here but drawn in a reference run), `overview.sh` (the table from above), `sheet.py` (one case's images side by side), `cost.sh` / `cost.py` (draws and thread times at the stock view), `flicker.py` (a moving head: the culled floor's steps, cells that come and go). |
 | `tools/vrtiming.py SECONDS [out]` | SteamVR compositor timing, a line a second (headset only). |
 
 ## Selecting the mock

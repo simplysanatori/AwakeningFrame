@@ -56,18 +56,19 @@ everywhere: the overworld, interiors, dungeons, side views.
 - Its horizontal distance from the fade's centre gives the factor: 1 within `R`, 0 past `R + W`, smootherstep between
   (no kink at either end). The colour is multiplied by it (the image is gamma-encoded there, so the falloff looks even).
   Being horizontal, the fade is a cylinder: a tree is as bright at its top as at its foot, whatever its height.
-- **Overworld: fitted to what the culling draws.** The game culls with a frustum from its own camera (widened to the
-  table by `vr_cull.c`); on the floor that is a trapezoid widening away from the camera (`vr_cull_drawn`), whose near
-  edge is often only 7-9 units from the table's centre and 2 units past the stock screen's, and its slanted sides 10-14
-  units out. With the old fixed circle (black past 25 units) those sides cut the table first: a straight-sided wedge of
-  trees with black past it, which from the diorama's angle you could see over. Now the circle is fitted inside the
-  trapezoid each game frame: its centre moves (up to 8 units, preferring the table's centre) to where it can be
-  largest, black by the sides and the far edge (`R + W` at most the settings', at least 10 units), `W` 40% of that
-  (3 units at least). The near edge may cut 3 units into it; there, and wherever else the circle reaches past the
-  trapezoid, the factor is also multiplied by a fade to its edges (2 units wide), so no cut shows hard. The fit is
-  filtered over 0.4 s (it changes with the head, through the culling's eye clipping); a level change or a table snap
-  starts it afresh. Measured: Mabe clear to about 8, black past 14; Mysterious Woods clear to about 6.5, black past 11
-  (the tightest culling seen).
+- **Overworld: fitted to what the culling draws.** `vr_cull_drawn` gives the floor the culling takes in, and the circle
+  is fitted inside it each game frame: its centre moves (up to 8 units, preferring the table's centre) to where it can
+  be largest, black by the edges (`R + W` at most the settings', at least 10 units), `W` 40% of that (3 units at least).
+  Wherever the circle reaches past that floor, the factor is also multiplied by a fade to its edges (2 units wide), so
+  no cut shows hard. The fit is filtered over 0.4 s; a level change or a table snap starts it afresh.
+  - With the table's culling camera (the default, `STREAM.md` "What the table draws") that floor is the table's
+    footprint, a rectangle about the table's centre (+-22.3 x +-23.6 units outdoors) that does not change with the head:
+    the circle stays on the table's centre, clear to about 13 units and black past 21.8.
+  - With the game camera's frustum (`LARECOMP_VR_CULL=camera`) it is a trapezoid widening away from the camera, whose
+    near edge is often only 7-9 units from the table's centre and its slanted sides 10-14 units out. With the old fixed
+    circle (black past 25 units) those sides cut the table first: a straight-sided wedge of trees with black past it,
+    which from the diorama's angle you could see over. The near edge may cut 3 units into the fitted circle. Measured
+    then: Mabe clear to about 8, black past 14; Mysterious Woods clear to about 6.5, black past 11.
 - In a room or a side view (the rig's area, with its camera zone) `R` is at least the zone's farthest corner from the
   anchor plus 1.5 units: the whole room stays clear and the fade only takes what lies past it (the next rooms, the
   backdrop glow). No fit there, nor with the VR tab's Surroundings on: the culling is opened wide then and the drawn box

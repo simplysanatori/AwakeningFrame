@@ -699,10 +699,12 @@ typedef struct {
 extern uint32_t nvn_depth_mode(void);
 bool renderer_origin_lower_left(void);
 
-// (fade, overworld) The culling draws only the floor inside `drawn` (vr_cull_drawn: a trapezoid from the game camera,
-// widening away from it). With the circle about the table's centre at its old size (black past 25 units) the trapezoid's
-// slanted sides cut the table first, 10-14 units out: a straight-sided wedge of trees with black past it ("a triangle off
-// the trees"). So the circle is fitted to it: its centre moves (at most 8 units, preferring the table's centre) to where
+// (fade, overworld) The culling draws only the floor inside `drawn` (vr_cull_drawn). By default that is the table's
+// footprint, a rectangle about the table's centre, and the fit below leaves the circle on the centre, black a little
+// inside the rectangle's nearer sides. With the game camera's frustum (LARECOMP_VR_CULL=camera) it is a trapezoid from the
+// game camera, widening away from it: with the circle about the table's centre at its old size (black past 25 units) the
+// trapezoid's slanted sides cut the table first, 10-14 units out, a straight-sided wedge of trees with black past it ("a
+// triangle off the trees"). So the circle is fitted to it: its centre moves (at most 8 units, preferring the table's centre) to where
 // it can be largest, and it is black by the sides and the far edge. The near edge (the shortest, under the game camera,
 // often only 2 units past the stock screen's) may cut up to FADE_NEAR_ALLOW into it: there the shader also fades to the
 // trapezoid's edges (FADE_CUT_BAND), so that edge is soft too. Width 40% of the black radius (3 units at least); black
