@@ -8012,10 +8012,13 @@ static void seen_init(void) {
         if (!strcmp(e, "1")) seen_cfg = SEEN_FADE | SEEN_VIEW | SEEN_SHADOW;
     }
     if ((e = getenv("LARECOMP_VR_CULL_DRAWS_MARGIN")) && atof(e) >= 0) seen_margin = (float)atof(e);
-    if (stereo_wanted())
-        LOG("[seen] draws the eyes cannot see left out:%s%s%s%s (margin %.2f units)\n", seen_cfg & SEEN_FADE ? " past the fade" : "",
-            seen_cfg & SEEN_VIEW ? " outside both views" : "", seen_cfg & SEEN_SHADOW ? ", shadow casters whose shadow nobody sees" : "",
-            seen_cfg ? "" : " none", seen_margin);
+    if (stereo_wanted()) {
+        char l[160] = "";
+        if (seen_cfg & SEEN_FADE) strcat(l, ", past the round fade");
+        if (seen_cfg & SEEN_VIEW) strcat(l, ", outside both views");
+        if (seen_cfg & SEEN_SHADOW) strcat(l, ", shadow casters whose shadow nobody sees");
+        LOG("[seen] draws the eyes cannot see left out: %s (margin %.2f units)\n", seen_cfg ? l + 2 : "none", seen_margin);
+    }
 }
 static int ring_phase(uint64_t frame);
 static int ring_class(CmdRec *r, bool indexed, int kind);
