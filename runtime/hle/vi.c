@@ -12,12 +12,16 @@ uint32_t vi_vsync_handle(void) { return vsync_r; }
 volatile uint64_t g_vsync_count;  // vsyncs signalled so far (runtime/hle/framepace.c, runtime/nvn/pace.c)
 volatile uint64_t g_vsync_ns;     // plat_now_ns() of the latest (stored after the count: count >= the vsync it's from;
                                   // also frame interpolation's game timeline)
+volatile uint64_t g_vsync_game_from;  // (the VR mode's held 30 fps, pace.c vr_cadence) the game's event from this count on
 uint64_t g_native_window;
 
-// One vsync: the count, its time, the game's vsync event.
+// One vsync: the count, its time, the game's vsync event (not before g_vsync_game_from while that is at most two
+// vsyncs on: the frame due there keeps working through the one between; 0: every vsync).
 static void vi_signal_vsync(uint64_t now) {
-    __atomic_add_fetch(&g_vsync_count, 1, __ATOMIC_RELEASE);
+    uint64_t n = __atomic_add_fetch(&g_vsync_count, 1, __ATOMIC_RELEASE);
     __atomic_store_n(&g_vsync_ns, now, __ATOMIC_RELEASE);
+    uint64_t from = __atomic_load_n(&g_vsync_game_from, __ATOMIC_ACQUIRE);
+    if (n < from && from - n <= 2) return;
     pthread_mutex_lock(&g_klock);
     kernel_signal(vsync_event);
     pthread_mutex_unlock(&g_klock);

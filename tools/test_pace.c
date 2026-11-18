@@ -17,11 +17,28 @@
 #define VSYNC_NS 16666667ull
 static uint64_t t_ns = 1000000000ull, cpu_ns, gpu_total_ns;
 __thread uint64_t g_blocked_ns, g_rq_wait_ns, g_rq_lock_ns, g_submit_ns, g_gpu_wait_ns, g_present_ns, g_hooks_ns;
-volatile uint64_t g_vsync_count, g_vsync_ns;
+volatile uint64_t g_vsync_count, g_vsync_ns, g_vsync_game_from;
 uint64_t pace_test_game_mgr;
 static uint8_t game_mgr[0x500];
 static uint64_t zone;
-static void vsyncs(void) { g_vsync_count = t_ns / VSYNC_NS, g_vsync_ns = g_vsync_count * VSYNC_NS; }
+// The game's 60 Hz vsyncs: evenly 16.67 ms apart, or (hz90) the VR mode's at 90 Hz, two of every three refreshes
+// (11.1 and 22.2 ms apart). vsync_count: the latest at or before t; vsync_time: when vsync k comes.
+static bool hz90;
+#define REFRESH90_NS 11111111ull
+static uint64_t vsync_count(uint64_t t) {
+    if (!hz90) return t / VSYNC_NS;
+    uint64_t r = t / REFRESH90_NS;
+    return r / 3 * 2 + (r % 3 ? 1 : 0);
+}
+static uint64_t vsync_time(uint64_t k) { return hz90 ? (k / 2 * 3 + k % 2) * REFRESH90_NS : k * VSYNC_NS; }
+static void vsyncs(void) { g_vsync_count = vsync_count(t_ns), g_vsync_ns = vsync_time(g_vsync_count); }
+// The game's own wait for its vsync event after its work (ending at t): the next vsync that signals it (vi.c: none
+// before g_vsync_game_from while that is at most two on)
+static uint64_t game_vsync_after(uint64_t t) {
+    uint64_t k = vsync_count(t) + 1, from = g_vsync_game_from;
+    while (k < from && from - k <= 2) k++;
+    return k;
+}
 uint64_t plat_now_ns(void) { return t_ns; }
 void plat_sleep_until_ns(uint64_t t) { if (t > t_ns) t_ns = t; vsyncs(); }
 uint64_t plat_thread_cpu_ns(void) { return cpu_ns; }
@@ -363,7 +380,7 @@ static int run(const Case *c) {
         t_ns += (uint64_t)(cpu * 1e6);
         uint64_t ready = t0 + (uint64_t)((f.gpu > cpu ? f.gpu : cpu) * 1e6);
         gpu_total_ns += (uint64_t)(f.gpu * 1e6);
-        uint64_t shown = (ready / VSYNC_NS + 1) * VSYNC_NS;  // (the next vsync: waited for idle)
+        uint64_t shown = vsync_time(game_vsync_after(ready));  // (the next vsync: waited for idle)
         g_blocked_ns += shown - t_ns;
         game30 = shown - last_shown > VSYNC_NS + VSYNC_NS / 2;
         t_ns = last_shown = shown;
@@ -389,10 +406,96 @@ static int run(const Case *c) {
     return ok;
 }
 
+// ---- the VR mode's held 30 fps cadence (pace.c vr_cadence): the game thread works its frame (busy ms, plus idle ms
+// of waits inside the work that its busy time doesn't count), waits for its vsync event and presents; held by the
+// lock (LARECOMP_XR_FPS=30 at 120 Hz, and 90 Hz). A frame of two vsyncs' work or less must come 33.3 ms after the one
+// before (none 50, none 16.7); over that it may take three. Counted after the first 10 s (the hold's first 4 s take the
+// whole two vsyncs: its work isn't known yet). Printed too: the frames' start-to-present time on average, the latency
+// the start adds to the game's input (16.4 ms: the late start, a vsync after the present, as before; 33.3: at it).
+typedef struct {
+    const char *name;
+    double busy;           // the game thread's busy ms a frame (0: varied, below)
+    double (*varied)(int n);
+    double idle;           // ms of waits inside the work (blocked, not busy)
+    bool hz90;
+    double max_late;       // (the share of frames that may come late: over two vsyncs, a step up)
+    double phase;          // (ms: when the first frame starts - 22.2 at 90 Hz: presents at the second vsync of three refreshes)
+    double render;         // the render thread's ms after a present: a frame started sooner waits for it (busy)
+    double max_lat;        // (the most start-to-present on average: a light load back to the late start; 0: any)
+} Cadence;
+static double mixed13_17(int n) { return n % 10 == 9 ? 17 : 13; }
+// A step up in load: 8 ms for 15 s (late starts), then 17 ms (450 frames at 30): the first frame over is late, then early
+static double step8_17(int n) { return n < 450 ? 8 : 17; }
+// The Steam Frame at Mabe Village (2026-11-18, the 30 hold, the re-shown refreshes on: busy 13.9 ms on average, the
+// 50 ms frames' 14.3-16+): 12-15.5 ms, every 25th 16.5-17.5
+static double frame_like(int n) {
+    rng = rng * 6364136223846793005ull + 1442695040888963407ull;
+    double u = (rng >> 11) / (double)(1ull << 53);
+    return n % 25 == 24 ? 16.5 + u : 12 + 3.5 * u;
+}
+static const Cadence cadences[] = {
+    {"VR 30 hold at 120 Hz", 5}, {"VR 30 hold at 120 Hz", 12}, {"VR 30 hold at 120 Hz", 16}, {"VR 30 hold at 120 Hz", 17},
+    {"VR 30 hold at 120 Hz", 20}, {"VR 30 hold at 120 Hz", 25}, {"VR 30 hold at 120 Hz", 30},
+    {"VR 30 hold at 120 Hz, over two vsyncs (may take three)", 34, NULL, 0, false, 1},
+    {"VR 30 hold at 120 Hz, 13 ms with every 10th 17 ms", 0, mixed13_17},
+    {"VR 30 hold at 120 Hz, the Frame at Mabe (12-15.5 ms, every 25th 16.5-17.5)", 0, frame_like},
+    {"VR 30 hold at 120 Hz, the Frame at Mabe with 2 ms of waits inside the work", 0, frame_like, 2},
+    {"VR 30 hold at 120 Hz, 8 ms for 15 s then 17 ms (a step up: one frame late at most)", 0, step8_17, 0, false, 0.002},
+    {"VR 30 hold at 120 Hz, 8 ms with the render thread 10 ms after a present (the late start: its wait left out)", 8,
+     NULL, 0, false, 0, 0, 10, 17},
+    {"VR 90 Hz (held at 30)", 12, NULL, 0, true}, {"VR 90 Hz (held at 30), the other phase (S + 1 22.2 ms after S: the late start leaves 10.9 ms)", 12, NULL, 0, true, 0, 22.2},
+    {"VR 90 Hz (held at 30)", 20, NULL, 0, true},
+    {"VR 90 Hz (held at 30)", 30, NULL, 0, true}, {"VR 90 Hz (held at 30), the Frame at Mabe", 0, frame_like, 0, true},
+};
+static int run_cadence(const Cadence *c) {
+    memset(game_mgr, 0, sizeof game_mgr);
+    game_mgr[0x4e3] = 1;
+    pace_test_game_mgr = (uint64_t)(uintptr_t)game_mgr;
+    hz90 = c->hz90, rng = 9;
+    t_ns += (uint64_t)(c->phase * 1e6);
+    pace_xr_lock(30);
+    pace_xr_frame_ms(0);
+    vsyncs();
+    uint64_t last = 0, start0 = t_ns;
+    int n33 = 0, n50 = 0, n16 = 0, nother = 0, nframes = 0;
+    double lat = 0, worst = 0;
+    for (int n = 0; t_ns - start0 < 40000000000ull; n++) {
+        uint64_t t0 = t_ns;
+        double w = c->busy > 0 ? c->busy : c->varied(n);
+        double qw = last && c->render > (t0 - last) / 1e6 ? c->render - (t0 - last) / 1e6 : 0;  // (counted busy)
+        t_ns += (uint64_t)(qw * 1e6), g_rq_wait_ns += (uint64_t)(qw * 1e6);
+        cpu_ns += (uint64_t)(w * 1e6);
+        t_ns += (uint64_t)((w + c->idle) * 1e6);
+        g_blocked_ns += (uint64_t)(c->idle * 1e6);
+        uint64_t shown = vsync_time(game_vsync_after(t_ns));
+        g_blocked_ns += shown - t_ns;
+        t_ns = shown;
+        vsyncs();
+        if (last && t0 - start0 > 10000000000ull) {
+            double p = (shown - last) / 1e6;
+            nframes++, lat += (shown - t0) / 1e6;
+            if (fabs(p - 1e3 / 30) < 1) n33++;
+            else if (fabs(p - 50) < 1) n50++;
+            else if (p < 25) n16++;
+            else nother++;
+            if (p > worst) worst = p;
+        }
+        last = shown;
+        pace_frame();
+    }
+    int ok = n50 + n16 + nother <= c->max_late * nframes && (!c->max_lat || lat / (nframes ? nframes : 1) <= c->max_lat);
+    char b[24] = "varied";
+    if (c->busy > 0) snprintf(b, sizeof b, "%.0f ms", c->busy);
+    printf("%s, busy %s%s:\n  %d frames: %d at 33.3 ms, %d at 50, %d under 25, %d other (the longest %.1f); start to "
+           "present %.1f ms on average\n  %s\n", c->name, b, c->idle > 0 ? " (+ waits)" : "", nframes, n33, n50, n16,
+           nother, worst, lat / (nframes ? nframes : 1), ok ? "ok" : "FAILED");
+    return ok;
+}
+
 int main(int argc, char **argv) {
-    int ncases = (int)(sizeof cases / sizeof *cases);
-    if (argc < 2) { printf("%d\n", ncases); return 0; }  // (the runner: each case in its own process - pace.c's state)
+    int ncases = (int)(sizeof cases / sizeof *cases), ncad = (int)(sizeof cadences / sizeof *cadences);
+    if (argc < 2) { printf("%d\n", ncases + ncad); return 0; }  // (the runner: each case in its own process - pace.c's state)
     int i = atoi(argv[1]);
-    if (i < 0 || i >= ncases) return 2;
-    return run(&cases[i]) ? 0 : 1;
+    if (i < 0 || i >= ncases + ncad) return 2;
+    return (i < ncases ? run(&cases[i]) : run_cadence(&cadences[i - ncases])) ? 0 : 1;
 }

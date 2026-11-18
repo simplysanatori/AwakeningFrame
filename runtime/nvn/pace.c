@@ -196,20 +196,141 @@ static void test_work(void) {
     while (plat_now_ns() < until) {}
 }
 #endif
-static void hold_cadence(bool held) {
-    static uint64_t v_exit;  // the vsync count when the game last went on from here (its next frame: from the vsync after)
-    if (held && v_exit) {
-        uint64_t target = v_exit + 2, t0 = plat_now_ns(), n;
-        // (bounded: a stalled vsync timer must not stall the game - two vsyncs and a bit at most)
-        for (;;) {
-            uint64_t vt = __atomic_load_n(&g_vsync_ns, __ATOMIC_ACQUIRE);  // (first: the count is then at least its vsync's,
-            n = __atomic_load_n(&g_vsync_count, __ATOMIC_ACQUIRE);          // so a vsync in between only wakes us early)
-            if (n >= target || plat_now_ns() - t0 > 40000000ull) break;
-            uint64_t at = vt + (target - n) * 16666667ull + 250000ull;
-            uint64_t now = plat_now_ns();
+// The VR mode's held 30 fps (pace_xr_lock 30: 90 Hz and LARECOMP_XR_FPS=30; or the pacer's own hold at 120 Hz) gives a
+// frame's work both vsyncs when it needs them. The wait in hold_cadence leaves it one: the game works, then waits for
+// its next vsync and presents, so a frame started after vsync S + 1 must be done by S + 2, and one whose work crossed
+// it was shown at S + 3 - 50 ms after the one before - after which hold_cadence's target (two after its last exit, S + 1)
+// had passed: the next frame started at once and, fitting one vsync, came 16.7 ms later. Measured: on the desktop
+// 16.24 ms of game-thread busy time was on time and 16.98 ms late; on the Steam Frame at Mabe Village (busy 12.7 ms on
+// average) 1.3% of frames were 50 ms, 8.1% with the re-shown refreshes drawn (LARECOMP_XR_REPROJ=pos: 1.1 ms more on
+// the game thread). At 90 Hz the vsync after S is 11.1 or 22.2 ms after it by the phase, and the work had 16.4 or 10.9.
+// So held in the VR mode the frame due at S + 2 is shown there whenever its work ends before it: the game's vsync event
+// is signalled from S + 2 on (vi.c g_vsync_game_from: S + 1 passes without waking it), and the frame starts as early as
+// its work needs - its window, from its start to S + 2: the third-highest busy time of the hold's last 120 frames (4 s)
+// plus PACE_CADENCE_MARGIN_MS, at least the late start as before (after S + 1: no latency added) and at most the whole
+// two vsyncs (the start is the present). The margin is for the waits inside a frame's work, which its busy time doesn't
+// count (the Frame's 50 ms frames: busy as low as 14.3 ms); the highest two are left out (a lone spike is late either
+// way). The hold's first 120 frames, and the 120 after a frame shown late, take the whole two vsyncs. What the start
+// moves is the game's input (read at the start: present_hooks), not the eye poses: they are located at the present
+// (measured: 0.1-0.7 ms after it whether the frame started at its present or a vsync later; the XR thread's latch to
+// display 41.4 ms both ways). A frame over two vsyncs is shown at the vsync after its work (S + 3), and the next is due
+// two after that: an even 33.3 ms again, the game a vsync behind where it was (it catches up nothing). The flat window
+// keeps hold_cadence's wait (upstream's: its vsync is the window's, and its frames are shown through the window image).
+// LARECOMP_PACE_CADENCE=early / late (a test): always the whole two vsyncs / always the late start.
+#define PACE_CADENCE_MARGIN_MS 3.0
+#define PACE_CADENCE_FRAMES 120
+#define PACE_CADENCE_SKIP 2     // (the highest two of the 120 left out)
+#define PACE_CADENCE_LOG_MS 1.5  // (the log's "late start again" once the window is this far under it)
+extern volatile uint64_t g_vsync_game_from;  // runtime/hle/vi.c
+static float cad_busy[PACE_CADENCE_FRAMES];
+static int cad_n, cad_at, cad_whole;
+static uint64_t cad_slot;  // the vsync the frame now presented was due at (0: the hold's first)
+static double cad_late_ms = 16.6666667 - 0.25;  // the late start's window (at 90 Hz 16.4 or 10.9 by the phase)
+static double cad_window_ms;  // the frame now presented's window (0: not the VR hold)
+// A frame started before the late start waits for the render thread's translation of the one before, which a late
+// start leaves it more of: its busy time counts that wait (the desktop's 4.4 ms frames read 8.4 started at their
+// present). Its time as a late start would have had it - for the window, and for the pacer's measures (pace_frame's
+// cost), which the start must not move - is without as much of the wait as it started earlier.
+static double cadence_early_wait(double rq_wait) {
+    double earlier = cad_window_ms > cad_late_ms ? cad_window_ms - cad_late_ms : 0;
+    return rq_wait < earlier ? rq_wait : earlier;
+}
+static void vr_cadence(double busy) {  // (busy: as a late start would have had it)
+    static int pin = -1;  // (LARECOMP_PACE_CADENCE: 1 early, 2 late)
+    static bool wide_said;
+    if (pin < 0) {
+        const char *e = getenv("LARECOMP_PACE_CADENCE");
+        pin = e && !strcmp(e, "early") ? 1 : e && !strcmp(e, "late") ? 2 : 0;
+    }
+    uint64_t t0 = plat_now_ns(), vt, n;
+    for (;;) {  // (a vsync and its time, read together)
+        n = __atomic_load_n(&g_vsync_count, __ATOMIC_ACQUIRE);
+        vt = __atomic_load_n(&g_vsync_ns, __ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&g_vsync_count, __ATOMIC_ACQUIRE) == n) break;
+    }
+    // (bounded below: a stalled vsync must not stall the game - two vsyncs and a bit at most)
+    if (cad_slot && n < cad_slot) {  // (a present that didn't wait for its vsync: the cadence kept here, as before)
+        while (n < cad_slot && plat_now_ns() - t0 < 40000000ull) {
+            uint64_t at = vt + (cad_slot - n) * 16666667ull + 250000ull, now = plat_now_ns();
+            plat_sleep_until_ns(at > now + 100000ull ? at : now + 100000ull);
+            n = __atomic_load_n(&g_vsync_count, __ATOMIC_ACQUIRE), vt = __atomic_load_n(&g_vsync_ns, __ATOMIC_ACQUIRE);
+        }
+    }
+    if (!cad_slot) cad_n = cad_at = cad_whole = 0, wide_said = false;
+    if (cad_slot && n > cad_slot && busy >= 0) {  // (shown late; not a load's frame: no busy time, over 100 ms)
+        if (!cad_whole && cad_n == PACE_CADENCE_FRAMES && cad_window_ms < 2 * 16.6666667 - 0.5)
+            LOG("[pace] VR 30 fps: a frame shown a vsync late (busy %.1f ms, its window %.1f ms): the whole two vsyncs for "
+                "the next %d frames\n", busy, cad_window_ms, PACE_CADENCE_FRAMES);
+        cad_whole = PACE_CADENCE_FRAMES;
+    }
+    if (busy >= 0) {
+        cad_busy[cad_at] = (float)busy, cad_at = (cad_at + 1) % PACE_CADENCE_FRAMES;
+        if (cad_n < PACE_CADENCE_FRAMES) cad_n++;
+    }
+    double whole = 2 * 16.6666667, w = whole;
+    if (cad_n == PACE_CADENCE_FRAMES) {
+        float top[PACE_CADENCE_SKIP + 1] = {0};  // (the highest few, top[0] the highest)
+        for (int i = 0; i < PACE_CADENCE_FRAMES; i++) {
+            float v = cad_busy[i];
+            for (int j = 0; j <= PACE_CADENCE_SKIP; j++)
+                if (v > top[j]) { float t = top[j]; top[j] = v, v = t; }
+        }
+        double need = top[PACE_CADENCE_SKIP] + PACE_CADENCE_MARGIN_MS;
+        if (!cad_whole) w = need < cad_late_ms ? cad_late_ms : need > whole ? whole : need;
+        if (!wide_said && need > cad_late_ms) {
+            wide_said = true;
+            LOG("[pace] VR 30 fps: frames start before the late start (busy %.1f ms, the third-highest of the last %d: "
+                "a window of %.1f ms to their vsync, the late start's %.1f)\n", top[PACE_CADENCE_SKIP], PACE_CADENCE_FRAMES,
+                need < whole ? need : whole, cad_late_ms);
+        } else if (wide_said && need + PACE_CADENCE_LOG_MS <= cad_late_ms) {
+            wide_said = false;
+            LOG("[pace] VR 30 fps: frames start late again, after the vsync between (busy %.1f ms, the third-highest of "
+                "the last %d)\n", top[PACE_CADENCE_SKIP], PACE_CADENCE_FRAMES);
+        }
+    }
+    if (cad_whole) cad_whole--;
+    if (pin) w = pin == 1 ? whole : cad_late_ms;
+    cad_slot = n + 2;
+    __atomic_store_n(&g_vsync_game_from, cad_slot, __ATOMIC_RELEASE);
+    cad_window_ms = w;
+    if (w <= cad_late_ms) {  // after S + 1, as hold_cadence's wait
+        uint64_t m = n;
+        while (m < n + 1 && plat_now_ns() - t0 < 40000000ull) {
+            uint64_t v = __atomic_load_n(&g_vsync_ns, __ATOMIC_ACQUIRE);
+            m = __atomic_load_n(&g_vsync_count, __ATOMIC_ACQUIRE);
+            if (m >= n + 1) break;
+            uint64_t at = v + (n + 1 - m) * 16666667ull + 250000ull, now = plat_now_ns();
             plat_sleep_until_ns(at > now + 100000ull ? at : now + 100000ull);
         }
-        g_blocked_ns += plat_now_ns() - t0;
+        // (S + 2 is two vsyncs after S at 90 Hz too: three refreshes)
+        int64_t left = (int64_t)(vt + 33333333ull) - (int64_t)plat_now_ns();
+        if (m == n + 1 && left > 0) cad_late_ms = cad_window_ms = left / 1e6;
+    } else {
+        uint64_t start = vt + 33333333ull - (uint64_t)(w * 1e6), now = plat_now_ns();
+        if (start > now + 100000ull && start - now < 40000000ull) plat_sleep_until_ns(start);
+    }
+    g_blocked_ns += plat_now_ns() - t0;
+}
+
+static void hold_cadence(bool held, double busy) {
+    static uint64_t v_exit;  // the vsync count when the game last went on from here (its next frame: from the vsync after)
+    if (held && (__atomic_load_n(&xr_lock_fps, __ATOMIC_RELAXED) || __atomic_load_n(&xr_frame_us, __ATOMIC_RELAXED))) {
+        vr_cadence(busy);
+    } else {
+        if (cad_slot) cad_slot = 0, cad_window_ms = 0, __atomic_store_n(&g_vsync_game_from, 0, __ATOMIC_RELEASE);
+        if (held && v_exit) {
+            uint64_t target = v_exit + 2, t0 = plat_now_ns(), n;
+            // (bounded: a stalled vsync timer must not stall the game - two vsyncs and a bit at most)
+            for (;;) {
+                uint64_t vt = __atomic_load_n(&g_vsync_ns, __ATOMIC_ACQUIRE);  // (first: the count is then at least its vsync's,
+                n = __atomic_load_n(&g_vsync_count, __ATOMIC_ACQUIRE);          // so a vsync in between only wakes us early)
+                if (n >= target || plat_now_ns() - t0 > 40000000ull) break;
+                uint64_t at = vt + (target - n) * 16666667ull + 250000ull;
+                uint64_t now = plat_now_ns();
+                plat_sleep_until_ns(at > now + 100000ull ? at : now + 100000ull);
+            }
+            g_blocked_ns += plat_now_ns() - t0;
+        }
     }
     v_exit = __atomic_load_n(&g_vsync_count, __ATOMIC_ACQUIRE);
 #ifndef PACE_TEST
@@ -435,16 +556,22 @@ void pace_frame(void) {
             __atomic_store_n(&hitch_why, (const char *)why, __ATOMIC_RELAXED);
             __atomic_store_n(&hitch_at, now, __ATOMIC_RELEASE);
         }
-        hold_cadence(hold_30(pace_slow && on));
+        hold_cadence(hold_30(pace_slow && on), -1);
         return;
     }
     double busy = (p > wt ? p - wt : 0) / 1e6;
+    extern __thread uint64_t g_rq_wait_ns;  // rqueue.c: waits for the render thread (translation), counted as busy
+    static uint64_t last_rq;
+    uint64_t rqw = g_rq_wait_ns - last_rq;
+    last_rq = g_rq_wait_ns;
+    double early_wait = cadence_early_wait(rqw / 1e6);  // (the VR 30 fps cadence's: vr_cadence)
     // What the frame would cost at 60 fps: a frame of the game's 30 fps mode (two vsyncs or more) runs its world twice,
     // and the second step - about half this thread's CPU time then (measured: 3.0 -> 6.0 ms, 4.9 -> 9.3 ms) - is work
     // a 60 fps frame doesn't have. Without that, the 30 fps mode's frames looked 3-5 ms slower than they would be at 60
     // and the way back needed far more headroom than it should.
-    double step2 = tc / 2e6 < busy / 2 ? tc / 2e6 : busy / 2;  // (at most half: a coarse thread clock can't take it all)
-    double cost = p > 25000000ull ? busy - step2 : busy;
+    double bl = busy - early_wait;  // (a frame the VR 30 fps cadence started early: its busy time as a late start)
+    double step2 = tc / 2e6 < bl / 2 ? tc / 2e6 : bl / 2;  // (at most half: a coarse thread clock can't take it all)
+    double cost = p > 25000000ull ? bl - step2 : bl;
     // Held, the render thread has two vsyncs a frame and the game thread hardly waits for it: its CPU time for the frame
     // is what the frame would cost it at 60. (Not when free: there waiting for it is already in the busy time, and a
     // period can hold more or less than one frame of its work.)
@@ -454,10 +581,6 @@ void pace_frame(void) {
     if (!first) hud_note(p, tc, rc, rcpu != 0, gpu_ms);
     static int log = -1;  // LARECOMP_LOG_PACE=1: each frame's period, vsync wait and busy time
     if (log < 0) log = getenv("LARECOMP_LOG_PACE") != NULL;
-    extern __thread uint64_t g_rq_wait_ns;  // rqueue.c: waits for the render thread (translation), counted as busy
-    static uint64_t last_rq;
-    uint64_t rqw = g_rq_wait_ns - last_rq;
-    last_rq = g_rq_wait_ns;
     if (log) {  // (plus this thread's CPU time per frame and the render thread's: work, independent of waits; and where
                 // this thread's frame went in the renderer's frontend - rqueue.h)
         extern __thread uint64_t g_rq_lock_ns, g_submit_ns, g_gpu_wait_ns, g_present_ns, g_hooks_ns;
@@ -476,7 +599,7 @@ void pace_frame(void) {
     // Nothing is judged until the lock ends.
     if (__atomic_load_n(&xr_lock_fps, __ATOMIC_RELAXED) == 30) {
         if (!on) return;
-        hold_cadence(hold_30(pace_slow));
+        hold_cadence(hold_30(pace_slow), bl);
         return;
     }
     // Not held, a frame shown a vsync late (25 ms or more after the one before: not a 50 Hz display's 20 ms) didn't fit
@@ -523,7 +646,7 @@ void pace_frame(void) {
         if (ha != grace_of) grace_of = ha, ign_n = 0, ign_why = hw;
         ign_n++, ign_busy += b, ign_late += late && !b;
         if (!on) return;
-        hold_cadence(hold_30(pace_slow));
+        hold_cadence(hold_30(pace_slow), bl);
         return;
     }
     nover += o - (over[idx] & 1);
@@ -611,7 +734,7 @@ void pace_frame(void) {
             memset(recent, 0, sizeof recent);
         }
     }
-    hold_cadence(hold_30(pace_slow));
+    hold_cadence(hold_30(pace_slow), bl);
 }
 
 uint64_t pace_end_counter(const uint64_t *start_entry, const uint64_t *entry, uint64_t value) {
