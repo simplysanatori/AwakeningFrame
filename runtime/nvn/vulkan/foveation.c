@@ -26,6 +26,7 @@
 
 #include "../../platform.h"
 #include "../../rt.h"
+#include "../../vr_settings.h"
 #include "vk.h"
 #include "../renderer.h"
 #include "record.h"
@@ -194,11 +195,11 @@ static bool setup_fdm(VkPhysicalDevice phys, bool have_ext, const char **ext, ui
 // Off at the start still enables the extension (when the device has it), so the VR tab can turn foveation on while the game
 // runs: with the level off no pass gets a map (fov_pass), the pipelines' rate is 1x1. Only LARECOMP_VR_FOVEATION=off from
 // the launch environment (the tab's row then greyed out: vr_opt_overridden) leaves it out of the device, as before.
-extern bool vr_opt_overridden(int o) __attribute__((weak));  // (runtime/vr_settings.c; VrOpt)
-#define VRO_FOVEATION_ 9                                       // (vr_settings.h VRO_FOVEATION)
+// (the option's number from the header: a hand-kept 9 named the Table Edge row once rows were added before it)
+extern bool vr_opt_overridden(VrOpt o) __attribute__((weak));  // (runtime/vr_settings.c)
 void fov_device_setup(VkPhysicalDevice phys, bool fdm_ext, bool fsr_ext, const char **ext, uint32_t *n_ext, VkPhysicalDeviceFeatures2 *f) {
     cfg();
-    if (F.level == LV_OFF && (!vr_opt_overridden || vr_opt_overridden(VRO_FOVEATION_))) {
+    if (F.level == LV_OFF && (!vr_opt_overridden || vr_opt_overridden(VRO_FOVEATION))) {
         LOG("[fov] foveation off (LARECOMP_VR_FOVEATION)\n");
         return;
     }
