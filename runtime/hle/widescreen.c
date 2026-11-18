@@ -103,6 +103,13 @@ float rt_cull_aspect(float orig) {
     return (ca > 0 ? ca : rt_aspect_site(6)) * (orig > 0.1f && orig < 10.0f ? orig / (16.0f / 9.0f) : 1.0f);
 }
 
+// The two frustums the game culls with (tools/patches.py CULL_FRUSTUM_SITE: the level's models; MAIN_FRUSTUM_SITE:
+// everything else): the camera matrix and fovy, aspect, near, far, just before each is built. In VR the table is culled by
+// a camera of its own (runtime/nvn/vr_cull.c, returns 1); else they stay as the game has them.
+int rt_cull_frustum(float *m, float *p, int main) {
+    return g_cam_cull && vr_cull_camera(m, p, main != 0);
+}
+
 // Sky and sea pieces past the north edge (tools/patches.py SKYSEA_BOX_SITES): a piece shows while Link is within
 // its reach plus half a 16:9 view (7.5). A wider view reaches further: half its extra width, doubled for the far
 // (top) edge of the perspective view, where the sky is.

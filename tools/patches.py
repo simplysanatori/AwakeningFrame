@@ -48,6 +48,44 @@ def _cull_aspect(gen, a):
 PATCHES[CULL_ASPECT] = _cull_aspect
 
 
+# The same pass then builds its frustum (the camera's +0x610) from the camera's matrix (sp+0x170: the right, up and back
+# axes and the position, four floats each) and the four values in s0-s3 (fovy, aspect, near, far): `bl 0x700112f5c0` at
+# 0x7000852cd8. That frustum culls the level's own models (the rooms' ground and walls). Everything else (trees, houses,
+# characters, props) is culled by the frustum the engine's main camera keeps (its +0xe0), built by the same function from
+# the matrix at its +0x60 and its fovy / aspect / near / far (+0x1e0, +0x1dc, +0x1d4, +0x1d8): `bl 0x700112f5c0` at
+# 0x7001026830. At both calls the last instruction before the call also hands the matrix and the four values to the
+# runtime, which may replace them: the VR table is culled by a camera above it, not by the game's
+# (runtime/nvn/vr_cull.c). The engine camera's matrix is its own (other code reads it), so there the runtime gets a copy
+# and the call is pointed at the copy when it was replaced.
+CULL_FRUSTUM_SITE = A.CULL_FRUSTUM_SITE
+MAIN_FRUSTUM_SITE = A.MAIN_FRUSTUM_SITE
+
+
+def _cull_frustum(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x4eab1d63, hex(w)  # mov v3.16b, v11.16b
+    return ('{ extern int rt_cull_frustum(float *m, float *p, int main); float p[4]; c->v[3] = c->v[11]; '
+            'for (int i = 0; i < 4; i++) memcpy(&p[i], &c->v[i], 4); '
+            'rt_cull_frustum((float *)(uintptr_t)c->x[1], p, 0); '
+            'for (int i = 0; i < 4; i++) { c->v[i] = 0; memcpy(&c->v[i], &p[i], 4); } }'
+            f'  /* {a:#x}: mov v3.16b, v11.16b (culling frustum: matrix in x1, fovy / aspect / near / far in s0-s3) */')
+
+
+def _main_frustum(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xad051666, hex(w)  # stp q6, q5, [x19, #0xa0]
+    return ('{ extern int rt_cull_frustum(float *m, float *p, int main); static _Thread_local float m[16]; float p[4]; '
+            'memcpy((void *)(uintptr_t)(c->x[19] + 0xa0), &c->v[6], 16); memcpy((void *)(uintptr_t)(c->x[19] + 0xb0), &c->v[5], 16); '
+            'memcpy(m, (const void *)(uintptr_t)c->x[1], 64); for (int i = 0; i < 4; i++) memcpy(&p[i], &c->v[i], 4); '
+            'if (rt_cull_frustum(m, p, 1)) { c->x[1] = (uint64_t)(uintptr_t)m; '
+            'for (int i = 0; i < 4; i++) { c->v[i] = 0; memcpy(&c->v[i], &p[i], 4); } } }'
+            f'  /* {a:#x}: stp q6, q5, [x19, #0xa0] (main camera frustum: matrix in x1, fovy / aspect / near / far in s0-s3) */')
+
+
+PATCHES[CULL_FRUSTUM_SITE] = _cull_frustum
+PATCHES[MAIN_FRUSTUM_SITE] = _main_frustum
+
+
 # Vertical field of view (camera field +0x564): taller-than-16:9 outputs keep the designed horizontal view
 # and widen the vertical one ("Vert+"). Loaded by the main camera and by the culling pass.
 FOVY_SITES = {A.FOVY_SITES_0: (0xbd4566e0, 23), A.FOVY_SITES_1: (0xbd456768, 27)}
@@ -1109,3 +1147,4 @@ HOOKS = {
     TEXT_RATE_SITE: (0xb9028408, (), 'str w8, [x0, #0x284]: a message pane\'s text step, set as a window opens (#681)'),
     TEXT_SNAP_SITE: (0x540002cb, (), 'b.lt: message text short of the page\'s end, Instant shows it all (#681)'),
 }
+

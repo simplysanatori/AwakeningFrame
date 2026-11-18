@@ -1,6 +1,9 @@
 // VR culling fitted to the table (vr_cull.c). Switches:
-//   LARECOMP_VR_CULL=fit (default) | wide (the fixed 3.2:1.5) | stock (the game's own frustum)
-//   LARECOMP_VR_CULL_RECT=<kx>,<kz>      the floor rectangle: the stock screen footprint scaled about the table centre (1.2,1.0)
+//   LARECOMP_VR_CULL=fit (default: the table's own culling camera) | camera (the game camera's frustum fitted to the
+//                    stock screen's footprint, as before) | wide (the fixed 3.2:1.5) | stock (the game's own frustum)
+//   LARECOMP_VR_CULL_TABLE=<kx>,<kz>     the table: a rectangle about its centre, the stock screen's widest half-width and far
+//                                        reach on the floor times these (1.5,2); LARECOMP_VR_CULL_TABLE_UNITS=<x>,<z>: in units
+//   LARECOMP_VR_CULL_RECT=<kx>,<kz>      (camera) the floor rectangle: the stock screen footprint scaled about the table centre (1.2,1.0)
 //   LARECOMP_VR_CULL_HEIGHT=<lo>,<hi>    game units below / above the floor (1.5,3)
 //   LARECOMP_VR_CULL_MARGIN=<m>          the eye frusta widened by this in NDC (0.3), for head motion
 //   LARECOMP_VR_CULL_EYES=0              no eye clipping: the whole rectangle
@@ -24,6 +27,10 @@ void vr_cull_note_game(float fovy_field, float aspect_field);
 void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3], const CamRef *eye0, const CamRef *eye1);
 // the fitted culling aspect (absolute) and fovy scale; false until the first fit
 bool vr_cull_get(float *aspect, float *fovy_scale);
+// (widescreen.c rt_cull_frustum) a camera matrix a culling frustum is built from (right, up, back, position: four floats
+// each) and its fovy (radians), aspect, near, far: replaced by the table's culling camera when the fit made one (true).
+// main: the engine's main camera (taken only when it is the visibility pass's camera), else the visibility pass's
+bool vr_cull_camera(float *m, float *p, bool main);
 // (ring draws) the table fit's footprint as a world-axis box (y unbounded), before LARECOMP_VR_CULL_EXTENT; false: none
 bool vr_cull_core_box(float lo[3], float hi[3]);
 bool vr_ring_on(void);  // LARECOMP_VR_RING set
