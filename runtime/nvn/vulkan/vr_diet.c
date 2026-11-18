@@ -151,10 +151,12 @@ bool vr_saving(int what) {
             {VR_CLEAR_FOLD, "LARECOMP_VR_CLEAR_FOLD", 0},
             {VR_COPY_ALIAS, "LARECOMP_VR_COPY_ALIAS", 1},
             {VR_PRESENT_COPY, "LARECOMP_VR_PRESENT_COPY", 0},
-            {VR_CLEAR_DEFER, "LARECOMP_VR_CLEAR_DEFER", 1},
+            {VR_CLEAR_DEFER, "LARECOMP_VR_CLEAR_DEFER", 0},
         };
-        // On by default: the deferral and the alias (image-equal at every checked spot, docs/af/PASSES.md). Off: the
-        // fold alone (removes no pass) and the present copy (the window is not covered by the image checks).
+        // On by default: the alias (image-equal at every checked spot, docs/af/PASSES.md; 0.1 to 0.4 ms of GPU less on
+        // the Steam Frame). Off: the deferral (image-equal too, but on the Frame's Turnip the frame took 0.7 to 0.9 ms
+        // of GPU more with it, measured 2026-11-18 at Mabe and in the Mysterious Forest), the fold alone (removes no
+        // pass) and the present copy (the window is not covered by the image checks).
         mask = 0;
         for (size_t i = 0; i < sizeof sw / sizeof sw[0]; i++) {
             const char *e = getenv(sw[i].env);

@@ -111,15 +111,15 @@ copies (7 full-size layer copies), 5 dispatches. The copies and their readers ov
 - window image -> the presented texture (full size): never read in VR gameplay (the HUD clone is presented).
 - window image -> thumbnails (682x154, 777x243) -> 136x30 / 155x48: the last ones never read; small.
 
-The savings (all VR only, flat unchanged; on by default: the deferral and the alias):
-- `LARECOMP_VR_CLEAR_DEFER` (on; `0` off; it turns `LARECOMP_VR_CLEAR_FOLD` on, and `LARECOMP_VR_CLEAR_FOLD=0` turns
+The savings (all VR only, flat unchanged; on by default: the alias):
+- `LARECOMP_VR_CLEAR_DEFER=1` (off by default; it turns `LARECOMP_VR_CLEAR_FOLD` on, and `LARECOMP_VR_CLEAR_FOLD=0` turns
   both off): a pass that only clears is not begun. Its clears wait and become the load op of the next pass on the same
   view, view mask and area; otherwise they are made, as the pass they were, before anything else touches the texture
   (a draw sampling it, a copy, a dispatch, an upload, the eye composite, weather, the end of each eye's list).
   Mabe 41 -> 35 passes, forest 44 -> 37, house 31 -> 28, Tail Cave 38 -> 34; full-size passes at Mabe 14 -> 8.
 - `LARECOMP_VR_CLEAR_FOLD=1` alone (off by default): the pass begin waits for its first draw, so a whole clear before
   it becomes that attachment's load op, and a pass with nothing in it is not recorded. It removes no pass by itself
-  (every empty pass holds a clear); PLAN 3.4 found load ops alone gain nothing on Turnip.
+  (every empty pass holds a clear); an earlier test on the Frame found load ops alone gain nothing on Turnip.
 - `LARECOMP_VR_COPY_ALIAS` (on; `0` off): the flat mode's depth copy alias (`LARECOMP_VK_COPY_OPT`) in a multiview
   run: both layers of a layered texture at once, never with per-eye twins. At Mabe depth copy A becomes a rename at
   the main depth's next clear and copy B a stencil-only copy at its own depth clear (7 -> 4 full-size layer copies).
@@ -139,8 +139,25 @@ way, on moving actors. Under the validation layer, a tour with all four on and t
 a Mabe spot can fail any of these checks by up to ~2 % on chickens, a fox and butterflies standing elsewhere (rerun it).
 The counts are of the game's own commands; the runtime's own passes (weather, the edge, the eye composite) are not in
 the pass log.
-Only the headset can show: the time saved (PLAN 3.4: load ops alone gained nothing on Turnip), the held pass begin with
-foveation's shading-rate attachment or Valve's density map layer (this desktop has no foveation), and Turnip's tiles.
+Only the headset can show: the time saved (see "Measured on the Frame" below), the held pass begin with
+Valve's density map layer (this desktop has no foveation), and Turnip's tiles.
+
+Measured on the Frame (2026-11-18, `steam-frame/dev/frame-bench.sh` variants: the mock runtime, no SteamVR, eyes pinned
+at 1728x1728, Table Edge Fade, foveation Medium with a centred gaze; GPU ms of a whole game frame, one 9 s sample each;
+the same settings run twice differed by 0.1 ms at Mabe and 0.2 ms in the forest):
+
+| | Mabe | Mysterious Forest |
+|---|---|---|
+| every saving off | 14.96, 14.89 | 13.36, 13.13 |
+| the alias alone | 14.57 | 13.26 |
+| the deferral (with the fold) | 15.86 | 14.00 |
+| the deferral and the alias | 15.69, 15.58 | 13.89, 14.10 |
+| those two and the present copy | 15.53 | 14.12 |
+
+So the deferral costs 0.7 to 0.9 ms there although it removes six passes, and it is off by default; the alias saves
+0.1 to 0.4 ms. With the deferral and the alias on: `LARECOMP_CHUNK_PASSES=0` 15.37 / 13.98 (0.7 ms less render CPU at
+Mabe), `LARECOMP_SHADOW_SCALE=0.5` 15.51 / 13.70, Table Edge off 14.86 / 13.51, the edge reading the quarter-size depth
+(`LARECOMP_VR_EDGE_DEPTH=quarter`) 15.37 / 13.71, FXAA 16.41 / 14.61, SMAA 17.12 / 15.18.
 
 ## Dynamic eye resolution (off by default)
 
