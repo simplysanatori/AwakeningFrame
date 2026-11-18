@@ -309,10 +309,22 @@ static _Atomic unsigned g_tc_seq;
 static _Atomic int g_tc_on;
 static _Atomic float g_tc[7];  // the floor point's distance along the camera's forward; the floor's height above it; the
                                // rectangle's centre from it along the ground's right / forward; its half-extents; hhi
+// (vr_cull_note_fade) how far the fade can show anything, and when that was said; LARECOMP_VR_CULL_FADE=0: not followed
+static _Atomic float g_fade_lit;
+static _Atomic uint64_t g_fade_ns;
+#define FADE_CULL_MARGIN 1.0f  // (units) the fade's fit gliding to a new size over 0.4 s, and the game's bounds
+void vr_cull_note_fade(float lit) { atomic_store(&g_fade_lit, lit), atomic_store(&g_fade_ns, plat_now_ns()); }
+static float fade_lit(void) {
+    static int on = -1;
+    if (on < 0) on = !getenv("LARECOMP_VR_CULL_FADE") || atoi(getenv("LARECOMP_VR_CULL_FADE")) != 0;
+    float r = atomic_load(&g_fade_lit);
+    return on && r > 0 && plat_now_ns() - atomic_load(&g_fade_ns) < 250000000ull ? r : 0.0f;
+}
 static void table_off(void) {
     if (atomic_load(&g_tc_on)) atomic_fetch_add(&g_tc_seq, 1), atomic_store(&g_tc_on, 0), atomic_fetch_add(&g_tc_seq, 1);
 }
-static float g_table_log[6];  // (LARECOMP_LOG_CULL) the footprint's half-extents; the fitted rectangle about the anchor
+static float g_table_log[8];  // (LARECOMP_LOG_CULL) the footprint's half-extents; the fitted rectangle about the anchor; the
+                              // half-extents the fade leaves
 static _Atomic unsigned g_tc_taken[3];  // (LARECOMP_LOG_CULL) frustums built from the table's camera: the level's, the main
                                         // camera's; main camera frustums left alone (another camera's)
 // the visibility pass's camera as vr_cull_camera last saw it (position, back axis): what the main camera's frustum is told by
@@ -322,10 +334,16 @@ static _Atomic float g_gc[6];
 static void table_fit(const CamLatch *l, const float pivot[3], const float anchor[3], const float u[3], const float v[3],
                       float w0, float d0, float n0, const CamRef *const eyes[2]) {
     float fx = C.tx > 0 ? C.tx : w0 * C.tkx, fz = C.tz > 0 ? C.tz : d0 * C.tkz;
-    float corner[4][3];
+    // With Table Edge Fade made round nothing past what it can light can be seen, so the culling takes the footprint cut to that
+    // square (cx, cz). The footprint itself (vr_cull_rect / vr_cull_drawn, which the fade is fitted inside) stays whole:
+    // the fade leads, the culling follows it, never the other way round
+    float lit = fade_lit(), cx = lit > 0 ? fminf(fx, lit + FADE_CULL_MARGIN) : fx, cz = lit > 0 ? fminf(fz, lit + FADE_CULL_MARGIN) : fz;
+    float corner[4][3], cut[4][3];
     for (int c = 0; c < 4; c++) {
         float sx = c & 1 ? fx : -fx, sz = c & 2 ? fz : -fz;
         corner[c][0] = anchor[0] + sx * u[0] + sz * v[0], corner[c][1] = anchor[1], corner[c][2] = anchor[2] + sx * u[2] + sz * v[2];
+        sx = c & 1 ? cx : -cx, sz = c & 2 ? cz : -cz;
+        cut[c][0] = anchor[0] + sx * u[0] + sz * v[0], cut[c][1] = anchor[1], cut[c][2] = anchor[2] + sx * u[2] + sz * v[2];
     }
     static const int rg[4] = {0, 1, 3, 2};
     {   // the footprint is the floor quadrilateral (vr_cull_rect), the stock screen's own edges inside it
@@ -341,8 +359,8 @@ static void table_fit(const CamLatch *l, const float pivot[3], const float ancho
         memcpy(g_drawn.quad, g_rect.quad, sizeof g_drawn.quad), g_drawn.have = true;
     }
     static float pts[PRISM_PTS][3];  // (the render thread only)
-    int n = prism_points(corner, eyes, pts);
-    float lo[2] = {-fx, -fz}, hi[2] = {fx, fz};
+    int n = prism_points(cut, eyes, pts);
+    float lo[2] = {-cx, -cz}, hi[2] = {cx, cz};
     if (n) {  // (the eyes see none of the table: the whole footprint)
         lo[0] = lo[1] = 1e30f, hi[0] = hi[1] = -1e30f;
         for (int i = 0; i < n; i++) {
@@ -351,7 +369,7 @@ static void table_fit(const CamLatch *l, const float pivot[3], const float ancho
         }
         // 5% and half a unit more, as the game camera's fit had 5%; never past the footprint
         float gu = 0.05f * (hi[0] - lo[0]) + 0.5f, gv = 0.05f * (hi[1] - lo[1]) + 0.5f;
-        lo[0] = fmaxf(lo[0] - gu, -fx), hi[0] = fminf(hi[0] + gu, fx), lo[1] = fmaxf(lo[1] - gv, -fz), hi[1] = fminf(hi[1] + gv, fz);
+        lo[0] = fmaxf(lo[0] - gu, -cx), hi[0] = fminf(hi[0] + gu, cx), lo[1] = fmaxf(lo[1] - gv, -cz), hi[1] = fminf(hi[1] + gv, cz);
     }
     float ax = anchor[0] - pivot[0], az = anchor[2] - pivot[2];  // (the anchor follows the floor point with a lag)
     {   // Never less than the stock screen about the game camera's floor point, as the game camera's fit never was: this
@@ -368,7 +386,7 @@ static void table_fit(const CamLatch *l, const float pivot[3], const float ancho
     for (int i = 0; i < 7; i++) atomic_store(&g_tc[i], vals[i]);
     atomic_store(&g_tc_on, 1);
     atomic_fetch_add(&g_tc_seq, 1);
-    g_table_log[0] = fx, g_table_log[1] = fz, g_table_log[2] = lo[0], g_table_log[3] = hi[0], g_table_log[4] = lo[1], g_table_log[5] = hi[1];
+    g_table_log[0] = fx, g_table_log[1] = fz, g_table_log[6] = cx, g_table_log[7] = cz, g_table_log[2] = lo[0], g_table_log[3] = hi[0], g_table_log[4] = lo[1], g_table_log[5] = hi[1];
 }
 
 // (widescreen.c rt_cull_frustum) m: a camera matrix a culling frustum is about to be built from (the right, up and back
@@ -580,9 +598,10 @@ void vr_cull_fit(const CamLatch *l, const float pivot[3], const float anchor[3],
             core ? lo[0] : 0, core ? hi[0] : 0, core ? lo[2] : 0, core ? hi[2] : 0, g_swing[0], g_swing[1]);
         g_swing[0] = g_swing[1] = 0;
         if (table)
-            LOG("[vrcull] f%llu table: footprint +-%.2f x +-%.2f about the anchor; culled to right %.2f..%.2f forward %.2f..%.2f; "
-                "frustums built from it: %u level, %u main camera (%u of another camera left alone)\n", (unsigned long long)l->frame,
-                g_table_log[0], g_table_log[1], g_table_log[2], g_table_log[3], g_table_log[4], g_table_log[5],
+            LOG("[vrcull] f%llu table: footprint +-%.2f x +-%.2f about the anchor (the fade leaves +-%.2f x +-%.2f); culled to right "
+                "%.2f..%.2f forward %.2f..%.2f; frustums built from it: %u level, %u main camera (%u of another camera left alone)\n",
+                (unsigned long long)l->frame, g_table_log[0], g_table_log[1], g_table_log[6], g_table_log[7], g_table_log[2], g_table_log[3],
+                g_table_log[4], g_table_log[5],
                 atomic_exchange(&g_tc_taken[0], 0), atomic_exchange(&g_tc_taken[1], 0), atomic_exchange(&g_tc_taken[2], 0));
     }
 }

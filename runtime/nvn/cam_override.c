@@ -499,6 +499,11 @@ static bool eye_cams(void) {  // the latched frame's eye cameras (made once per 
     return g_eye_ok;
 }
 bool cam_override_eye_ready(void) { return cfg_now()->kind == CAM_STEREO && eye_cams(); }
+bool cam_override_eye_refs(uint64_t frame, const CamRef **eye0, const CamRef **eye1) {
+    if (cfg_now()->kind != CAM_STEREO || g_eye_identity || !g_latch.valid || g_latch.frame != frame || !eye_cams()) return false;
+    *eye0 = &g_eye_ref[0], *eye1 = &g_eye_ref[1];
+    return true;
+}
 
 static void stereo_build(const float *guest, float *out) {
     memcpy(out, guest, 80 * sizeof *out);

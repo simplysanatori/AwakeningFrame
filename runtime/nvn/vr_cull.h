@@ -3,6 +3,9 @@
 //                    stock screen's footprint, as before) | wide (the fixed 3.2:1.5) | stock (the game's own frustum)
 //   LARECOMP_VR_CULL_TABLE=<kx>,<kz>     the table: a rectangle about its centre, the stock screen's widest half-width and far
 //                                        reach on the floor times these (1.5,2); LARECOMP_VR_CULL_TABLE_UNITS=<x>,<z>: in units
+//   LARECOMP_VR_CULL_FADE=0              (Table Edge Fade made round, LARECOMP_VR_EDGE_ROUND=1) the table's culling camera
+//                                        keeps the whole rectangle; by default it is cut to the square about the centre the
+//                                        fade can light (vr_cull_note_fade). Without the round fade there is no cut
 //   LARECOMP_VR_CULL_RECT=<kx>,<kz>      (camera) the floor rectangle: the stock screen footprint scaled about the table centre (1.2,1.0)
 //   LARECOMP_VR_CULL_HEIGHT=<lo>,<hi>    game units below / above the floor (1.5,3)
 //   LARECOMP_VR_CULL_MARGIN=<m>          the eye frusta widened by this in NDC (0.3), for head motion
@@ -53,6 +56,10 @@ bool vr_cull_rect(float quad[4][2], float *floor_y, float *hlo, float *hhi);
 // what lies inside it (and whole objects that reach into it), nothing past it. World (x, z), counter-clockwise from above;
 // a corner whose ray misses the floor lies at the far plane. False with no floor rectangle or a frustum reaching behind.
 bool vr_cull_drawn(float quad[4][2]);
+// (edge.c, each eye-0 pass of Table Edge Fade in the overworld; 0 otherwise, and on a switch away from Fade) the
+// farthest from the table's centre the fade can show anything, from its settings (not from its fit, which is made inside
+// vr_cull_drawn): the table's culling camera takes no more than the square of that half-size (+ 1 unit). Held 0.25 s.
+void vr_cull_note_fade(float lit);
 // Per edge of that quadrilateral, in its order: where the stock screen's own edge lies, as a share of the distance from the
 // quadrilateral's middle to the edge (1 - 1 / k, k of LARECOMP_VR_CULL_RECT: 0 when the rectangle is the stock screen).
 bool vr_cull_rect_shrink(float shrink[4]);

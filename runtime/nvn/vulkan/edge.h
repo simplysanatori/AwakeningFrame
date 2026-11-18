@@ -42,6 +42,11 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
 // (exec.c, before edge_eye) the eye's colour to read in place of its output, with its own filled part (the eyes'
 // anti-aliasing / upscale, LARECOMP_VR_AA / LARECOMP_VR_UPSCALE); VK_NULL_HANDLE: the eye output itself
 void edge_color_override(int eye, VkImageView view, float fx, float fy);
+// (exec.c, render thread: the draws the eyes cannot see, docs/af/EDGE.md "What the fade leaves to draw") the round fade
+// of the latest eye-0 pass in the overworld: its centre's offset from the table's centre (world x, z) and the radius past
+// which it is black (units). false: no such pass in the last quarter second (Table Edge not Fade, not the overworld), or
+// the fade not round (LARECOMP_VR_EDGE_ROUND off: its rows are mirrored, edge.c fade_k, and it lights draws past that radius).
+bool edge_fade_disc(float off[2], float *black);
 
 // The Mysterious Woods' fog (fragment shader hashes), made for the stock camera and wrong from the diorama, so the VR
 // eyes leave them out (exec.c) unless LARECOMP_VR_WOODS_FOG=1: the dome round the game camera, drawn without a depth test
