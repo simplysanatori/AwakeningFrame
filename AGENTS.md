@@ -114,6 +114,7 @@ Further reading:
 - [docs/TECHNICAL.md](docs/TECHNICAL.md): how the Steam Frame port works.
 - [docs/af/](docs/af/): the design notes for each part (stereo, rig, edge, surroundings, passes, settings, tooling).
 - [docs/af/BUILD-frame.md](docs/af/BUILD-frame.md) and [docs/af/INSTALL.md](docs/af/INSTALL.md): building and installing on the Frame.
+- [docs/af/PCVR.md](docs/af/PCVR.md): the VR mode on a PC headset (Linux, Windows untested), its packages and Touch controllers.
 - [docs/af/DEVKIT.md](docs/af/DEVKIT.md): test builds made on the desktop, copied to the Frame beside the release (`steam-frame/dev/`), their logs and the bench.
 - [docs/CONTROLS.md](docs/CONTROLS.md): every control and layout.
 - [docs/USER_GUIDE.md](docs/USER_GUIDE.md): the user-facing detail (install details, full controls, settings, files, troubleshooting).
@@ -168,6 +169,8 @@ Version 0.1.1 is a pre-release. The player-facing known issues are in
 | Shader warm-up | `tools/warm_shaders.sh` | [WARM](docs/af/WARM.md) |
 | Free camera probe | `runtime/nvn/cam_override.c` | [FREECAM](docs/af/FREECAM.md) |
 | Build, install, release | `Makefile`, `install.sh`, `uninstall.sh`, `steam-frame/` | [BUILD-frame](docs/af/BUILD-frame.md), [INSTALL](docs/af/INSTALL.md) |
+| PC VR packages (Linux AppImage, Windows zip), `--vr` / `--flat`, the OpenXR loader on a PC | `Makefile` (`XR`, `PCVR`), `tools/linux/package.sh`, `pcvr/`, `xr_session.c` `xr_pc_start`, `.github/workflows/pcvr.yml` | [PCVR](docs/af/PCVR.md) |
+| Touch controllers (Quest) | `runtime/xr/xr_input.c` (`k_map_touch`, `xr_input_profile_changed`), `tools/xrmock` (`MOCK_XR_PROFILE`) | [CONTROLS](docs/af/CONTROLS.md) "Touch controllers" |
 
 
 ### Environment switches

@@ -41,6 +41,7 @@ static SDL_Window *window;
 static bool xr_mode(void) { return xr_wanted(); }
 #else
 static bool xr_mode(void) { return false; }
+static float xr_display_hz(void) { return 0; }  // (the stereo executor's dynamic resolution: never reached in a flat build)
 #endif
 
 // The system memory heap a whole-heap import (exec.c host_import) lands in and what it can hold: the largest heap with

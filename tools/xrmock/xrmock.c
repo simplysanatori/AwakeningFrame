@@ -65,7 +65,12 @@
 //                            the head, degrees: yaw / pitch, plus a Lissajous path of amplitudes ay / ap (hz in yaw, 0.7 hz in
 //                            pitch) and a fixation jitter of +-jitter degrees, new every 1/240 s (else the gaze is a hand pose)
 //                            | file (the gaze columns of the MOCK_XR_POSE file) | file:<path> (those of another pose file)
-//   MOCK_XR_EXTENSIONS=a,b   replace the extension list offered
+//   MOCK_XR_EXTENSIONS=a,b   replace the extension list offered (a plain PC runtime with Touch controllers:
+//                            XR_KHR_vulkan_enable2,XR_KHR_convert_timespec_time - no Frame profile, no eye gaze)
+//   MOCK_XR_PROFILE=<p>[,<s>:<p>]  the controller profile in use, frame or touch (default: the Frame's when the app
+//                            suggested it, else Touch), named by xrGetCurrentInteractionProfile and an
+//                            INTERACTION_PROFILE_CHANGED event once the session is focused; ",<s>:<p>" switches at s seconds.
+//                            Inputs (MOCK_XR_INPUT) reach an action only through a binding of the profile in use
 //   MOCK_XR_NO_LOCAL_FLOOR=1 refuse LOCAL_FLOOR spaces
 //
 // Checks (ERROR lines in the trace and stderr, counted in the summary printed
@@ -300,6 +305,7 @@ static int gPathCount = 0;
 static int gEventQueue[16], gEventCount = 0;
 static int gQuitSent = 0, gSummaryDone = 0;
 
+#define EV_PROFILE (-1)  // (the queue's entry for INTERACTION_PROFILE_CHANGED; the rest are session states)
 static void pushState(int s) {
     if (gEventCount < 16) gEventQueue[gEventCount++] = s;
 }
@@ -877,6 +883,14 @@ static XrResult XRAPI_CALL mPollEvent(XrInstance i, XrEventDataBuffer* ev) {
     if (gEventCount == 0) return XR_EVENT_UNAVAILABLE;
     int st = gEventQueue[0];
     memmove(gEventQueue, gEventQueue + 1, (size_t)(--gEventCount) * sizeof(int));
+    if (st == EV_PROFILE) {
+        XrEventDataInteractionProfileChanged* pe = (XrEventDataInteractionProfileChanged*)ev;
+        pe->type = XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED;
+        pe->next = NULL;
+        pe->session = (XrSession)(uintptr_t)2;
+        trace("event interactionProfileChanged");
+        return XR_SUCCESS;
+    }
     XrEventDataSessionStateChanged* e = (XrEventDataSessionStateChanged*)ev;
     e->type = XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED;
     e->next = NULL;
@@ -1497,7 +1511,7 @@ static XrResult XRAPI_CALL mPathToString(XrInstance i, XrPath p, uint32_t cap, u
 // an input of the profile), synced, and scripted: MOCK_XR_INPUT="t0-t1:path[=v[,v]];..." holds that input path from t0
 // to t1 seconds after xrBeginSession (a button: no value or 1; a float: =0.8; a thumbstick: =x,y). An action reports
 // the scripted input on any path it is bound to, as of the last xrSyncActions. Haptic pulses go to the trace.
-typedef struct { char name[64]; XrActionType type; int set; XrPath bind[24]; int nbind; XrBool32 b; float f, x, y; } MAction;
+typedef struct { char name[64]; XrActionType type; int set; XrPath bind[24]; int prof[24]; int nbind; XrBool32 b; float f, x, y; } MAction;
 typedef struct { char name[64]; int attached; } MSet;
 typedef struct { double t0, t1; char path[128]; float v[2]; int nv; } MScript;
 static MAction gAct[96];
@@ -1508,6 +1522,32 @@ static int gScriptCount = 0, gScriptLoaded = 0;
 static const char* const kFrameInputs[] = {
     "a/click", "b/click", "x/click", "y/click", "menu/click", "view/click", "dpad_up/click", "dpad_down/click", "dpad_left/click", "dpad_right/click",
     "thumbstick", "thumbstick/click", "trigger/value", "squeeze/value", "grip/value", "bumper/click", "aim/pose", "grip/pose", "haptic"};
+
+// /interaction_profiles/oculus/touch_controller (xr.xml): per hand, the right system button left out (the runtime's)
+static const char* const kTouchLeft[] = {"x/click", "x/touch", "y/click", "y/touch", "menu/click"};
+static const char* const kTouchRight[] = {"a/click", "a/touch", "b/click", "b/touch"};
+static const char* const kTouchBoth[] = {"squeeze/value", "trigger/value", "trigger/touch", "thumbstick", "thumbstick/x", "thumbstick/y",
+                                          "thumbstick/click", "thumbstick/touch", "thumbrest/touch", "grip/pose", "aim/pose", "haptic"};
+static int inList(const char* in, const char* const* l, unsigned n) {
+    for (unsigned c = 0; c < n; c++) if (!strcmp(in, l[c])) return 1;
+    return 0;
+}
+#define IN_LIST(in, l) inList(in, l, sizeof l / sizeof *l)
+// the profiles suggested (an index per binding), the one in use (-1: none yet), a switch at gProfileAt seconds
+static char gProfName[8][96];
+static int gProfCount = 0, gProfActive = -1, gProfNext = -1;
+static double gProfAt = -1;
+static int profileIndex(const char* name) {
+    for (int k = 0; k < gProfCount; k++) if (!strcmp(gProfName[k], name)) return k;
+    if (gProfCount >= 8) return -1;
+    snprintf(gProfName[gProfCount], sizeof gProfName[0], "%s", name);
+    return gProfCount++;
+}
+static int profileByShortName(const char* n) {  // frame / touch -> a suggested profile's index (-1: not suggested)
+    const char* full = !strncmp(n, "touch", 5) ? "/interaction_profiles/oculus/touch_controller" : "/interaction_profiles/valve/frame_controller";
+    for (int k = 0; k < gProfCount; k++) if (!strcmp(gProfName[k], full)) return k;
+    return -1;
+}
 
 static const char* pathStr(XrPath p) {
     for (int k = 0; k < gPathCount; k++)
@@ -1579,6 +1619,8 @@ static XrResult XRAPI_CALL mSuggest(XrInstance i, const XrInteractionProfileSugg
     const char* prof = pathStr(b->interactionProfile);
     if (!prof) return XR_ERROR_PATH_INVALID;
     int checked = !strcmp(prof, "/interaction_profiles/valve/frame_controller");
+    int touch = !strcmp(prof, "/interaction_profiles/oculus/touch_controller");
+    int pi = profileIndex(prof);
     for (uint32_t k = 0; k < b->countSuggestedBindings; k++) {
         const char* ps = pathStr(b->suggestedBindings[k].binding);
         MAction* a = actionOf(b->suggestedBindings[k].action);
@@ -1591,7 +1633,16 @@ static XrResult XRAPI_CALL mSuggest(XrInstance i, const XrInteractionProfileSugg
             if (in) for (unsigned c = 0; c < sizeof kFrameInputs / sizeof *kFrameInputs; c++) if (!strcmp(in, kFrameInputs[c])) ok = 1;
             if (!ok) { xrmock_error("suggestBindings %s: %s is not an input of the profile", prof, ps); return XR_ERROR_PATH_UNSUPPORTED; }
         }
-        if (a->nbind < 24) a->bind[a->nbind++] = b->suggestedBindings[k].binding;
+        if (touch) {  // (the Touch profile: each hand's own inputs, xr.xml)
+            int left = !strncmp(ps, "/user/hand/left/", 16), right = !strncmp(ps, "/user/hand/right/", 17);
+            const char* in = left ? ps + 16 : right ? ps + 17 : "";
+            if (!strncmp(in, "input/", 6)) in += 6;
+            else if (!strcmp(in, "output/haptic")) in = "haptic";
+            else in = "";
+            int ok = (left || right) && (IN_LIST(in, kTouchBoth) || (left && IN_LIST(in, kTouchLeft)) || (right && IN_LIST(in, kTouchRight)));
+            if (!ok) { xrmock_error("suggestBindings %s: %s is not an input of the profile", prof, ps); return XR_ERROR_PATH_UNSUPPORTED; }
+        }
+        if (a->nbind < 24) a->prof[a->nbind] = pi, a->bind[a->nbind++] = b->suggestedBindings[k].binding;
     }
     trace("suggestBindings %s n=%u", prof, b->countSuggestedBindings);
     return XR_SUCCESS;
@@ -1605,6 +1656,17 @@ static XrResult XRAPI_CALL mAttach(XrSession s, const XrSessionActionSetsAttachI
         gSets[set].attached = 1;
     }
     gAttachedAll = 1;
+    {   // the profile in use: MOCK_XR_PROFILE, else the Frame's when suggested, else Touch, else the first suggested
+        const char* e = getenv("MOCK_XR_PROFILE");
+        int f = profileByShortName("frame"), t = profileByShortName("touch");
+        gProfActive = e ? profileByShortName(e) : f >= 0 ? f : t >= 0 ? t : gProfCount ? 0 : -1;
+        if (e && gProfActive < 0) xrmock_error("MOCK_XR_PROFILE=%s: the app suggested no bindings for it", e);
+        const char* sw = e ? strchr(e, ',') : NULL;
+        double at;
+        char nm[16];
+        if (sw && sscanf(sw + 1, "%lf:%15s", &at, nm) == 2) gProfAt = at, gProfNext = profileByShortName(nm);
+        trace("profile in use %s", gProfActive >= 0 ? gProfName[gProfActive] : "none");
+    }
     trace("attachActionSets sets=%u actions=%d", a->countActionSets, gActionCount);
     return XR_SUCCESS;
 }
@@ -1614,6 +1676,7 @@ static int scriptState(const MAction* a, double t, float* v, int* nv) {  // a sc
         if (t < m->t0 || t >= m->t1) continue;
         for (int j = 0; j < a->nbind; j++) {
             const char* ps = pathStr(a->bind[j]);
+            if (a->prof[j] >= 0 && a->prof[j] != gProfActive) continue;  // (another profile's binding: those controllers aren't there)
             if (ps && !strcmp(ps, m->path)) { v[0] = m->v[0], v[1] = m->nv > 1 ? m->v[1] : 0, *nv = m->nv; return 1; }
         }
     }
@@ -1625,6 +1688,14 @@ static XrResult XRAPI_CALL mSync(XrSession s, const XrActionsSyncInfo* in) {
     if (gSessionState != XR_SESSION_STATE_FOCUSED) return XR_SESSION_NOT_FOCUSED;
     loadScript();
     double t = (double)(nowNs() - gT0) / 1e9;
+    {   // the profile named once focused, and its switch
+        static int named;
+        if (!named) named = 1, pushState(EV_PROFILE);
+        if (gProfAt >= 0 && t >= gProfAt) {
+            gProfAt = -1, gProfActive = gProfNext, pushState(EV_PROFILE);
+            trace("profile in use %s", gProfActive >= 0 ? gProfName[gProfActive] : "none");
+        }
+    }
     for (uint32_t k = 0; k < in->countActiveActionSets; k++) {
         int set = (int)(uintptr_t)in->activeActionSets[k].actionSet - 3;
         if (set < 0 || set >= gSetCount || !gSets[set].attached) { xrmock_error("xrSyncActions: action set not attached"); return XR_ERROR_ACTIONSET_NOT_ATTACHED; }
@@ -1705,14 +1776,22 @@ static XrResult XRAPI_CALL mHapticStop(XrSession s, const XrHapticActionInfo* h)
     return XR_SUCCESS;
 }
 static XrResult XRAPI_CALL mDestroyActionSet(XrActionSet s) { (void)s; return XR_SUCCESS; }
-static XrResult XRAPI_CALL mGetProfile(XrSession s, XrPath p, XrInteractionProfileState* o) { (void)s; (void)p; o->interactionProfile = XR_NULL_PATH; return XR_SUCCESS; }
+static XrResult XRAPI_CALL mGetProfile(XrSession s, XrPath p, XrInteractionProfileState* o) {
+    (void)s;
+    const char* hand = pathStr(p);
+    if (!hand || (strcmp(hand, "/user/hand/left") && strcmp(hand, "/user/hand/right"))) { o->interactionProfile = XR_NULL_PATH; return XR_SUCCESS; }
+    if (gProfActive < 0) { o->interactionProfile = XR_NULL_PATH; return XR_SUCCESS; }
+    return mStringToPath(XR_NULL_HANDLE, gProfName[gProfActive], &o->interactionProfile);
+}
 
 // ---- refresh rate, perf, time conversion ----------------------------------
 static XrResult XRAPI_CALL mReqRefresh(XrSession s, float hz) { (void)s; trace("requestRefreshRate %.0f", hz); return XR_SUCCESS; }
 static XrResult XRAPI_CALL mEnumRefresh(XrSession s, uint32_t cap, uint32_t* count, float* r) {
     (void)s;
-    *count = 3;
-    if (cap) { r[0] = 72; r[1] = 90; r[2] = 120; }
+    float now = (float)(1e9 / (double)gPeriod);  // (72 / 90 / 120, and the rate it runs at when that is another)
+    int extra = fabsf(now - 72) > 0.5f && fabsf(now - 90) > 0.5f && fabsf(now - 120) > 0.5f;
+    *count = 3 + extra;
+    if (cap) { r[0] = 72; r[1] = 90; r[2] = 120; if (extra && cap > 3) r[3] = roundf(now); }
     return XR_SUCCESS;
 }
 static XrResult XRAPI_CALL mGetRefresh(XrSession s, float* hz) { (void)s; *hz = (float)(1e9 / (double)gPeriod); return XR_SUCCESS; }

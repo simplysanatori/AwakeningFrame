@@ -1,7 +1,8 @@
 # Frame controllers (VR mode)
 
 `runtime/xr/xr_input.c` reads the Steam Frame controllers (`/interaction_profiles/valve/frame_controller`, extension
-`XR_VALVE_frame_controller_interaction`; the Touch profile is bound too for other headsets) once per display refresh and
+`XR_VALVE_frame_controller_interaction`; the Touch profile is bound too for other headsets, with a layout of its own:
+"Touch controllers" below) once per display refresh and
 hands the result to the game as the buttons and left stick of a gamepad. The buttons go through the player's controller
 bindings (Controls tab), so a rebind applies in VR as well; SDL gamepads keep working at the same time (inputs are ORed).
 Menus (the start screen, the overlay) get the same presses as SDL gamepad events.
@@ -81,3 +82,47 @@ Everything else (Menu, View, D-pad, sticks, stick clicks, left grip, the rig) is
 
 Rumble: `input_rumble_level` (the Controls tab's Rumble
 and Intensity apply) drives both controllers with 120 ms pulses every 80 ms while it lasts.
+
+## Touch controllers
+
+On a PC (docs/af/PCVR.md) a Quest's controllers, or any the runtime offers as `/interaction_profiles/oculus/touch_controller`,
+have their own layout. The program takes it as soon as the runtime names Touch as the profile in use
+(`XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED`, `xrGetCurrentInteractionProfile`; `[xr] controller profile in use:` in
+`lasrecomp.log`), and from the start when the runtime has no Frame profile. The Frame's layout above is not changed.
+
+Touch has fewer controls than the game's Switch pad: no D-pad, no View button, no bumpers, and the Frame's modifier
+(the left grip) is needed for a game button. The game needs the stick, A, B, X, Y, L, R, Plus and Minus in play (the touch build's
+on-screen buttons are those); ZL and ZR have no use in play, and the D-pad only with LAS Recomp's D-pad Items or D-pad
+Move options (off by default). So:
+
+| Touch | Switch | Game |
+|---|---|---|
+| left stick | left stick, turned by the table's yaw | walk |
+| right A (bottom) | B | sword |
+| right B (top) | A | talk, read, lift, open, roll |
+| left trigger | Y | the item on Y |
+| right trigger | X | the item on X |
+| left grip | L | Pegasus Boots |
+| right grip | R | shield (hold) |
+| left Menu | Plus | pause menu |
+| left Y | Minus | map |
+| stick clicks | stick clicks | as on the Frame |
+| right stick | (rig) | turn and tilt, as on the Frame |
+| both stick clicks together | (rig) | the view resets, as on the Frame (0.1 s, 2 s) |
+| left X held | (rig modifier) | the right stick becomes height (up / down) and size (right / left), and does not turn or tilt; a click of the right stick does the two resets |
+
+Left Y and left Menu together open the overlay menu (the View + Menu chord, with the same filter). With Buttons Match
+Labels on, right A is A and right B is B. The right controller's system button is the runtime's.
+
+Comfort layout on Touch: right trigger B (sword), left trigger R (shield), right grip A, left grip L (Boots), right A Y,
+right B X; Menu, left Y, left X and the sticks as above.
+
+Not on Touch: ZL, ZR and the D-pad. A player who sets D-pad Items or D-pad Move can bind them to other controls in the
+Controls tab. The menu laser's trigger is the item button's: while the laser is shown, its trigger clicks the menu.
+
+Why this layout (the owner's choices are open: docs/af/PCVR.md "Touch"): the sword and the action stay on the right
+thumb's two buttons, at the Switch's positions; the two items go to the triggers, which are free (no ZL / ZR in play)
+and can be pressed together with the sword; the Boots and the shield are held buttons, on the grips, which are held;
+Plus and Minus go to the left hand's Menu and Y, so the overlay menu's chord is two buttons of one hand; left X is the
+only button left for the modifier, and with the D-pad missing the right stick takes the D-pad's part under it.
+

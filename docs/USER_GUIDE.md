@@ -93,7 +93,7 @@ With Buttons Match Labels on, A, B, X and Y work as printed on the controllers i
 
 Rumble: when the game rumbles, both controllers vibrate.
 
-More detail is in [CONTROLS.md](CONTROLS.md).
+More detail is in [CONTROLS.md](CONTROLS.md). On a PC headset with Touch controllers (a Quest) the layout is different: [CONTROLS.md](CONTROLS.md) "Touch controllers".
 
 ## Settings
 

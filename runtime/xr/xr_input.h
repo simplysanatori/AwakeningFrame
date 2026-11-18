@@ -10,6 +10,10 @@
 void xr_input_init(PFN_xrGetInstanceProcAddr gipa, bool valve);
 // After xrCreateSession: attaches the action set (nothing can be bound after that).
 void xr_input_attach(void);
+// XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED (the XR thread): the layout follows the profile in use (Touch or the Frame's).
+void xr_input_profile_changed(void);
+// The Touch layout is in use (the VR tab's texts; any thread).
+bool xr_input_touch(void);
 // The XR thread, once per display refresh (the session is running): xrSyncActions, the state to the game and the rig,
 // and the game's rumble to both controllers.
 void xr_input_frame(void);

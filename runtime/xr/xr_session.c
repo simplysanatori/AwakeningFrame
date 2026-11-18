@@ -1,13 +1,15 @@
 // The OpenXR instance, system, session, reference spaces and events (from GalaxyFrame's xr_app.cpp: initInstance,
 // initSession, handleEvents, setAppSpace / updateAppSpace, requestRefreshRate).
-#include <dlfcn.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include <SDL3/SDL.h>
 
+#include "../gamelib.h"
 #include "../rt.h"
+#include "../settings.h"
 #include "xr_input.h"
 #include "xr_internal.h"
 
@@ -22,15 +24,51 @@ XR_FUNCS(XR_DEF)
 PFN_xrEnumerateDisplayRefreshRatesFB p_xrEnumerateDisplayRefreshRatesFB;
 PFN_xrGetDisplayRefreshRateFB p_xrGetDisplayRefreshRateFB;
 PFN_xrRequestDisplayRefreshRateFB p_xrRequestDisplayRefreshRateFB;
-PFN_xrConvertTimeToTimespecTimeKHR p_xrConvertTimeToTimespecTimeKHR;
+#ifdef _WIN32
+static PFN_xrConvertTimeToWin32PerformanceCounterKHR p_xrConvertTime;
+#else
+static PFN_xrConvertTimeToTimespecTimeKHR p_xrConvertTime;
+#endif
 
+bool xr_time_convertible(void) { return p_xrConvertTime != NULL; }
+bool xr_time_to_plat(XrTime t, int64_t *ns) {
+    if (!p_xrConvertTime) return false;
+#ifdef _WIN32
+    static LARGE_INTEGER f;
+    LARGE_INTEGER pc;
+    if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    if (XR_FAILED(p_xrConvertTime(g_xr.inst, t, &pc))) return false;
+    *ns = (int64_t)((unsigned __int128)pc.QuadPart * 1000000000u / (uint64_t)f.QuadPart);  // (plat_now_ns's formula)
+#else
+    struct timespec ts;
+    if (XR_FAILED(p_xrConvertTime(g_xr.inst, t, &ts))) return false;
+    *ns = (int64_t)ts.tv_sec * 1000000000ll + ts.tv_nsec;
+#endif
+    return true;
+}
+
+// LARECOMP_XR=1 (the Frame's launcher sets it; --vr, xr_args), read once. A PC VR package (LARECOMP_PCVR, make PCVR=1)
+// is in VR unless LARECOMP_XR=0 (--flat), or xr_pc_start turned it off.
+static int g_wanted = -1;
 bool xr_wanted(void) {
-    static int on = -1;
-    if (on < 0) {
+    if (g_wanted < 0) {
         const char *e = getenv("LARECOMP_XR");
-        on = e && *e && atoi(e) != 0;
+#ifdef LARECOMP_PCVR
+        g_wanted = !e || !*e || atoi(e) != 0;
+#else
+        g_wanted = e && *e && atoi(e) != 0;
+#endif
     }
-    return on;
+    return g_wanted;
+}
+
+// --vr / --flat on the command line (main.c, first thing: before anything reads LARECOMP_XR). The re-exec of a start
+// whose guest window was taken keeps the command line, so it keeps the choice.
+void xr_args(int argc, char **argv) {
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--vr")) setenv("LARECOMP_XR", "1", 1);
+        else if (!strcmp(argv[i], "--flat")) setenv("LARECOMP_XR", "0", 1);
+    }
 }
 
 const char *xr_result_str(XrResult r) {
@@ -45,16 +83,33 @@ bool xr_ok_(XrResult r, const char *what) {
     return false;
 }
 
-// The loader: LARECOMP_XR_LOADER, else SteamVR's (no soname: by path), else the system's. XR_RUNTIME_JSON (the
-// loader's own variable) picks another runtime, e.g. tools/xrmock.
+// The loader: LARECOMP_XR_LOADER, else SteamVR's on the Frame (no soname: by path), else the one the package carries or
+// the system's (Linux: the AppImage's usr/lib comes first, through the program's RUNPATH; Windows: LoadLibrary looks in
+// the exe's folder first). XR_RUNTIME_JSON (the loader's own variable) picks another runtime, e.g. tools/xrmock.
+#ifdef _WIN32
+static void *lib_open(const char *p) { return (void *)LoadLibraryA(p); }
+static void *lib_sym(void *l, const char *n) { return (void *)GetProcAddress((HMODULE)l, n); }
+static const char *lib_error(void) {
+    static char b[48];
+    snprintf(b, sizeof b, "Windows error %lu", GetLastError());
+    return b;
+}
+// (the Khronos release's name, then a MinGW build's)
+static const char *const k_loaders[] = {"openxr_loader.dll", "libopenxr_loader.dll"};
+#else
+#include <dlfcn.h>
+static void *lib_open(const char *p) { return dlopen(p, RTLD_NOW | RTLD_LOCAL); }
+static void *lib_sym(void *l, const char *n) { return dlsym(l, n); }
+static const char *lib_error(void) { return dlerror(); }
+static const char *const k_loaders[] = {"/opt/steamvr/bin/linuxarm64/libopenxr_loader.so", "libopenxr_loader.so.1", "libopenxr_loader.so"};
+#endif
 bool xr_load_loader(void) {
     if (g_xr.loader) return true;
-    const char *paths[] = {getenv("LARECOMP_XR_LOADER"), "/opt/steamvr/bin/linuxarm64/libopenxr_loader.so", "libopenxr_loader.so.1",
-                           "libopenxr_loader.so"};
-    for (size_t i = 0; i < sizeof paths / sizeof *paths && !g_xr.loader; i++)
-        if (paths[i] && *paths[i]) g_xr.loader = dlopen(paths[i], RTLD_NOW | RTLD_LOCAL);
-    if (!g_xr.loader) { LOG("[xr] no OpenXR loader (%s)\n", dlerror()); return false; }
-    p_xrGetInstanceProcAddr = (PFN_xrGetInstanceProcAddr)dlsym(g_xr.loader, "xrGetInstanceProcAddr");
+    const char *own = getenv("LARECOMP_XR_LOADER");
+    if (own && *own) g_xr.loader = lib_open(own);
+    for (size_t i = 0; i < sizeof k_loaders / sizeof *k_loaders && !g_xr.loader; i++) g_xr.loader = lib_open(k_loaders[i]);
+    if (!g_xr.loader) { LOG("[xr] no OpenXR loader (%s)\n", lib_error()); return false; }
+    p_xrGetInstanceProcAddr = (PFN_xrGetInstanceProcAddr)lib_sym(g_xr.loader, "xrGetInstanceProcAddr");
     if (!p_xrGetInstanceProcAddr) { LOG("[xr] the OpenXR loader has no xrGetInstanceProcAddr\n"); return false; }
     p_xrGetInstanceProcAddr(XR_NULL_HANDLE, "xrCreateInstance", (PFN_xrVoidFunction *)&p_xrCreateInstance);
     p_xrGetInstanceProcAddr(XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties",
@@ -77,7 +132,7 @@ bool xr_instance_create(void) {
         en2 |= !strcmp(xp[i].extensionName, XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME);
         refresh |= !strcmp(xp[i].extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
         fmtlist |= !strcmp(xp[i].extensionName, XR_KHR_VULKAN_SWAPCHAIN_FORMAT_LIST_EXTENSION_NAME);
-        timespec |= !strcmp(xp[i].extensionName, XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME);
+        timespec |= !strcmp(xp[i].extensionName, XR_TIME_EXTENSION_NAME);
         valve |= !strcmp(xp[i].extensionName, XR_INPUT_VALVE_EXT);
         gaze |= !strcmp(xp[i].extensionName, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
     }
@@ -88,7 +143,7 @@ bool xr_instance_create(void) {
     ext[ne++] = XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME;
     if (refresh) ext[ne++] = XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME;
     if (fmtlist) ext[ne++] = XR_KHR_VULKAN_SWAPCHAIN_FORMAT_LIST_EXTENSION_NAME;
-    if (timespec) ext[ne++] = XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME;  // (xr_timing.log: display times on our clock)
+    if (timespec) ext[ne++] = XR_TIME_EXTENSION_NAME;  // (xr_timing.log, the pose prediction: display times on our clock)
     if (valve) ext[ne++] = XR_INPUT_VALVE_EXT;  // (the Frame controllers' own profile: xr_input.c)
     if (gaze) ext[ne++] = XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME;  // (the eye tracker: foveation, xr_input.c)
     XrInstanceCreateInfo ci = {.type = XR_TYPE_INSTANCE_CREATE_INFO, .enabledExtensionCount = ne, .enabledExtensionNames = ext};
@@ -107,7 +162,11 @@ bool xr_instance_create(void) {
         p_xrGetInstanceProcAddr(g_xr.inst, "xrGetDisplayRefreshRateFB", (PFN_xrVoidFunction *)&p_xrGetDisplayRefreshRateFB);
         p_xrGetInstanceProcAddr(g_xr.inst, "xrRequestDisplayRefreshRateFB", (PFN_xrVoidFunction *)&p_xrRequestDisplayRefreshRateFB);
     }
-    if (timespec) p_xrGetInstanceProcAddr(g_xr.inst, "xrConvertTimeToTimespecTimeKHR", (PFN_xrVoidFunction *)&p_xrConvertTimeToTimespecTimeKHR);
+#ifdef _WIN32
+    if (timespec) p_xrGetInstanceProcAddr(g_xr.inst, "xrConvertTimeToWin32PerformanceCounterKHR", (PFN_xrVoidFunction *)&p_xrConvertTime);
+#else
+    if (timespec) p_xrGetInstanceProcAddr(g_xr.inst, "xrConvertTimeToTimespecTimeKHR", (PFN_xrVoidFunction *)&p_xrConvertTime);
+#endif
     g_xr.has_gaze = gaze;
     xr_input_init(p_xrGetInstanceProcAddr, valve);
     g_xr.has_refresh_fb = refresh && p_xrRequestDisplayRefreshRateFB;
@@ -166,8 +225,10 @@ bool xr_session_create(void) {
     return true;
 }
 
-// The display's refresh: LARECOMP_XR_HZ (120 by default: two refreshes per 60 Hz game frame). SteamVR on the Frame
-// lists only the rate it runs at; the launch wrapper sets the per-app rate (preferredRefreshRate) before the start.
+// The display's refresh: LARECOMP_XR_HZ (120 by default: two refreshes per 60 Hz game frame; when it is not set and the
+// runtime offers no 120, 90: the game held at 30 shows every frame for three). SteamVR on the Frame lists only the rate
+// it runs at and refuses even that; the launch wrapper sets the per-app rate (preferredRefreshRate) before the start.
+// SteamVR on a PC takes the rate from its own settings (docs/af/PCVR.md); runtimes that take requests get this one.
 static void request_refresh_rate(void) {
     g_xr.display_hz = 0;
     if (!g_xr.has_refresh_fb) return;
@@ -178,8 +239,9 @@ static void request_refresh_rate(void) {
         for (uint32_t i = 0; i < n && i < 16; i++) snprintf(list + strlen(list), sizeof list - strlen(list), " %.0f", rates[i]);
     const char *e = getenv("LARECOMP_XR_HZ");
     float want = e ? (float)atof(e) : 120.0f;
-    bool offered = false;
-    for (uint32_t i = 0; i < n && i < 16; i++) offered |= fabsf(rates[i] - want) < 0.5f;
+    bool offered = false, has90 = false;
+    for (uint32_t i = 0; i < n && i < 16; i++) offered |= fabsf(rates[i] - want) < 0.5f, has90 |= fabsf(rates[i] - 90) < 0.5f;
+    if (!e && !offered && has90) want = 90, offered = true;
     XrResult r = offered ? p_xrRequestDisplayRefreshRateFB(g_xr.session, want) : XR_ERROR_DISPLAY_REFRESH_RATE_UNSUPPORTED_FB;
     float now = 0;
     if (p_xrGetDisplayRefreshRateFB && XR_SUCCEEDED(p_xrGetDisplayRefreshRateFB(g_xr.session, &now))) g_xr.display_hz = now;
@@ -230,6 +292,9 @@ void xr_poll_events(bool *quit) {
             }
             break;
         }
+        case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED:  // (a Quest's Touch controllers, the Frame's, SteamVR's binding)
+            xr_input_profile_changed();
+            break;
         case XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB: {
             const XrEventDataDisplayRefreshRateChangedFB *rc = (const XrEventDataDisplayRefreshRateChangedFB *)&ev;
             LOG("[xr] display refresh rate %.0f -> %.0f Hz\n", rc->fromDisplayRefreshRate, rc->toDisplayRefreshRate);
@@ -336,4 +401,48 @@ void xr_session_destroy(void) {
 // The session ended (EXITING, or the runtime is going away): the app closes as when its window is closed.
 void xr_request_app_quit(void) {
     rt_request_quit("the XR session ended");
+}
+
+// A PC VR package's start (main.c, once the data folder is known; nothing in other builds). It starts in VR unless told
+// otherwise, so a double click or a Steam library entry needs no options, but:
+//   - no game files yet: the start screen opens in the window, where its folder picker (a desktop dialog) can be seen;
+//     VR from the next start (--vr: VR now);
+//   - no OpenXR runtime, or none with a headset (the instance or the system fails): the window, with a log line, instead
+//     of a start that stops. Asked for with --vr or LARECOMP_XR=1, a failure still stops with the error.
+// In VR with the game code built it goes straight into the game, as the Frame's launcher does (--play); otherwise the
+// start screen builds the code first. The start screen's update check is off: it names upstream's flat releases.
+// true: skip the start screen.
+bool xr_pc_start(const char *game_dir) {
+#ifdef LARECOMP_PCVR
+    setenv("LARECOMP_NO_UPDATE_CHECK", "1", 0);
+    if (!xr_wanted()) { LOG("[xr] PC VR package: in the window (--flat or LARECOMP_XR=0)\n"); return false; }
+    const char *e = getenv("LARECOMP_XR");
+    char p[1100];
+    struct stat st;
+    snprintf(p, sizeof p, "%s/exefs/main", game_dir);
+    bool files = stat(p, &st) == 0;
+    if (e && *e) LOG("[xr] PC VR package: VR mode (asked for)\n");
+    else if (!files) {
+        LOG("[xr] PC VR package: no game files yet: the start screen opens in the window to set them up; VR from the next "
+            "start (--vr: VR now)\n");
+        g_wanted = 0;
+        return false;
+    } else {
+        settings_load();  // (the VR tab's rows into the environment first: xr_input_init reads the layout)
+        if (!xr_instance_create()) {
+            LOG("[xr] PC VR package: no OpenXR runtime with a headset (see above): starting in the window. Start SteamVR "
+                "with the headset connected, then start the game again (--vr: stop with the error instead)\n");
+            if (g_xr.inst) p_xrDestroyInstance(g_xr.inst), g_xr.inst = XR_NULL_HANDLE;
+            g_wanted = 0;
+            return false;
+        }
+        LOG("[xr] PC VR package: VR mode (--flat for the window)\n");
+    }
+    bool code = files && gamelib_present(game_dir);
+    if (!code) LOG("[xr] PC VR package: the game code is not built for these game files yet: the start screen builds it\n");
+    return code;
+#else
+    (void)game_dir;
+    return false;
+#endif
 }

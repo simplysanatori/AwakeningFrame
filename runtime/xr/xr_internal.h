@@ -9,7 +9,17 @@
 #include <vulkan/vulkan.h>
 #include <time.h>
 #define XR_USE_GRAPHICS_API_VULKAN
+// The runtime's clock to ours (plat_now_ns): XR_KHR_convert_timespec_time on Linux (CLOCK_MONOTONIC),
+// XR_KHR_win32_convert_performance_counter_time on Windows (QueryPerformanceCounter, runtime/platform/windows.c)
+#ifdef _WIN32
+#include <windows.h>
+#include <unknwn.h>  // (openxr_platform.h's Win32 part names IUnknown, which WIN32_LEAN_AND_MEAN leaves out)
+#define XR_USE_PLATFORM_WIN32
+#define XR_TIME_EXTENSION_NAME XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME
+#else
 #define XR_USE_TIMESPEC
+#define XR_TIME_EXTENSION_NAME XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME
+#endif
 #define XR_NO_PROTOTYPES
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
@@ -31,7 +41,10 @@ XR_FUNCS(XR_DECL)
 extern PFN_xrEnumerateDisplayRefreshRatesFB p_xrEnumerateDisplayRefreshRatesFB;
 extern PFN_xrGetDisplayRefreshRateFB p_xrGetDisplayRefreshRateFB;
 extern PFN_xrRequestDisplayRefreshRateFB p_xrRequestDisplayRefreshRateFB;
-extern PFN_xrConvertTimeToTimespecTimeKHR p_xrConvertTimeToTimespecTimeKHR;  // (XR_KHR_convert_timespec_time)
+// An XrTime on plat_now_ns's clock (ns). false: the runtime offers no conversion (then its XrTime is taken to be that clock
+// already, as SteamVR's on Linux and the mock's are; xr_thread_start predicts from the vsync then).
+bool xr_time_to_plat(XrTime t, int64_t *ns);
+bool xr_time_convertible(void);
 
 extern __thread bool xr_rt_call;  // (xr_in_runtime_call)
 #define XR_RT(call) ({ xr_rt_call = true; XrResult r_ = (call); xr_rt_call = false; r_; })

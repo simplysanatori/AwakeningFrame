@@ -1,5 +1,7 @@
-// The Frame controllers in VR mode: one action set, its bindings (the Steam Frame's own profile, XR_VALVE_frame_controller
-// _interaction; the Touch profile as a fallback for other headsets), the sync once per display refresh, and the hand-off
+// The controllers in VR mode: one action set, its bindings (the Steam Frame's own profile, XR_VALVE_frame_controller
+// _interaction, and the Touch profile: a Quest's controllers, and what SteamVR offers other controllers as when the Frame's
+// profile is not there), the sync once per display refresh, the layout picked by the profile the runtime says is in use
+// (Touch has no D-pad, View or bumpers: k_map_touch below, docs/CONTROLS.md "Touch controllers"), and the hand-off
 // of the result to the game (runtime/hle/input.c input_xr_set, as the buttons and the left stick of a gamepad) and to
 // the rig (xr.h: turn, tilt, height / size, reset view). The game's rumble (input_rumble_level) goes to both
 // controllers as short haptic pulses renewed while it lasts (GalaxyFrame's scheme: 120 ms pulses every 80 ms, stopped
@@ -52,6 +54,30 @@ static const MapEnt k_map_comfort[] = {
     {C_GRIP_R, SDL_GAMEPAD_BUTTON_EAST},
     {C_CLICK_L, SDL_GAMEPAD_BUTTON_LEFT_STICK}, {C_CLICK_R, SDL_GAMEPAD_BUTTON_RIGHT_STICK},
 };
+// Touch controllers (a Quest's, /interaction_profiles/oculus/touch_controller): a thumbstick, two face buttons, a trigger
+// and a grip on each hand and Menu on the left; no D-pad, View or bumpers, and the right system button is the runtime's.
+// The left thumb stays on the stick while Link moves, so what is held while moving or pressed on the run (the shield,
+// the Boots, the items) goes on the triggers and grips, which the fingers work while both thumbs are busy: grips L / R
+// as the Switch's shoulders (left Boots, right shield), triggers ZL ZR's places for Y / X (the items, left and right). The
+// right thumb has the sword (bottom button, Switch B by position) and A (top). Minus (the map) on the left Y, so Y + Menu
+// is View + Menu's chord (LAS Recomp's menu); the left X held is the rig's modifier (the Frame's left grip: then the right
+// stick raises / lowers and sizes the table, and a right stick click resets the view). The D-pad is not there: D-pad items
+// and D-pad walking are not reachable with these controllers (docs/CONTROLS.md).
+static const MapEnt k_map_touch[] = {
+    {C_MENU, SDL_GAMEPAD_BUTTON_START}, {C_Y, SDL_GAMEPAD_BUTTON_BACK},
+    {C_TRIG_L, SDL_GAMEPAD_BUTTON_WEST}, {C_TRIG_R, SDL_GAMEPAD_BUTTON_NORTH},
+    {C_GRIP_L, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER}, {C_GRIP_R, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER},
+    {C_CLICK_L, SDL_GAMEPAD_BUTTON_LEFT_STICK}, {C_CLICK_R, SDL_GAMEPAD_BUTTON_RIGHT_STICK},
+};
+// Touch with the Comfort layout: the sword on the right trigger and the shield on the left (as the Frame's Comfort), A on
+// the right grip, the Boots on the left grip, the items on the right thumb's buttons (bottom Y, top X).
+static const MapEnt k_map_touch_comfort[] = {
+    {C_MENU, SDL_GAMEPAD_BUTTON_START}, {C_Y, SDL_GAMEPAD_BUTTON_BACK},
+    {C_TRIG_R, SDL_GAMEPAD_BUTTON_SOUTH}, {C_TRIG_L, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER},
+    {C_GRIP_R, SDL_GAMEPAD_BUTTON_EAST}, {C_GRIP_L, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER},
+    {C_A, SDL_GAMEPAD_BUTTON_WEST}, {C_B, SDL_GAMEPAD_BUTTON_NORTH},
+    {C_CLICK_L, SDL_GAMEPAD_BUTTON_LEFT_STICK}, {C_CLICK_R, SDL_GAMEPAD_BUTTON_RIGHT_STICK},
+};
 // The face buttons of the switch layout: by position (default) or by label (g_settings.face_by_label)
 static int face_host(Ctl c, bool by_label) {
     switch (c) {
@@ -60,6 +86,12 @@ static int face_host(Ctl c, bool by_label) {
     case C_X: return by_label ? SDL_GAMEPAD_BUTTON_NORTH : SDL_GAMEPAD_BUTTON_WEST;
     default: return by_label ? SDL_GAMEPAD_BUTTON_WEST : SDL_GAMEPAD_BUTTON_NORTH;  // C_Y
     }
+}
+
+// Touch's two right face buttons in its switch layout: by position the bottom one (A) is the Switch's bottom one (B, the
+// sword) and the top one (B) is A; by label A is A
+static int touch_face_host(Ctl c, bool by_label) {
+    return (c == C_A) == by_label ? SDL_GAMEPAD_BUTTON_EAST : SDL_GAMEPAD_BUTTON_SOUTH;
 }
 
 // ---- the actions
@@ -110,13 +142,15 @@ static int pointer_hand(void);
 #define XRIN_FUNCS(F)                                                                                                 \
     F(xrStringToPath) F(xrCreateActionSet) F(xrDestroyActionSet) F(xrCreateAction) F(xrSuggestInteractionProfileBindings) \
     F(xrAttachSessionActionSets) F(xrSyncActions) F(xrGetActionStateBoolean) F(xrGetActionStateFloat)                 \
-    F(xrGetActionStateVector2f) F(xrApplyHapticFeedback) F(xrStopHapticFeedback) F(xrCreateActionSpace)
+    F(xrGetActionStateVector2f) F(xrApplyHapticFeedback) F(xrStopHapticFeedback) F(xrCreateActionSpace)              \
+    F(xrGetCurrentInteractionProfile) F(xrPathToString)
 #define XRIN_DECL(n) static PFN_##n p_##n;
 XRIN_FUNCS(XRIN_DECL)
 #undef XRIN_DECL
 
 static struct {
     bool ready, attached, valve, log, comfort;
+    bool touch;                // the runtime uses the Touch bindings (xr_input_profile_changed): k_map_touch*
     XrActionSet set;
     XrActionSet gaze_set;      // the eye gaze (XR_EXT_eye_gaze_interaction: foveation), a set of its own
     XrAction gaze_act;
@@ -145,7 +179,7 @@ static struct {
     float ptr_wheel;
     unsigned ptr_ticks;
     uint64_t ptr_swell_ns, ptr_last_ns;
-    uint64_t rs_ns;            // when the reset hold began (both stick clicks, or the left grip and the right click): 0 = none
+    uint64_t rs_ns;            // when the reset hold began (both stick clicks, or the modifier and the right click): 0 = none
     bool rs_short, rs_full;    // the short / full reset for this hold was sent
 } S = {.snap_armed = true};
 
@@ -201,6 +235,7 @@ void xr_input_init(PFN_xrGetInstanceProcAddr gipa, bool valve) {
     memset(&S, 0, sizeof S);
     S.snap_armed = true;
     S.valve = valve;
+    S.touch = !valve;  // (until the runtime names the profile in use: without the Frame's, Touch is the only one bound)
     S.log = getenv("LARECOMP_XR_INPUT_LOG") != NULL;
     const char *lay = getenv("LARECOMP_XR_LAYOUT");
     S.comfort = lay && !strcasecmp(lay, "comfort");
@@ -267,6 +302,30 @@ void xr_input_attach(void) {
         if (!XR_OK(p_xrCreateActionSpace(g_xr.session, &sc, &S.aim[h]))) S.aim[h] = XR_NULL_HANDLE;
     }
     if (S.attached) LOG("[xr] controllers: %d actions attached (%s)\n", A_COUNT, S.valve ? "Steam Frame profile" : "Touch profile only");
+}
+
+static bool g_relatch;  // the layout changed: what is held now goes silent (xr_input_frame)
+
+// XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED (xr_session.c; the XR thread): the profile the runtime now uses for the
+// hands. Touch picks k_map_touch*, the Frame's (or none named yet) keeps what is there; a control held through the
+// change goes silent until let go, as with a layout change.
+bool xr_input_touch(void) { return __atomic_load_n(&S.touch, __ATOMIC_RELAXED); }
+
+void xr_input_profile_changed(void) {
+    if (!S.attached) return;
+    int touch = -1;
+    char names[2][XR_MAX_PATH_LENGTH] = {"none", "none"};
+    for (int h = 0; h < 2; h++) {
+        XrInteractionProfileState ps = {.type = XR_TYPE_INTERACTION_PROFILE_STATE};
+        if (XR_FAILED(p_xrGetCurrentInteractionProfile(g_xr.session, S.hand[h], &ps)) || ps.interactionProfile == XR_NULL_PATH) continue;
+        uint32_t n = 0;
+        if (XR_SUCCEEDED(p_xrPathToString(g_xr.inst, ps.interactionProfile, sizeof names[h], &n, names[h])))
+            touch = !strcmp(names[h], "/interaction_profiles/oculus/touch_controller") ? 1 : touch < 0 ? 0 : touch;
+    }
+    LOG("[xr] controller profile in use: left %s, right %s\n", names[0], names[1]);
+    if (touch < 0 || (touch == 1) == S.touch) return;
+    S.touch = touch == 1, g_relatch = true;
+    LOG("[xr] controllers: %s layout\n", S.touch ? "Touch" : "Steam Frame");
 }
 
 void xr_input_shutdown(void) {
@@ -404,7 +463,6 @@ static void chord_filter(uint32_t host, uint64_t now, uint32_t *game, uint32_t *
     *menus = (host & ~VM) | (out == VM && first ? first : out);
 }
 
-static bool g_relatch;  // the layout changed: what is held now goes silent (below)
 void xr_input_frame(void) {
     int req = __atomic_exchange_n(&g_layout_req, -1, __ATOMIC_ACQ_REL);
     if (req >= 0 && (req != 0) != S.comfort) {
@@ -433,7 +491,7 @@ void xr_input_frame(void) {
     } else {
         memset(S.down, 0, sizeof S.down);
     }
-    bool mod = S.down[C_GRIP_L];
+    bool mod = S.down[S.touch ? C_X : C_GRIP_L];  // (the rig's modifier: Touch has no D-pad, so its stick does the D-pad's part)
     // the menu laser's trigger and the right stick's scroll (see S.ptr_*; the shown / on-panel state is the last refresh's)
     S.ptr_hand = pointer_hand();
     Ctl ptrig = S.ptr_hand ? C_TRIG_R : C_TRIG_L;
@@ -442,8 +500,11 @@ void xr_input_frame(void) {
     S.ptr_trig_was = S.down[ptrig];
     S.ptr_wheel = 0;
     if (S.ptr_shown && S.ptr_on_panel) S.ptr_wheel = sr[1], sr[0] = sr[1] = 0;
+    float rig_height = 0, rig_size = 0;  // (the modifier held: the Frame's D-pad, or Touch's right stick)
+    if (mod && S.touch) rig_height = sr[1], rig_size = sr[0], sr[0] = sr[1] = 0;
+    else if (mod) rig_height = (float)(S.down[C_DUP] - S.down[C_DDOWN]), rig_size = (float)(S.down[C_DRIGHT] - S.down[C_DLEFT]);
 
-    // the rig's: the left grip makes the D-pad (and a click of the right stick) the rig's, not the game's; so does a click
+    // the rig's: the modifier makes the D-pad (and a click of the right stick) the rig's, not the game's; so does a click
     // of both sticks, held for RESET_HOLD: a single click, or both for less than that, goes to the game as it always did
     bool rig_ctl[C_COUNT] = {0};
     if (mod) rig_ctl[C_DUP] = rig_ctl[C_DDOWN] = rig_ctl[C_DLEFT] = rig_ctl[C_DRIGHT] = rig_ctl[C_CLICK_R] = true;
@@ -461,7 +522,7 @@ void xr_input_frame(void) {
             rig_ctl[C_CLICK_L] = rig_ctl[C_CLICK_R] = true;      // (one let go, the other still down: still not a click of the game's)
         } else S.both_ns = 0, S.both_fired = false;
     }
-    // the view reset: both stick clicks held RESET_HOLD, or the left grip and a click of the right stick (an alias), send the short
+    // the view reset: both stick clicks held RESET_HOLD, or the modifier and a click of the right stick (an alias), send the short
     // reset once; the same hold, 2 s from the press, sends the full one once (it includes the short one's yaw and recentre, so the
     // short one is not sent again). Let go of the hold (or of the sticks, both and the alias ending) and a new press starts over.
     {
@@ -482,8 +543,8 @@ void xr_input_frame(void) {
     else if (S.dom == 2 && ax > ay * 1.4f) S.dom = 1;
     atomic_store(&g_tilt, S.dom == 2 ? sr[1] : 0.0f);
     atomic_store(&g_turn, S.dom == 1 ? sr[0] : 0.0f);
-    atomic_store(&g_height, mod ? (float)(S.down[C_DUP] - S.down[C_DDOWN]) : 0.0f);
-    atomic_store(&g_size, mod ? (float)(S.down[C_DRIGHT] - S.down[C_DLEFT]) : 0.0f);
+    atomic_store(&g_height, rig_height);
+    atomic_store(&g_size, rig_size);
     if (ax < 0.35f) S.snap_armed = true;
     else if (ax > 0.7f && S.snap_armed && S.dom == 1) S.snap_armed = false, atomic_store(&g_snap, sr[0] > 0 ? 1 : -1);
 
@@ -504,13 +565,17 @@ void xr_input_frame(void) {
         }
     }
     uint32_t host = 0;
-    const MapEnt *map = S.comfort ? k_map_comfort : k_map_switch;
-    size_t nmap = S.comfort ? sizeof k_map_comfort / sizeof *k_map_comfort : sizeof k_map_switch / sizeof *k_map_switch;
+#define MAP(m) (map = m, nmap = sizeof m / sizeof *m)
+    const MapEnt *map;
+    size_t nmap;
+    if (S.touch) S.comfort ? MAP(k_map_touch_comfort) : MAP(k_map_touch);
+    else S.comfort ? MAP(k_map_comfort) : MAP(k_map_switch);
+#undef MAP
     for (size_t i = 0; i < nmap; i++)
         if (S.down[map[i].ctl] && !rig_ctl[map[i].ctl] && map[i].host >= 0 && map[i].host < 32) host |= 1u << map[i].host;
     if (!S.comfort)
-        for (Ctl c = C_A; c <= C_Y; c++)
-            if (S.down[c] && !rig_ctl[c]) host |= 1u << face_host(c, g_settings.face_by_label);
+        for (Ctl c = C_A; c <= (S.touch ? C_B : C_Y); c++)
+            if (S.down[c] && !rig_ctl[c]) host |= 1u << (S.touch ? touch_face_host(c, g_settings.face_by_label) : face_host(c, g_settings.face_by_label));
     float yaw = atomic_load(&g_yaw), c = cosf(yaw), s = sinf(yaw);
     // (app space: x right, y ahead; the table's frame is the app's turned by -yaw, the game's up is the table's -z)
     int32_t lx = to_axis(sl[0] * c + sl[1] * s), ly = to_axis(-sl[0] * s + sl[1] * c);

@@ -164,18 +164,6 @@ SHADERC  ?= $(shell pkg-config --libs shaderc 2>/dev/null || echo -lshaderc)
 LDFLAGS  := -fuse-ld=lld -rdynamic $(if $(DEPS),-L$(DEPS)/lib -Wl$(comma)-rpath$(comma)$(abspath $(DEPS))/lib) \
             -lSDL3 -lavformat -lavcodec -lavutil -lswscale -lvulkan $(SHADERC) -lpthread -ldl -lm
 BACKEND_SRC := $(wildcard runtime/nvn/vulkan/*.c) $(wildcard runtime/nvn/vulkan/*.cpp)
-# The VR mode (runtime/xr, LARECOMP_XR=1) when DEPS has the OpenXR headers (tools/fetch_openxr.sh); the OpenXR loader
-# is opened at run time (the runtime's own), so nothing more is linked. Without the headers: no VR mode.
-XR_HDR   := $(if $(DEPS),$(wildcard $(DEPS)/include/openxr/openxr.h))
-ifneq ($(XR_HDR),)
-BACKEND_SRC += $(wildcard runtime/xr/*.c)
-$(B)/rt/nvn/vulkan/device.o: RTFLAGS += -DLARECOMP_HAVE_XR
-$(B)/rt/nvn/vulkan/stereo.o: RTFLAGS += -DLARECOMP_HAVE_XR
-$(B)/rt/nvn/vulkan/foveation.o: RTFLAGS += -DLARECOMP_HAVE_XR
-$(B)/rt/hle/input.o: RTFLAGS += -DLARECOMP_HAVE_XR
-$(B)/rt/main.o: RTFLAGS += -DLARECOMP_HAVE_XR
-RT_HDRS  += $(wildcard runtime/xr/*.h)
-endif
 BACKEND_OBJ := $(patsubst runtime/%.cpp,$(B)/rt/%.o,$(patsubst runtime/%.c,$(B)/rt/%.o,$(BACKEND_SRC)))
 IMGUI_OBJ += $(B)/imgui/imgui_impl_vulkan.o
 UIFLAGS  := -x c++  # the .mm UI sources are plain C++ apart from __APPLE__ blocks
@@ -212,6 +200,34 @@ GAMELIB  := $(B)/lasgame.dll
 LDFLAGS  += -Wl,--export-all-symbols -Wl,--out-implib,$(B)/lasrecomp.dll.a
 GAMELIB_LDFLAGS := -shared -fuse-ld=lld $(B)/lasrecomp.dll.a
 GAMELIB_SHARED := -shared  # (+ the import library: runtime/gamebuild.c)
+endif
+
+# The VR mode (runtime/xr, docs/af/PCVR.md), Linux and Windows. XR=auto (default): built in when DEPS has the OpenXR
+# headers (tools/fetch_openxr.sh: the Steam Frame build, the desktop tests); XR=0: never; XR=1: stops without them. The
+# OpenXR loader is opened at run time (the runtime's own, or the one a package carries), so nothing more is linked.
+# PCVR=1: the PC VR packages (make appimage, make dist, which pass XR=0 otherwise): in VR unless started with --flat.
+# A build folder holds one or the other: make does not rebuild an object when only its flags change.
+XR       ?= auto
+PCVR     ?= 0
+ifneq ($(filter linux windows,$(PLATFORM)),)
+ifneq ($(XR),0)
+XR_HDR   := $(if $(DEPS),$(wildcard $(DEPS)/include/openxr/openxr.h))
+ifeq ($(XR)$(XR_HDR),1)
+$(error XR=1: no OpenXR headers in $(DEPS)/include/openxr (tools/fetch_openxr.sh; Windows: pcvr/fetch-openxr-windows.sh))
+endif
+ifneq ($(XR_HDR),)
+BACKEND_OBJ += $(patsubst runtime/%.c,$(B)/rt/%.o,$(wildcard runtime/xr/*.c))
+$(B)/rt/nvn/vulkan/device.o: RTFLAGS += -DLARECOMP_HAVE_XR
+$(B)/rt/nvn/vulkan/stereo.o: RTFLAGS += -DLARECOMP_HAVE_XR
+$(B)/rt/nvn/vulkan/foveation.o: RTFLAGS += -DLARECOMP_HAVE_XR
+$(B)/rt/hle/input.o: RTFLAGS += -DLARECOMP_HAVE_XR
+$(B)/rt/main.o: RTFLAGS += -DLARECOMP_HAVE_XR
+RT_HDRS  += $(wildcard runtime/xr/*.h)
+ifeq ($(PCVR),1)
+$(B)/rt/main.o $(B)/rt/xr/xr_session.o: RTFLAGS += -DLARECOMP_PCVR
+endif
+endif
+endif
 endif
 
 # DYN_BASE=1: the guest window starts where the process has room instead of at 0x70_0000_0000 (runtime/rt.h), as on
@@ -422,9 +438,11 @@ dmg: app
 # helpers are built with an x64 Python 3.12 (RANDO_PY=...: capstone / unicorn have no ARM64 Windows wheels) and run
 # under emulation, everything else is ARM64.
 DIST     := build/dist/LAS Recomp
-WIN_B    := build/win-release
+# PCVR=1: the PC VR zip (docs/af/PCVR.md): the VR mode built in (OpenXR headers from pcvr/fetch-openxr-windows.sh in
+# build/deps-win), Khronos' openxr_loader.dll next to the exe, a build folder and zip name of its own
+WIN_B    := build/win-release$(if $(filter 1,$(PCVR)),-pcvr)
 # the zip's platform name, as the update check names it (runtime/ui/launcher.mm LARECOMP_PLATFORM)
-WINZIP   := windows$(if $(filter aarch64,$(WINARCH)),-arm64)
+WINZIP   := windows$(if $(filter aarch64,$(WINARCH)),-arm64)$(if $(filter 1,$(PCVR)),-pcvr)
 deps-windows:
 	tools/build_deps_windows.sh
 dist:
@@ -432,7 +450,9 @@ dist:
 	@[ -d build/helper/rando-gen ] || { echo "make rando-helper first (the seed generator)"; exit 1; }
 	@[ -d build/helper/lasgen ] || { echo "make gen-helper first (the game code generator)"; exit 1; }
 	@[ -x build/zig/zig.exe ] || { echo "tools/fetch_zig.sh first (the compiler)"; exit 1; }
-	$(MAKE) B=$(WIN_B) DEPS=$(CURDIR)/build/deps-win RELEASE=1 $(WIN_B)/lasrecomp.exe
+	@[ "$(PCVR)" != 1 ] || [ -f build/deps-win/bin/openxr_loader.dll ] || { echo "pcvr/fetch-openxr-windows.sh first (OpenXR)"; exit 1; }
+	@[ "$(PCVR)" != 1 ] || [ "$(WINARCH)" != aarch64 ] || { echo "PCVR=1: x64 only"; exit 1; }
+	$(MAKE) B=$(WIN_B) DEPS=$(CURDIR)/build/deps-win RELEASE=1 XR=$(if $(filter 1,$(PCVR)),1,0) $(WIN_B)/lasrecomp.exe
 	! nm $(WIN_B)/lasrecomp.exe | grep ' f_70' >/dev/null  # (no game code inside)
 	rm -rf build/dist && mkdir -p "$(DIST)/gamelib-src"
 	cp $(WIN_B)/lasrecomp.exe $(WIN_B)/lasrecomp.dll.a "$(DIST)/"
@@ -448,6 +468,9 @@ dist:
 	cp third_party/fonts/DejaVu/LICENSE "$(DIST)/DejaVu-LICENSE.txt"
 	cp README.md LICENSE "$(DIST)/"  # (licenses and source links of the bundled components: README "License")
 	cp -R build/helper/rando-gen "$(DIST)/"
+	if [ "$(PCVR)" = 1 ]; then cp build/deps-win/bin/openxr_loader.dll "$(DIST)/" && \
+	    cp build/deps-win/share/openxr/LICENSE "$(DIST)/OpenXR-LICENSE.txt" && \
+	    cp build/deps-win/share/openxr/jsoncpp-LICENSE "$(DIST)/OpenXR-jsoncpp-LICENSE.txt"; fi  # (the OpenXR loader)
 	PATH="$(CURDIR)/build/deps-win/bin:$$PATH" ldd $(WIN_B)/lasrecomp.exe | awk '(/ucrt64/ || /clangarm64/ || /deps-win/) && !/vulkan-1/ {print $$3}' | sort -u | \
 	    xargs -I{} cp -u {} "$(DIST)/"
 	! ls "$(DIST)" | grep -iE 'x264|x265|xvid|postproc'  # (no GPL codec libraries in the release)
@@ -505,8 +528,9 @@ build/rando-venv/.ok: third_party/LAS-Randomizer/requirements.txt
 # Linux: build/dist/LAS Recomp-<version>-linux-<arch>.AppImage, built in Ubuntu 22.04 containers (podman) with SDL3, LGPL
 # FFmpeg, shaderc and the seed generator helper inside; the Vulkan loader and GPU drivers are the system's.
 # `make appimage` (ARCH: this machine's, or aarch64 cross-compiled), `make appimages` both. See docs/linux.md.
+# PCVR=1: the PC VR AppImage (x86-64 only; docs/af/PCVR.md). Without it the AppImage is built without the VR mode.
 appimage:
-	tools/linux/appimage.sh $(ARCH)
+	PCVR=$(PCVR) tools/linux/appimage.sh $(ARCH)
 appimages:
 	tools/linux/appimage.sh x86_64
 	tools/linux/appimage.sh aarch64

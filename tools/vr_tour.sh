@@ -104,13 +104,14 @@ if [ -n "$DIFF_OLD" ]; then
     exec "$PY" -I "$HELP/tour.py" compare "$DIFF_OLD" "$DIFF_NEW"
 fi
 
-# ---- the schedule of one session: STEP game frames a spot (the game runs at 30 fps while the display is below 100 Hz)
+# ---- the schedule of one session: STEP game frames a spot (runtime/xr/hz_filter.h hz_rule: the game is held at 30 fps
+# at a multiple of 30 Hz that is not one of 60, e.g. 90; at 60, 120 and the uneven rates, 72, 80, 144, it runs at 60)
 SESSIONS=()   # kind:hz:dwell
 SESSIONS+=("shots:${HZL[0]}:$SHOT_DWELL")
 for hz in "${HZL[@]}"; do SESSIONS+=("timing:$hz:$DWELL"); done
 [ $VVL = 1 ] && SESSIONS+=("vvl:${HZL[0]}:6")
 START=900
-gamefps() { [ "$1" -lt 100 ] && echo 30 || echo 60; }
+gamefps() { [ $(($1 % 60)) != 0 ] && [ $(($1 % 30)) = 0 ] && echo 30 || echo 60; }
 
 if [ $PLAN = 1 ]; then
     echo "vr_tour plan (tree $TREE): ${#SPOTS[@]} spots, eye $EYE"

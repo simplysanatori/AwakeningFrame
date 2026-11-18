@@ -1,4 +1,5 @@
-// The display-rate filter (runtime/xr/hz_filter.h): one-frame period blips ignored, real rate changes taken.
+// The display-rate filter (runtime/xr/hz_filter.h): one-frame period blips ignored, real rate changes taken; the game's
+// rate at each display rate (hz_rule) and its vsync cadence (hz_cadence_step) at 60 to 144 Hz and slightly off-nominal ones.
 // Build + run: clang -std=gnu11 -O1 -Iruntime tools/test_hz_filter.c -o build/test-hz-filter && build/test-hz-filter
 // [xr_timing log ...]: also replays each log's period= column, counting rate changes the old one-frame check made
 // (runtime/xr/xr_loop.c before the filter) against the filter's. Exits non-zero when a case fails.
@@ -51,7 +52,91 @@ static void replay(const char *path) {
     check(new_changes <= 3 && f.hz > 100, "log replay: no blip flips, ends at 120 Hz");
 }
 
+
+// The XR loop's vsync before the cadence (by time at every rate), for comparing the patterns at the nominal rates.
+static bool old_step(int64_t *acc, int64_t step) {
+    *acc += step;
+    if (*acc < HZ_GAME_PERIOD_NS - 500000) return false;
+    *acc -= HZ_GAME_PERIOD_NS;
+    if (*acc > HZ_GAME_PERIOD_NS) *acc = 0;
+    return true;
+}
+
+// n refreshes at hz through the rule's cadence: the refreshes each game frame is shown for (a frame: one vsync, two
+// when held at 30), their least and most, and the game frames per second.
+static void cadence(float hz, int fps_test, int n, int *lo, int *hi, double *fps) {
+    HzRule r = hz_rule(hz, fps_test);
+    HzCadence c = {0};
+    hz_cadence_set(&c, &r);
+    int64_t period = (int64_t)(1e9 / hz);
+    int since = 0, vs = 0, frames = 0;
+    *lo = 1 << 30, *hi = 0;
+    for (int i = 0; i < n; i++) {
+        since++;
+        if (!hz_cadence_step(&c, period, 1)) continue;
+        if (r.hold30 && (++vs & 1)) continue;
+        if (frames++ > 2) *lo = since < *lo ? since : *lo, *hi = since > *hi ? since : *hi;  // (past the start)
+        since = 0;
+    }
+    *fps = frames / (n / hz);
+}
+
+static void rates(void) {
+    static const struct { float hz; int test; bool hold, even; int lo, hi; double fps; } k[] = {
+        {120, 0, false, true, 2, 2, 60},     {119.88f, 0, false, true, 2, 2, 59.94}, {120.02f, 0, false, true, 2, 2, 60.01},
+        {90, 0, true, true, 3, 3, 30},       {89.91f, 0, true, true, 3, 3, 29.97},   {90.05f, 0, true, true, 3, 3, 30.02},
+        {60, 0, false, true, 1, 1, 60},      {72, 0, false, false, 1, 2, 60},        {80, 0, false, false, 1, 2, 60},
+        {144, 0, false, false, 2, 3, 60},    {100, 0, false, false, 1, 2, 60},       {90, 60, false, false, 1, 2, 60},
+        {120, 30, true, true, 4, 4, 30},     {150, 0, true, true, 5, 5, 30},
+    };
+    for (unsigned i = 0; i < sizeof k / sizeof *k; i++) {
+        HzRule r = hz_rule(k[i].hz, k[i].test);
+        int lo, hi;
+        double fps;
+        cadence(k[i].hz, k[i].test, 20000, &lo, &hi, &fps);
+        char what[160];
+        snprintf(what, sizeof what, "%.2f Hz%s: %s fps, %s, %d-%d refreshes a frame, %.2f fps", k[i].hz,
+                 k[i].test == 60 ? " (60 test)" : k[i].test == 30 ? " (30 test)" : "", r.hold30 ? "30" : "60",
+                 r.even ? "even" : "uneven", lo, hi, fps);
+        check(r.hold30 == k[i].hold && r.even == k[i].even && lo == k[i].lo && hi == k[i].hi && fps > k[i].fps - 0.05 &&
+              fps < k[i].fps + 0.05, what);
+    }
+    // the frame time the pacer's VR limits scale from: as before at 60, 120 and the 90 Hz choices, 16.67 elsewhere
+    check(hz_rule(120, 0).frame_ms > 16.6 && hz_rule(120, 0).frame_ms < 16.7 && hz_rule(90, 0).frame_ms == 0 &&
+          hz_rule(90, 60).frame_ms > 16.6 && hz_rule(60, 0).frame_ms > 16.6 && hz_rule(72, 0).frame_ms > 16.6 &&
+          hz_rule(144, 0).frame_ms > 16.6 && hz_rule(144, 0).frame_ms < 16.7, "frame time 16.67 ms (0 when held at 30 at 90 Hz)");
+    // at exactly 90 and 120 Hz the counted cadence gives the vsyncs the timed one did
+    for (int h = 0; h < 2; h++) {
+        float hz = h ? 120 : 90;
+        HzRule r = hz_rule(hz, 0);
+        HzCadence c = {0};
+        hz_cadence_set(&c, &r);
+        int64_t acc = 0, period = (int64_t)(1e9 / hz + 0.5);
+        int diff = 0;
+        for (int i = 0; i < 5000; i++) diff += hz_cadence_step(&c, period, 1) != old_step(&acc, period);
+        char what[64];
+        snprintf(what, sizeof what, "%.0f Hz: the same vsyncs as before (%d differ)", hz, diff);
+        check(diff == 0, what);
+    }
+    {   // skipped refreshes at 120 Hz (a step of 3 or 5): one vsync, the phase as the timed cadence had it
+        HzRule r = hz_rule(120, 0);
+        HzCadence c = {0};
+        hz_cadence_set(&c, &r);
+        int64_t acc = 0;
+        int diff = 0, vs = 0;
+        for (int i = 0; i < 400; i++) {
+            int n = i % 37 == 5 ? 3 : i % 53 == 7 ? 5 : 1;
+            bool a = hz_cadence_step(&c, n * 8333333ll, n), b = old_step(&acc, n * 8333333ll);
+            diff += a != b, vs += a;
+        }
+        char what[80];
+        snprintf(what, sizeof what, "skipped refreshes at 120 Hz: the timed cadence's vsyncs (%d of %d differ)", diff, vs);
+        check(diff == 0, what);
+    }
+}
+
 int main(int argc, char **argv) {
+    rates();
     {   // steady 120 Hz with one-frame 16.67 and 25 ms blips (the 13:44 session)
         HzFilter f = {0};
         int frame = 0, first = -1, changes = feed(&f, NS(120), 100, &first, &frame);

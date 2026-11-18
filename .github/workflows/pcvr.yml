@@ -1,0 +1,80 @@
+# The PC VR packages (docs/af/PCVR.md): the Linux AppImage (make appimage PCVR=1) and the Windows zip (make dist
+# PCVR=1), uploaded as artifacts. Nothing is published. Off until the owner turns it on: it runs only by hand
+# (Actions, "PC VR packages", Run workflow) and only when the repository variable PCVR_CI is 1 (Settings, Secrets and
+# variables, Actions, Variables). The Windows zip has not been run on Windows yet.
+name: PC VR packages
+on:
+  workflow_dispatch:
+    inputs:
+      windows_zip:
+        description: 'Windows: the whole zip (the LGPL FFmpeg build and the helpers: slow), not only the app'
+        type: boolean
+        default: false
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    if: vars.PCVR_CI == '1'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rate rule test
+        run: clang -std=gnu11 -O1 -Iruntime tools/test_hz_filter.c -o test-hz-filter && ./test-hz-filter
+      # (the AppImage is built in the Ubuntu 22.04 container, tools/linux/Containerfile; podman is on the runner)
+      - name: AppImage
+        run: make appimage PCVR=1
+      - name: The loader is bundled and found first
+        run: |
+          set -e
+          f=$(ls build/dist/*-linux-x86_64-pcvr.AppImage)
+          cd build && "../$f" --appimage-extract >/dev/null
+          readelf -d squashfs-root/usr/bin/lasrecomp | grep -F 'RUNPATH' | grep -F '$ORIGIN/../lib'
+          test -f squashfs-root/usr/lib/libopenxr_loader.so.1
+          test -f squashfs-root/usr/bin/OpenXR-LICENSE.txt
+          nm squashfs-root/usr/bin/lasrecomp | grep -q ' xr_pc_start$'  # (the VR mode is in; symbols are kept)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lasrecomp-pcvr-linux-x86_64
+          path: build/dist/*-pcvr.AppImage
+
+  windows:
+    if: vars.PCVR_CI == '1'
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: LF line endings, as tools/setup_windows.ps1 sets for clones
+        shell: pwsh
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      # (as ci.yml's windows job)
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: make git python curl tar xz unzip zip
+          pacboy: clang:p lld:p binutils:p python:p sdl3:p ffmpeg:p vulkan-devel:p shaderc:p spirv-tools:p pkgconf:p
+            vulkan-memory-allocator:p
+      - name: OpenXR headers and loader
+        run: pcvr/fetch-openxr-windows.sh
+      - name: App builds with the VR mode
+        if: ${{ !inputs.windows_zip }}
+        run: make -j"$(nproc)" B=build/pcvr DEPS="$PWD/build/deps-win" XR=1 PCVR=1 build/pcvr/lasrecomp.exe
+      - name: Rate rule test
+        run: clang -std=gnu11 -O1 -Iruntime tools/test_hz_filter.c -o build/test-hz-filter.exe && build/test-hz-filter.exe
+      # The zip as docs/BUILD-windows.md "Package" makes it, with PCVR=1
+      - name: Zip
+        if: ${{ inputs.windows_zip }}
+        run: |
+          make deps-windows
+          make rando-helper
+          make gen-helper
+          tools/fetch_zig.sh
+          make dist PCVR=1
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.windows_zip }}
+        with:
+          name: lasrecomp-pcvr-windows-x64
+          path: build/dist/*-windows-pcvr.zip

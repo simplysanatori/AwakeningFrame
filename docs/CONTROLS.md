@@ -116,7 +116,34 @@ button doesn't swing the sword. *Pointer Hand* on the VR tab moves the laser to
 the left controller. The game's own menus (pause, inventory) still use the
 buttons.
 
+## Touch controllers (PC VR)
+
+On a PC headset (docs/af/PCVR.md), a Quest's Touch controllers have a layout of their own, picked when the headset
+reports them. Touch has no D-pad, bumpers or View button, so:
+
+| Touch | Switch | In Link's Awakening |
+|---|---|---|
+| Left stick | Left stick | Walk |
+| **A** (right controller, bottom) | B | Sword |
+| **B** (right controller, top) | A | Talk, read, lift, open |
+| Left trigger | Y | The item on Y |
+| Right trigger | X | The item on X |
+| Left grip | L | Pegasus Boots, once found |
+| Right grip | R | Shield (hold) |
+| Left **Menu** | Plus | Pause menu |
+| Left **Y** | Minus | Map |
+| Left **Y** and **Menu** together | | The game's menu, with the VR tab |
+| Right stick | | Turn and tilt the table |
+| Left **X** + right stick up / down | | Table height |
+| Left **X** + right stick right / left | | Table size |
+| Click both thumbsticks | | Reset the view. Hold for 2 seconds for a full reset (left **X** + a right stick click does the same) |
+
+There is no D-pad, ZL or ZR: the game doesn't use ZL and ZR in play, and the D-pad only for D-pad items.
+
+With Buttons Match Labels on, A is A and B is B. **Comfort** on Touch: right trigger sword, left trigger shield,
+right grip A, left grip Boots, right A and B the items on Y and X.
+
 ## Rumble
 
-When the game rumbles, both controllers vibrate. The Controls tab's Rumble
+When the game rumbles, both controllers vibrate (Frame or Touch). The Controls tab's Rumble
 and Intensity settings apply.

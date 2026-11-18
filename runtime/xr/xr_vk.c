@@ -63,7 +63,10 @@ static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL l_GetInstanceProcAddr(VkInstance
 }
 
 VkResult xr_vk_create_instance(const VkInstanceCreateInfo *ci, VkInstance *out) {
-    if (!xr_instance_create()) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!xr_instance_create()) {
+        LOG("[xr] is SteamVR (or another OpenXR runtime) running, with the headset connected? --flat starts the game in its window\n");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
     XrGraphicsRequirementsVulkan2KHR req = {.type = XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN2_KHR};
     if (!XR_OK(p_xrGetVulkanGraphicsRequirements2KHR(g_xr.inst, g_xr.sys, &req))) return VK_ERROR_INITIALIZATION_FAILED;
     uint32_t api = ci->pApplicationInfo ? ci->pApplicationInfo->apiVersion : VK_API_VERSION_1_0;

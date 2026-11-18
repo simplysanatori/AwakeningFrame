@@ -8,15 +8,21 @@
 # builds the game code with on the player's machine (runtime/gamebuild.c: lasgen/, zig/ from tools/fetch_zig.sh,
 # gamelib-src/), the window icon, the start screen font. No game code: that's built from the player's own files. usr/lib: the libraries from deps/ only - glibc, libstdc++, the Vulkan loader and the
 # GPU drivers are the system's (a bundled loader would not find the user's drivers). No game files or fonts.
+# PCVR=1: the PC VR AppImage (docs/af/PCVR.md): the VR mode built in, and the OpenXR loader (tools/fetch_openxr.sh,
+# built here) in usr/lib, which the program opens at run time (its RUNPATH comes first). Without it: no VR mode, whatever
+# the deps folder holds.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ARCH=$1
 L=$PWD/build/linux/$ARCH
 P=$L/deps
-B=$L/game
+PCVR=${PCVR:-0}
+SUFFIX=
+if [ "$PCVR" = 1 ]; then SUFFIX=-pcvr; fi
+B=$L/game$SUFFIX  # (a build folder each: make does not rebuild an object whose flags changed)
 APPDIR=$L/AppDir
 VERSION=$(sed -n 's/^#define LARECOMP_VERSION "\(.*\)"/\1/p' runtime/ui/launcher.mm)
-OUT="build/dist/LAS Recomp-$VERSION-linux-$ARCH.AppImage"
+OUT="build/dist/LAS Recomp-$VERSION-linux-$ARCH$SUFFIX.AppImage"
 JOBS=$(nproc)
 
 tools/linux/build_deps.sh "$ARCH"
@@ -28,6 +34,14 @@ if [ "$ARCH" != "$(uname -m)" ]; then
     MAKEARGS=(ARCH="$ARCH" SYSROOT="$SYSROOT")
 else
     MAKEARGS=(ARCH="$ARCH")
+fi
+
+if [ "$PCVR" = 1 ]; then
+    [ "$ARCH" = "$(uname -m)" ] || { echo "PCVR=1: native builds only"; exit 1; }
+    OPENXR_PREFIX=$P AF_OPENXR_CACHE=$PWD/build/linux/src tools/fetch_openxr.sh
+    MAKEARGS+=(XR=1 PCVR=1)
+else
+    MAKEARGS+=(XR=0)
 fi
 
 # the app alone (the game code is built on the player's machine)
@@ -76,6 +90,16 @@ while [ ${#todo[@]} -gt 0 ]; do
     done
 done
 patchelf --set-rpath '$ORIGIN/../lib' "$APPDIR/usr/bin/lasrecomp"
+if [ "$PCVR" = 1 ]; then  # (opened at run time, so not in the walk above; it needs only base system libraries)
+    cp -L "$P/lib/libopenxr_loader.so.1" "$APPDIR/usr/lib/"
+    for n in $(needed "$APPDIR/usr/lib/libopenxr_loader.so.1"); do
+        [[ $n =~ $SYSTEM_LIBS ]] || { echo "package: the OpenXR loader needs $n"; exit 1; }
+    done
+    # (its licence and that of the JSON library built into it, from the SDK's source)
+    tar -xzf build/linux/src/OpenXR-SDK-1.1.63.tar.gz -O OpenXR-SDK-release-1.1.63/LICENSE > "$APPDIR/usr/bin/OpenXR-LICENSE.txt"
+    tar -xzf build/linux/src/OpenXR-SDK-1.1.63.tar.gz -O OpenXR-SDK-release-1.1.63/src/external/jsoncpp/LICENSE \
+        > "$APPDIR/usr/bin/OpenXR-jsoncpp-LICENSE.txt"
+fi
 if ls "$APPDIR/usr/lib" | grep -iE 'x264|x265|xvid|postproc|vulkan'; then  # (no GPL codecs, no Vulkan loader)
     echo "package: library that must not ship"; exit 1
 fi
