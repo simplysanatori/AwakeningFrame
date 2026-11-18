@@ -10463,7 +10463,7 @@ static bool vr_eye_post(VkCommandBuffer cb, TexBackend *b, uint32_t ly, uint32_t
         TexBackend *out = post_image(2, b->width, b->height);
         post_area_w = cw + 64, post_area_h = ch + 64;
         VkImageView in[3] = {v};
-        post_pass(cb, "smaa_edge.frag", in, 1, edges, m, true);
+        post_pass(cb, "smaa_edgec.frag", in, 1, edges, m, true);  // (colour edges: smaa_edgec.frag)
         VkImageView wi[3] = {post_view(edges), smaa_lut(0), smaa_lut(1)};
         post_pass(cb, "smaa_weight.frag", wi, 3, weights, m, true);
         VkImageView bi[3] = {v, post_view(weights)};

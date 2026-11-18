@@ -368,10 +368,13 @@ static const char *builtin_src(const char *name, int *stage) {
     // with an entry point per pass. a = SMAA_RT_METRICS (1 / size, size). The vertex-stage offset helpers run per
     // pixel here. Luma edges (t0 = colour) -> blending weights (t0 = edges, t1 = area, t2 = search) -> neighbourhood
     // blending (t0 = colour, t1 = weights). Vulkan's texture origin is top-left, as SMAA expects (no flips).
+    // smaa_edgec.frag: colour edges instead of luma (the VR eyes: a saturated blue sea against the black void is below
+    // the luma threshold, 0.08 against 0.1).
     if (!strncmp(name, "smaa_", 5)) {
         *stage = STAGE_FRAGMENT;
-        static char *src[3];
-        int k = !strcmp(name, "smaa_edge.frag") ? 0 : !strcmp(name, "smaa_weight.frag") ? 1 : !strcmp(name, "smaa_blend.frag") ? 2 : -1;
+        static char *src[4];
+        int k = !strcmp(name, "smaa_edge.frag") ? 0 : !strcmp(name, "smaa_weight.frag") ? 1 : !strcmp(name, "smaa_blend.frag") ? 2
+              : !strcmp(name, "smaa_edgec.frag") ? 3 : -1;
         if (k < 0) return NULL;
         if (!src[k]) {
             extern const char smaa_hlsl_src[];
@@ -381,7 +384,7 @@ static const char *builtin_src(const char *name, int *stage) {
                 "#define SMAA_RT_METRICS pc.a\n"
                 "#define SMAA_GLSL_4\n"
                 "#define SMAA_PRESET_HIGH\n";
-            static const char *mains[3] = {
+            static const char *mains[4] = {
                 "layout(set = 0, binding = 0) uniform sampler2D t0;\n"
                 "layout(location = 0) out vec4 o;\n"
                 "void main() {\n"
@@ -408,6 +411,14 @@ static const char *builtin_src(const char *name, int *stage) {
                 "  vec4 off;\n"
                 "  SMAANeighborhoodBlendingVS(uv, off);\n"
                 "  o = vec4(SMAANeighborhoodBlendingPS(uv, off, t0, t1).rgb, 1.0);\n"
+                "}\n",
+                "layout(set = 0, binding = 0) uniform sampler2D t0;\n"
+                "layout(location = 0) out vec4 o;\n"
+                "void main() {\n"
+                "  vec2 uv = gl_FragCoord.xy * SMAA_RT_METRICS.xy;\n"
+                "  vec4 off[3];\n"
+                "  SMAAEdgeDetectionVS(uv, off);\n"
+                "  o = vec4(SMAAColorEdgeDetectionPS(uv, off, t0), 0.0, 0.0);\n"
                 "}\n"};
             size_t n = strlen(head) + strlen(smaa_hlsl_src) + strlen(mains[k]) + 1;
             src[k] = malloc(n);

@@ -115,8 +115,12 @@ image by the present or by the edge pass (which reads the processed colour: `edg
 | Value | Passes per eye | Reads per pixel |
 |---|---|---|
 | `LARECOMP_VR_AA=fxaa` | 1 full-size (`vr_fxaa.frag`: an FXAA-style edge search, written for this) | 5 where flat, up to about 25 on an edge |
-| `LARECOMP_VR_AA=smaa` | 3 full-size (SMAA 1x, High preset, as the flat present; no stencil) | edges about 9; weights 1 off an edge, searches on it; blending 2 to 3 |
+| `LARECOMP_VR_AA=smaa` | 3 full-size (SMAA 1x, High preset; colour edges, where the flat present uses luma; no stencil) | edges 7; weights 1 off an edge, searches on it; blending 2 to 3 |
 | `LARECOMP_VR_UPSCALE=fsr` | 2 at the XR image's size (EASU, RCAS), only below full eye size | 12, then 5 |
+
+SMAA looks for edges by colour: the cut against the black void is often a saturated blue sea, 0.08 in luma against
+the High preset's threshold of 0.1, so luma edges left it untouched (Field_16E, 2026-11-18). FXAA's luma is the usual
+weighted sum and finds that edge (0.08 is over its 0.031 floor) but blends it weakly.
 
 Each pass writes an RGBA8 image (gamma-encoded, like the eye output) and the eye's draw reads it instead of the
 output. The images are the flat post passes' (`post_image`), used one eye after the other in the same command buffer.
