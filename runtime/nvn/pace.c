@@ -179,6 +179,23 @@ static bool hold_30(bool on) {
 // for the next vsync, not one already passed). Held, a frame that started after vsync S may not let the game start
 // the next one before S + 2: if vsync S + 1 hasn't come yet, wait for it here. (The time counts as blocked: idle.)
 extern volatile uint64_t g_vsync_count, g_vsync_ns;  // runtime/hle/vi.c
+// LARECOMP_PACE_TEST_WORK_MS=<ms>[,<every>] (a test): the game thread busy-waits that long where its next frame's work
+// starts (after the held cadence's wait), every frame or every that many: more work in a frame (busy time, not idle),
+// for how much a frame has room for at 30 or 60.
+#ifndef PACE_TEST
+static void test_work(void) {
+    static double ms = -1;
+    static long every, frame;
+    if (ms < 0) {
+        const char *e = getenv("LARECOMP_PACE_TEST_WORK_MS"), *c = e ? strchr(e, ',') : NULL;
+        ms = e ? atof(e) : 0, every = c ? atol(c + 1) : 1;
+        if (every < 1) every = 1;
+    }
+    if (ms <= 0 || ++frame % every) return;
+    uint64_t until = plat_now_ns() + (uint64_t)(ms * 1e6);
+    while (plat_now_ns() < until) {}
+}
+#endif
 static void hold_cadence(bool held) {
     static uint64_t v_exit;  // the vsync count when the game last went on from here (its next frame: from the vsync after)
     if (held && v_exit) {
@@ -195,6 +212,9 @@ static void hold_cadence(bool held) {
         g_blocked_ns += plat_now_ns() - t0;
     }
     v_exit = __atomic_load_n(&g_vsync_count, __ATOMIC_ACQUIRE);
+#ifndef PACE_TEST
+    test_work();
+#endif
 }
 
 static float median60(const float *v) {
