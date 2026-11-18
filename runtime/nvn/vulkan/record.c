@@ -694,9 +694,83 @@ CMD_ARGS(CmdBindIndexBuffer, VkBuffer buf; VkDeviceSize off; VkIndexType type;)
 static void CmdBindIndexBuffer_run(const void *p) { const CmdBindIndexBufferArgs *a = p; vkCmdBindIndexBuffer(a->cb, a->buf, a->off, a->type); }
 void rec_CmdBindIndexBuffer(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize off, VkIndexType type) { CMD_QUEUE(CmdBindIndexBuffer, cb, buf, off, type); }
 
+// ---- held pass begin (exec.c begin_pass, LARECOMP_VR_CLEAR_FOLD): the begin waits for the pass's first draw, so a
+// clear of a whole attachment before it becomes that attachment's load op (exec.c clear: rec_held_attachment), and a
+// pass that ends with neither a draw nor a clear in it (LOAD, STORE, nothing between: it changes nothing) is never
+// recorded. Draws, in-pass clears and secondary command buffers begin it first.
+static struct {
+    bool on, hd, hs, hf;
+    VkCommandBuffer cb;
+    VkRenderingInfo ri;
+    VkRenderingAttachmentInfo ca[8], d, s;
+    union { VkRenderingFragmentDensityMapAttachmentInfoEXT fdm; VkRenderingFragmentShadingRateAttachmentInfoKHR fsr; } fov;
+} held;
+static uint64_t held_n[3];  // begun, dropped, attachments cleared by their load op
+static void held_flush(void) {
+    if (!held.on) return;
+    held.on = false;
+    held_n[0]++;
+    VkRenderingInfo ri = held.ri;
+    ri.pColorAttachments = ri.colorAttachmentCount ? held.ca : NULL;
+    ri.pDepthAttachment = held.hd ? &held.d : NULL;
+    ri.pStencilAttachment = held.hs ? &held.s : NULL;
+    ri.pNext = held.hf ? &held.fov : NULL;
+    rec_CmdBeginRendering(held.cb, &ri);
+}
+void rec_CmdBeginRenderingHeld(VkCommandBuffer cb, const VkRenderingInfo *ri) {
+    held_flush();  // (not expected: a begin while one is held)
+    const VkBaseInStructure *fov = ri->pNext;
+    if (ri->colorAttachmentCount > 8 || (fov && fov->pNext)) { rec_CmdBeginRendering(cb, ri); return; }
+    held.cb = cb;
+    held.ri = *ri;
+    for (uint32_t i = 0; i < ri->colorAttachmentCount; i++) held.ca[i] = ri->pColorAttachments[i];
+    held.hd = ri->pDepthAttachment != NULL;
+    held.hs = ri->pStencilAttachment != NULL;
+    if (held.hd) held.d = *ri->pDepthAttachment;
+    if (held.hs) held.s = *ri->pStencilAttachment;
+    held.hf = fov != NULL;
+    if (fov && fov->sType == VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_INFO_EXT)
+        held.fov.fdm = *(const VkRenderingFragmentDensityMapAttachmentInfoEXT *)fov;
+    else if (fov) held.fov.fsr = *(const VkRenderingFragmentShadingRateAttachmentInfoKHR *)fov;
+    held.on = true;
+}
+VkRenderingAttachmentInfo *rec_held_attachment(int slot) {
+    if (!held.on) return NULL;
+    VkRenderingAttachmentInfo *a = slot >= 0 && slot < (int)held.ri.colorAttachmentCount ? &held.ca[slot] : slot == 8 && held.hd ? &held.d
+                                 : slot == 9 && held.hs ? &held.s : NULL;
+    return a && a->imageView ? a : NULL;
+}
+void rec_held_stats(uint64_t n[3]) { memcpy(n, held_n, sizeof held_n); }
+bool rec_held_take(VkRenderingInfo *ri, VkRenderingAttachmentInfo ca[8], VkRenderingAttachmentInfo *d, VkRenderingAttachmentInfo *s) {
+    if (!held.on) return false;
+    held.on = false;
+    held_n[1]++;
+    *ri = held.ri;
+    ri->pNext = NULL;
+    for (uint32_t i = 0; i < held.ri.colorAttachmentCount; i++) ca[i] = held.ca[i];
+    ri->pColorAttachments = ri->colorAttachmentCount ? ca : NULL;
+    if (held.hd) *d = held.d;
+    if (held.hs) *s = held.s;
+    ri->pDepthAttachment = held.hd ? d : NULL;
+    ri->pStencilAttachment = held.hs ? s : NULL;
+    return true;
+}
+int rec_held_state(void) {
+    if (!held.on) return 0;
+    bool cleared = (held.hd && held.d.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) || (held.hs && held.s.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
+    for (uint32_t i = 0; i < held.ri.colorAttachmentCount; i++) cleared |= held.ca[i].imageView && held.ca[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
+    return cleared ? 1 : 2;
+}
+
 CMD_ARGS(CmdEndRendering, char pad_;)
 static void CmdEndRendering_run(const void *p) { vkCmdEndRendering(((const CmdEndRenderingArgs *)p)->cb); }
 void rec_CmdEndRendering(VkCommandBuffer cb) {
+    if (held.on) {  // (a pass that never drew: recorded only if a clear became one of its load ops)
+        bool cleared = (held.hd && held.d.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) || (held.hs && held.s.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
+        for (uint32_t i = 0; i < held.ri.colorAttachmentCount; i++) cleared |= held.ca[i].imageView && held.ca[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
+        if (!cleared) { held.on = false; held_n[1]++; return; }
+        held_flush();
+    }
     if (on <= 0) { vkCmdEndRendering(cb); return; }
     ENQ_T0();
     ((CmdEndRenderingArgs *)push(CmdEndRendering_run, sizeof(CmdEndRenderingArgs), 0))->cb = cb;
@@ -815,6 +889,7 @@ static void CmdDraw_run(const void *p) {
     if (!draw_dropped()) vkCmdDraw(a->cb, a->count, a->inst, a->first, a->first_inst);
 }
 void rec_CmdDraw(VkCommandBuffer cb, uint32_t count, uint32_t inst, uint32_t first, uint32_t first_inst) {
+    if (held.on) held_flush();
     CmdDrawArgs a = {cb, count, inst, first, first_inst};
     if (on <= 0) { CmdDraw_run(&a); return; }
     ENQ_T0();
@@ -828,6 +903,7 @@ static void CmdDrawIndexed_run(const void *p) {
     if (!draw_dropped()) vkCmdDrawIndexed(a->cb, a->count, a->inst, a->first, a->base, a->first_inst);
 }
 void rec_CmdDrawIndexed(VkCommandBuffer cb, uint32_t count, uint32_t inst, uint32_t first, int32_t base, uint32_t first_inst) {
+    if (held.on) held_flush();
     CmdDrawIndexedArgs a = {cb, count, inst, first, base, first_inst};
     if (on <= 0) { CmdDrawIndexed_run(&a); return; }
     ENQ_T0();
@@ -900,6 +976,7 @@ static void CmdExecuteCommands_run(const void *p) {
     vkCmdExecuteCommands(a->cb, a->n, after(a, sizeof *a));
 }
 void rec_CmdExecuteCommands(VkCommandBuffer cb, uint32_t n, const VkCommandBuffer *cbs) {
+    if (held.on) held_flush();
     if (on <= 0) { vkCmdExecuteCommands(cb, n, cbs); return; }
     ENQ_T0();
     CmdExecuteCommandsArgs *a = push(CmdExecuteCommands_run, sizeof *a, n * sizeof *cbs);
@@ -960,6 +1037,7 @@ static void CmdClearAttachments_run(const void *p) {
     vkCmdClearAttachments(a->cb, a->na, at, a->nr, after(at, a->na * sizeof *at));
 }
 void rec_CmdClearAttachments(VkCommandBuffer cb, uint32_t na, const VkClearAttachment *at, uint32_t nr, const VkClearRect *r) {
+    if (held.on) held_flush();
     if (on <= 0) { vkCmdClearAttachments(cb, na, at, nr, r); return; }
     ENQ_T0();
     CmdClearAttachmentsArgs *a = push(CmdClearAttachments_run, sizeof *a, AL16(na * sizeof *at) + nr * sizeof *r);
@@ -1112,6 +1190,7 @@ static void CmdBeginRendering_run(const void *p) {
     vkCmdBeginRendering(a->cb, &ri);
 }
 void rec_CmdBeginRendering(VkCommandBuffer cb, const VkRenderingInfo *ri) {
+    if (held.on) held_flush();  // (not expected: another begin while one is held)
     if (on <= 0) { vkCmdBeginRendering(cb, ri); return; }
     const VkBaseInStructure *fov = ri->pNext;
     if (fov && ((fov->sType != VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_INFO_EXT &&

@@ -10,6 +10,14 @@
 #                   The game files come from --tree (default: this checkout, else the binary's own checkout)
 #   --mode mv       (default) base = LARECOMP_MV=0 (multiview is on by default, so unset would compare it with itself), cand = LARECOMP_MV=1
 #   --mode passes   base = LARECOMP_MV=1 LARECOMP_MV_PASSES=0 (layered storage, double execution), cand = LARECOMP_MV=1
+#   --mode env      base = --base-env 'VAR=value ...', cand = --cand-env 'VAR=value ...' (multiview as the default has it):
+#                   a switch on and off, e.g. --base-env 'LARECOMP_VR_COPY_ALIAS=0' --cand-env 'LARECOMP_VR_COPY_ALIAS=1'
+#                   --cand-env again: one more candidate session against the same base and noise sessions (cand2, cand3, ...;
+#                   each compared in its own folder vs-cand<N>/)
+#   --env 'VAR=value ...'  added to every session (after the mode's), e.g. LARECOMP_VR_EDGE=fade
+#   --more          two more spots: the menu open in the house and in Tail Cave
+#   --base-only     one session (the base) and no comparison: the eye images and the log of a run (an audit with
+#                   LARECOMP_PASSLOG / LARECOMP_COPY_READERS in --env; --plan prints the dump frames to log)
 #   --no-noise      skip the third session. By default a second base session measures the noise: the game is not
 #                   deterministic from run to run (two v1 runs differ by 0 - 18 % of the pixels: butterflies, grass,
 #                   NPCs, Link's place in the forest), so the verdict is the share of pixels over the threshold
@@ -34,14 +42,19 @@ SAVE=${VR_TOUR_SAVE:-$HOME/.local/share/lasrecomp-smoketest/save}
 HEADSET=${AF_HEADSET_FLAG:-$HOME/.cache/headset-in-use}
 LOCK=${AF_BENCH_LOCK:-$HOME/.cache/af-bench-lock}
 PRIORITY=${AF_BENCH_PRIORITY:-$HOME/.cache/af-bench-priority}   # a run with priority on the lock: don't take the lock while this exists
-BIN= MODE=mv TAG= ONLY= LIMIT=1.5 NOISE=1 DWELL=420 EYE=1680x1760 POSE=static:0,1.6,0,0,-45 VVL=0 WAIT_HEADSET=0 WAIT_MAX=3600 PLAN=0 GTREE=
+CAND_MORE=() MORE=0 BASE_XENV= CAND_XENV= ALL_ENV= BASE_ONLY=0 BIN= MODE=mv TAG= ONLY= LIMIT=1.5 NOISE=1 DWELL=420 EYE=1680x1760 POSE=static:0,1.6,0,0,-45 VVL=0 WAIT_HEADSET=0 WAIT_MAX=3600 PLAN=0 GTREE=
 fail() { echo "mv_check: $*" >&2; exit 2; }
 while [ $# -gt 0 ]; do
     case $1 in
         BIN=*) BIN=${1#BIN=} ;;
         --bin) shift; BIN=${1:?} ;;
         --tree) shift; GTREE=${1:?} ;;
-        --mode) shift; MODE=${1:?}; case $MODE in mv|passes) ;; *) fail "--mode mv|passes" ;; esac ;;
+        --mode) shift; MODE=${1:?}; case $MODE in mv|passes|env) ;; *) fail "--mode mv|passes|env" ;; esac ;;
+        --base-env) shift; BASE_XENV=${1?} ;;
+        --cand-env) shift; [ -z "$CAND_XENV" ] && CAND_XENV=${1?} || CAND_MORE+=("${1?}") ;;
+        --more) MORE=1 ;;
+        --env) shift; ALL_ENV=${1?} ;;
+        --base-only) BASE_ONLY=1 ;;
         --tag) shift; TAG=${1:?} ;;
         --only) shift; ONLY=${1:?} ;;
         --limit) shift; LIMIT=${1:?} ;;
@@ -77,6 +90,8 @@ SPOTS=(
     "Koholint beach (Field_09B)|Field:Field_09B|"
     "Menu open (Mabe Village)|Field:Field_11C|menu"
 )
+# (the menu opened at the spot before stays open: Home again would close it)
+[ $MORE = 1 ] && SPOTS+=("Menu open (house)|MarinTarinHouse:MarinTarinHouse_01A|" "Menu open (Tail Cave 04B)|Lv01TailCave:Lv01TailCave_04B|")
 if [ -n "$ONLY" ]; then
     SEL=()
     for s in "${SPOTS[@]}"; do [ -n "$(echo "${s%%|*}" | grep -i -F -- "$ONLY")" ] && SEL+=("$s"); done
@@ -85,7 +100,11 @@ if [ -n "$ONLY" ]; then
 fi
 START=900 STEP=$((DWELL + 120))
 # sessions: label|env words (base first)
-if [ $MODE = mv ]; then
+for w in $BASE_XENV $CAND_XENV ${CAND_MORE[*]} $ALL_ENV; do [[ $w =~ ^[A-Z_][A-Z0-9_]*=[^[:space:]]*$ ]] || fail "not VAR=value: $w"; done
+if [ $MODE = env ]; then
+    BASE_ENV=(-u LARECOMP_MV_PASSES $BASE_XENV);                     BASE_TXT="${BASE_XENV:-(defaults)}"
+    CAND_ENV=(-u LARECOMP_MV_PASSES $CAND_XENV);                     CAND_TXT="${CAND_XENV:-(defaults)}"
+elif [ $MODE = mv ]; then
     BASE_ENV=(-u LARECOMP_MV_PASSES LARECOMP_MV=0);                  BASE_TXT="v1: LARECOMP_MV=0"
     CAND_ENV=(-u LARECOMP_MV_PASSES LARECOMP_MV=1);                  CAND_TXT="LARECOMP_MV=1"
 else
@@ -95,7 +114,9 @@ fi
 if [ $PLAN = 1 ]; then
     echo "mv_check plan: bin $BIN, game files $GTREE, mode $MODE, eye $EYE, pose $POSE, limit $LIMIT%"
     i=0; for s in "${SPOTS[@]}"; do IFS='|' read -r n l x <<< "$s"; printf '  spot %d: %-28s %-40s warp frame %d, dump frame %d\n' $i "$n" "$l" $((START + i * STEP)) $((START + i * STEP + DWELL)); i=$((i + 1)); done
-    echo "  base: $BASE_TXT"; echo "  cand: $CAND_TXT"; [ $NOISE = 1 ] && echo "  noise: $BASE_TXT again"
+    echo "  base: $BASE_TXT"; [ $BASE_ONLY = 1 ] && { echo "  (base only)"; exit 0; }; echo "  cand: $CAND_TXT"; [ $NOISE = 1 ] && echo "  noise: $BASE_TXT again"
+    k=2; for c in "${CAND_MORE[@]}"; do echo "  cand$k: $c"; k=$((k + 1)); done
+    [ -n "$ALL_ENV" ] && echo "  every session: $ALL_ENV"
     exit 0
 fi
 
@@ -184,7 +205,7 @@ run_session() {   # <label> <env words...>   (a session: one game, every spot)
     local t0; t0=$(date +%s)
     (
         cd "$ROOT" || exit 99
-        env -u LARECOMP_XR_QUAD -u LARECOMP_XR_EYE_SCALE -u LARECOMP_XR_YAW -u LARECOMP_XR_PREDICT -u LARECOMP_STEREO -u LARECOMP_XR_LAYOUT "$@" \
+        env -u LARECOMP_XR_QUAD -u LARECOMP_XR_EYE_SCALE -u LARECOMP_XR_YAW -u LARECOMP_XR_PREDICT -u LARECOMP_STEREO -u LARECOMP_XR_LAYOUT "$@" $ALL_ENV \
             ENABLE_GAMESCOPE_WSI=0 SDL_VIDEODRIVER=offscreen LARECOMP_NO_LAUNCHER=1 LARECOMP_NO_AUDIO=1 LARECOMP_NO_UPDATE_CHECK=1 LARECOMP_VR_DYNRES=0 \
             LARECOMP_SETTINGS="$ROOT/settings.ini" LARECOMP_SAVE_DIR="$ROOT/save" LARECOMP_BLUR_REMOVAL=1 LARECOMP_CHEATS=hearts \
             LARECOMP_SYNC_SHADERS=1 LARECOMP_INPUT="$INPUT" LARECOMP_HOST_INPUT="$HOSTINPUT" LARECOMP_WARP_AT="${WARPS%,}" \
@@ -203,7 +224,23 @@ run_session() {   # <label> <env words...>   (a session: one game, every spot)
 
 : > "$OUT/sessions.tsv"
 run_session base "${BASE_ENV[@]}";  printf 'base\t%s\n' "$BASE_TXT" >> "$OUT/sessions.tsv"
+if [ $BASE_ONLY = 1 ]; then echo "mv_check: base only: $OUT/base"; exit 0; fi
 run_session cand "${CAND_ENV[@]}";  printf 'cand\t%s\n' "$CAND_TXT" >> "$OUT/sessions.tsv"
 if [ $NOISE = 1 ]; then run_session noise "${BASE_ENV[@]}"; printf 'noise\t%s\n' "$BASE_TXT" >> "$OUT/sessions.tsv"; fi
+k=2
+for c in "${CAND_MORE[@]}"; do   # (more candidates: each its own session, compared with the same base and noise)
+    run_session cand$k -u LARECOMP_MV_PASSES $c
+    V=$OUT/vs-cand$k; mkdir -p "$V"
+    ln -sfn ../base "$V/base"; ln -sfn ../cand$k "$V/cand"; [ $NOISE = 1 ] && ln -sfn ../noise "$V/noise"
+    cp "$OUT/spots.tsv" "$V/"; sed "s/^cand\t.*/cand\t$c/" "$OUT/sessions.tsv" > "$V/sessions.tsv"
+    k=$((k + 1))
+done
 "$PY" -I "$SELF/mv_check.py" "$OUT" --limit "$LIMIT" --mode "$MODE: $BASE_TXT vs $CAND_TXT (bin $BIN)"
-exit $?
+rc=$?
+k=2
+for c in "${CAND_MORE[@]}"; do
+    echo "mv_check: cand$k ($c):"
+    "$PY" -I "$SELF/mv_check.py" "$OUT/vs-cand$k" --limit "$LIMIT" --mode "$MODE: $BASE_TXT vs $c (bin $BIN)" || rc=1
+    k=$((k + 1))
+done
+exit $rc
