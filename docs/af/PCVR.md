@@ -42,6 +42,9 @@ The program opens the loader at run time; nothing is linked.
 
 - A PC VR package starts in VR. `--flat` (or `LARECOMP_XR=0`) starts it in the window; `--vr` (or `LARECOMP_XR=1`)
   insists on VR and stops with the error if there is no headset.
+- In VR with the game code built, the game starts straight away, without the start screen, as on the Frame (its
+  launcher's `--play`). With game files but no game code yet, the start screen comes first and builds it, as on the
+  Frame. `--flat` gives upstream's start screen in the window.
 - No game files yet: the first start opens the start screen in the window, where its folder picker can be seen. Set up
   the game files there, quit, and start again: VR from then on.
 - No OpenXR runtime, or none with a headset (SteamVR not running, the headset off): the game starts in the window, and

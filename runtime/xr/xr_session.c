@@ -7,6 +7,7 @@
 
 #include <SDL3/SDL.h>
 
+#include "../gamelib.h"
 #include "../rt.h"
 #include "../settings.h"
 #include "xr_input.h"
@@ -408,32 +409,40 @@ void xr_request_app_quit(void) {
 //     VR from the next start (--vr: VR now);
 //   - no OpenXR runtime, or none with a headset (the instance or the system fails): the window, with a log line, instead
 //     of a start that stops. Asked for with --vr or LARECOMP_XR=1, a failure still stops with the error.
-// The start screen's update check is off: it names upstream's flat releases, not this package's.
-void xr_pc_start(const char *game_dir) {
+// In VR with the game code built it goes straight into the game, as the Frame's launcher does (--play); otherwise the
+// start screen builds the code first. The start screen's update check is off: it names upstream's flat releases.
+// true: skip the start screen.
+bool xr_pc_start(const char *game_dir) {
 #ifdef LARECOMP_PCVR
     setenv("LARECOMP_NO_UPDATE_CHECK", "1", 0);
-    if (!xr_wanted()) { LOG("[xr] PC VR package: in the window (--flat or LARECOMP_XR=0)\n"); return; }
+    if (!xr_wanted()) { LOG("[xr] PC VR package: in the window (--flat or LARECOMP_XR=0)\n"); return false; }
     const char *e = getenv("LARECOMP_XR");
-    if (e && *e) { LOG("[xr] PC VR package: VR mode (asked for)\n"); return; }
     char p[1100];
     struct stat st;
     snprintf(p, sizeof p, "%s/exefs/main", game_dir);
-    if (stat(p, &st) != 0) {
+    bool files = stat(p, &st) == 0;
+    if (e && *e) LOG("[xr] PC VR package: VR mode (asked for)\n");
+    else if (!files) {
         LOG("[xr] PC VR package: no game files yet: the start screen opens in the window to set them up; VR from the next "
             "start (--vr: VR now)\n");
         g_wanted = 0;
-        return;
+        return false;
+    } else {
+        settings_load();  // (the VR tab's rows into the environment first: xr_input_init reads the layout)
+        if (!xr_instance_create()) {
+            LOG("[xr] PC VR package: no OpenXR runtime with a headset (see above): starting in the window. Start SteamVR "
+                "with the headset connected, then start the game again (--vr: stop with the error instead)\n");
+            if (g_xr.inst) p_xrDestroyInstance(g_xr.inst), g_xr.inst = XR_NULL_HANDLE;
+            g_wanted = 0;
+            return false;
+        }
+        LOG("[xr] PC VR package: VR mode (--flat for the window)\n");
     }
-    settings_load();  // (the VR tab's rows into the environment first: xr_input_init reads the layout)
-    if (!xr_instance_create()) {
-        LOG("[xr] PC VR package: no OpenXR runtime with a headset (see above): starting in the window. Start SteamVR with "
-            "the headset connected, then start the game again (--vr: stop with the error instead)\n");
-        if (g_xr.inst) p_xrDestroyInstance(g_xr.inst), g_xr.inst = XR_NULL_HANDLE;
-        g_wanted = 0;
-        return;
-    }
-    LOG("[xr] PC VR package: VR mode (--flat for the window)\n");
+    bool code = files && gamelib_present(game_dir);
+    if (!code) LOG("[xr] PC VR package: the game code is not built for these game files yet: the start screen builds it\n");
+    return code;
 #else
     (void)game_dir;
+    return false;
 #endif
 }

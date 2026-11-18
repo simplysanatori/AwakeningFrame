@@ -44,9 +44,9 @@ extern "C" {
 bool xr_wanted(void);
 // main.c: --vr / --flat into LARECOMP_XR (first thing), then a PC VR package's start (once the data folder is known:
 // the window when there are no game files yet or no OpenXR runtime with a headset; docs/af/PCVR.md). game_dir: the
-// game files' folder (exefs/, romfs/).
+// game files' folder (exefs/, romfs/). true: VR with the game code built, so no start screen (the Frame's --play).
 void xr_args(int argc, char **argv);
-void xr_pc_start(const char *game_dir);
+bool xr_pc_start(const char *game_dir);
 // The session exists (xr_start succeeded) and the XR thread runs.
 bool xr_active(void);
 // Between xrBeginSession and xrEndSession (any thread).

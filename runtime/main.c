@@ -460,7 +460,7 @@ int main(int argc, char **argv) {
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
 #ifdef LARECOMP_HAVE_XR
-    xr_pc_start(root);  // (a PC VR package: VR or the window)
+    if (xr_pc_start(root)) skip_launcher = true;  // (a PC VR package: VR or the window)
 #endif
 #ifndef _WIN32
     if (build_only) return build_game_code_cli(root);
