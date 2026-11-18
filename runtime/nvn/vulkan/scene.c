@@ -134,6 +134,7 @@ static const char *fs_src =
     "  layout(row_major) mat4 cinv;  // (the capture frame's mask) this eye: clip (game convention) -> world\n"        \
     "  vec4 keep;  // the world box kept: lo x, lo z, hi x, hi z\n"                                                    \
     "  vec4 zr;    // the depth's range: zn, zf - zn, depth in -1..1, the row order (as the backdrop's ce.w)\n"        \
+    "  vec4 mp;    // the map: its middle x, z, half extent, 1 when there is one\n"                                    \
     "} u;\n"                                                                                                           \
     "layout(set = 0, binding = 1) uniform sampler2D sd;\n"  /* the scene depth (nearest) */                             \
     "layout(set = 0, binding = 2) uniform sampler2D ec;\n"  /* the eye output (nearest), or the seed's mips */          \
@@ -181,12 +182,43 @@ static const char *bleed_fs =
     "  o = vec4(c * f * f, 1.0);\n"
     "}\n";
 
-// The capture frame's mask. That frame's eye outputs hold the draws the wide culling added, which no other frame shows:
-// they lie past the table's footprint grown by the ring margin. mask = the eye's scene depth as the other frames have
-// it: 0 where something drawn lies inside that box, 1 elsewhere (the fill and the edge fill only ask "below 0.9999?").
-// erase = the drawn pixels the mask leaves out, black: the void they are in the other frames, for the fill and the
-// edge fill to cover as they do there. A draw the table fit has too loses the part of it past the box for this one
-// frame; the fill puts the same pixels back from the capture just taken wherever it has them.
+// The capture frame's mask. That frame's eye outputs hold the draws the wide culling added, which no other frame shows.
+// They are cut back to what the frame before the wide culling had:
+// map = that frame's drawn world seen from above (2 units a texel about the table: far ground is a unit and more from
+// one row of the quarter-size depth to the next): each pixel of both eyes' scene depth, as a point at its place on the
+// floor plan, the highest one's height kept (a house the wide culling adds stands on ground the table fit draws).
+// mask = an eye's scene depth as the frames between captures have it: 0 where something drawn lies inside the table's
+// footprint or no higher than the map has it there or next to there, 1 elsewhere (the fill and the edge fill only ask
+// "below 0.9999?").
+// erase = the drawn pixels the mask leaves out, black: the void they are between captures, for the fill and the edge
+// fill to cover as they do there, from the capture just taken.
+// What it cannot give back is table-fit ground an added draw stood in front of: for this one frame the fill shows the
+// added draw there, as the capture has it. (Masking every frame of the wide culling instead was tried: over its
+// 15 or so frames the head moves on from the map's view, and the patches without a picture show.)
+static const char *splat_vs =
+    "#version 450\n" UBLOCK  // (inv: this eye, clip -> world; grid: the depth's size and filled part; sz: the map's middle x z, half extent)
+    "layout(set = 0, binding = 1) uniform sampler2D cd;\n"
+    "layout(location = 0) out float v_y;\n"
+    "void main() {\n"
+    "  v_y = -1e4;\n"
+    "  int w = int(u.grid.x);\n"
+    "  vec2 g = (vec2(float(gl_VertexIndex % w), float(gl_VertexIndex / w)) + 0.5) / u.grid.xy;\n"
+    "  float d = textureLod(cd, g * u.grid.zw, 0.0).r;\n"
+    "  gl_PointSize = 1.0;\n"
+    "  if (d >= 0.9999) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }\n"
+    "  float z = (d - u.cz.x) / u.cz.y;\n"
+    "  if (u.cz.z > 0.5) z = z * 2.0 - 1.0;\n"
+    "  vec4 p = u.inv * vec4(g.x * 2.0 - 1.0, (g.y * 2.0 - 1.0) * u.ce.w, z, 1.0);\n"
+    "  v_y = p.y / p.w;\n"
+    "  gl_Position = vec4((p.xz / p.w - u.sz.xy) / u.sz.z, 0.5, 1.0);\n"
+    "}\n";
+
+static const char *splat_fs =  // (blended MAX: the highest point of the texel)
+    "#version 450\n"
+    "layout(location = 0) in float v_y;\n"
+    "layout(location = 0) out vec4 o;\n"
+    "void main() { o = vec4(v_y); }\n";
+
 static const char *mask_fs =
     "#version 450\n" EBLOCK
     "void main() {\n"
@@ -197,8 +229,14 @@ static const char *mask_fs =
     "  float z = (d - u.zr.x) / u.zr.y;\n"
     "  if (u.zr.z > 0.5) z = z * 2.0 - 1.0;\n"
     "  vec4 w = u.cinv * vec4(q.x * 2.0 - 1.0, (q.y * 2.0 - 1.0) * u.zr.w, z, 1.0);\n"
-    "  vec2 p = w.xz / w.w;\n"
+    "  vec2 p = w.xz / w.w, m = (p - u.mp.xy) / u.mp.z;\n"
     "  if (p.x >= u.keep.x && p.y >= u.keep.y && p.x <= u.keep.z && p.y <= u.keep.w) o = vec4(0.0);\n"
+    "  else if (u.mp.w > 0.5 && max(abs(m.x), abs(m.y)) < 1.0) {\n"  // (ec: the map, nearest)
+    "    vec2 c = m * 0.5 + 0.5, t = 1.0 / vec2(textureSize(ec, 0));\n"
+    "    float top = max(texture(ec, c).r, max(max(texture(ec, c + vec2(t.x, 0.0)).r, texture(ec, c - vec2(t.x, 0.0)).r),\n"
+    "                                          max(texture(ec, c + vec2(0.0, t.y)).r, texture(ec, c - vec2(0.0, t.y)).r)));\n"
+    "    if (w.y / w.w <= top + 0.75) o = vec4(0.0);\n"
+    "  }\n"
     "}\n";
 
 static const char *erase_fs =
@@ -220,12 +258,14 @@ static struct {
     Img col, dep, zb;  // the capture's colour and depth; the fill pass's own depth
     // the edge fill
     int eok;
-    VkShaderModule fvs, seed_fs, bleed_fs, mask_fs, erase_fs;
+    VkShaderModule fvs, seed_fs, bleed_fs, mask_fs, erase_fs, splat_vs, splat_fs;
     VkDescriptorSetLayout esl;
     VkPipelineLayout epl;
-    VkPipeline seed_p, mask_p;
+    VkPipeline seed_p, mask_p, splat_p;
     struct { VkFormat fmt; VkPipeline p; } bleed_p[4], erase_p[4];
-    Img mask;  // the capture frame's mask (R8, the scene depth's size)
+    Img mask, map;  // around a capture: an eye's mask (R8, the scene depth's size); the map (R16F, MAP_N texels each way)
+    bool map_ok;
+    float map_mid[2];
     struct { VkImage img; VmaAllocation mem; VkImageView all, lv0; uint32_t w, h, levels; } seed;
 } g = {.ok = -1, .eok = -1};
 
@@ -245,7 +285,6 @@ static struct {
 // frames, and keeps a few for good; cap_wait at most); 0 none. phase is what the frames drawn next are to it (exec.c
 // ring_phase).
 enum { RP_NONE, RP_LEARN, RP_WIDE, RP_CAPTURE };
-#define RING_MARGIN 4.0f  // (vr_cull.c: the ring margin of the Surroundings modes; exec.c sorts the draws by it)
 static int state, phase;
 static int cap_wait;
 static int n_wide, n_first, n_last;  // (the log) outputs since the wide culling was asked; the first and the last with draws it added
@@ -518,19 +557,26 @@ static bool fill(const StereoEyePost *e, const Live *live) {
 }
 
 // ------------------------------------------------------------------------------------------------ the edge fill
-static VkPipeline efs_pipe(VkShaderModule fs, VkFormat fmt) {
+// a pipeline without depth into one colour target: the edge fill's (a triangle over the target, fs; the edge layout), or
+// with vs the map's points (the backdrop's layout)
+static VkPipeline efs_pipe_vs(VkShaderModule vs_, VkShaderModule fs, VkFormat fmt);
+static VkPipeline efs_pipe(VkShaderModule fs, VkFormat fmt) { return efs_pipe_vs(VK_NULL_HANDLE, fs, fmt); }
+static VkPipeline efs_pipe_vs(VkShaderModule vs_, VkShaderModule fs, VkFormat fmt) {
     VkPipelineShaderStageCreateInfo stages[2] = {
-        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = g.fvs, .pName = "main"},
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vs_ ? vs_ : g.fvs, .pName = "main"},
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fs, .pName = "main"}};
     VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-                                                 .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+                                                 .topology = vs_ ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
     VkPipelineViewportStateCreateInfo vs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
     VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
                                                  .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .lineWidth = 1};
     VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
                                                .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
     VkPipelineColorBlendAttachmentState cba = {.colorWriteMask = 0xF};
+    if (vs_)  // (the map: the highest point wins)
+        cba.blendEnable = VK_TRUE, cba.srcColorBlendFactor = cba.dstColorBlendFactor = cba.srcAlphaBlendFactor = cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        cba.colorBlendOp = cba.alphaBlendOp = VK_BLEND_OP_MAX;
     VkPipelineColorBlendStateCreateInfo cb = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1,
                                               .pAttachments = &cba};
     VkPipelineDepthStencilStateCreateInfo ds = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
@@ -542,7 +588,7 @@ static VkPipeline efs_pipe(VkShaderModule fs, VkFormat fmt) {
     VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = 2,
                                        .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vs,
                                        .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
-                                       .pColorBlendState = &cb, .pDynamicState = &dy, .layout = g.epl};
+                                       .pColorBlendState = &cb, .pDynamicState = &dy, .layout = vs_ ? g.pl : g.epl};
     VkPipeline p = VK_NULL_HANDLE;
     if (vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p) != VK_SUCCESS) LOG("[scene] edge pipeline failed\n");
     return p;
@@ -556,7 +602,12 @@ static bool einit(void) {
     g.bleed_fs = vk_compile_glsl(bleed_fs, STAGE_FRAGMENT, "scene_edge_bleed.frag");
     g.mask_fs = vk_compile_glsl(mask_fs, STAGE_FRAGMENT, "scene_mask.frag");
     g.erase_fs = vk_compile_glsl(erase_fs, STAGE_FRAGMENT, "scene_erase.frag");
-    if (!g.fvs || !g.seed_fs || !g.bleed_fs || !g.mask_fs || !g.erase_fs) { LOG("[scene] edge shaders failed to compile\n"); return false; }
+    g.splat_vs = vk_compile_glsl(splat_vs, STAGE_VERTEX, "scene_map.vert");
+    g.splat_fs = vk_compile_glsl(splat_fs, STAGE_FRAGMENT, "scene_map.frag");
+    if (!g.fvs || !g.seed_fs || !g.bleed_fs || !g.mask_fs || !g.erase_fs || !g.splat_vs || !g.splat_fs) {
+        LOG("[scene] edge shaders failed to compile\n");
+        return false;
+    }
     VkDescriptorSetLayoutBinding b[4] = {{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
                                          {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
                                          {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
@@ -613,7 +664,7 @@ static VkSampler mip_sampler(void) {
     return s;
 }
 
-typedef struct { float sz[4], cr[4], fl[4], cinv[16], keep[4], zr[4]; } EBlock;
+typedef struct { float sz[4], cr[4], fl[4], cinv[16], keep[4], zr[4], mp[4]; } EBlock;
 
 static VkDescriptorSet eset(const EBlock *eb, VkImageView sd, VkImageView ec, VkSampler ecs, VkImageView bd) {
     VkSpan s = vk_transient_copy(eb, sizeof *eb, 256);
@@ -691,15 +742,78 @@ static void edge_fill(const StereoEyePost *e, bool backdrop_drawn, const Live *l
     vk_full_barrier(cb);
 }
 
-// (a capture frame) the mask and the erase (above the GPU objects). false: none made, the frame shows what it has
+// (the frame before the wide culling, both eyes; first: eye 0) the map of what it has drawn (above the GPU objects)
+enum { MAP_N = 128 };
+#define MAP_HALF 128.0f  // (game units from the map's middle to its edge)
+static void map_note(const StereoEyePost *e, bool first) {
+    extern uint32_t nvn_depth_mode(void);
+    TexBackend *d = e->depth;
+    float vp[16], a[3], lo[3], hi[3];
+    bool room, zone;
+    UBlock u;
+    memset(&u, 0, sizeof u);
+    mul4(e->P, e->V, vp);
+    if (first) g.map_ok = false;
+    if (!einit() || !inv4(vp, u.inv) || (first && !stereo_table(a, &room, &zone, lo, hi))) return;
+    if (!g.splat_p && !(g.splat_p = efs_pipe_vs(g.splat_vs, g.splat_fs, VK_FORMAT_R16_SFLOAT))) return;  // (the backdrop's layout: init made it)
+    if (!img_make(&g.map, VK_FORMAT_R16_SFLOAT, MAP_N, MAP_N, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT))
+        return;
+    static const VkComponentMapping id = {0};
+    VkImageView dv = vk_image_view(d, VK_IMAGE_VIEW_TYPE_2D, d->format, 0, 1, e->depth_layer, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
+    if (!dv) return;
+    if (first) g.map_mid[0] = a[0], g.map_mid[1] = a[2];
+    else if (!g.map_ok) return;
+    u.grid[0] = (float)d->width, u.grid[1] = (float)d->height, u.grid[2] = e->dax, u.grid[3] = e->day;
+    u.cz[0] = e->zn, u.cz[1] = e->zf - e->zn, u.cz[2] = nvn_depth_mode() == 0 ? 1.0f : 0.0f;
+    u.ce[3] = renderer_origin_lower_left() ? 1.0f : -1.0f;
+    u.sz[0] = g.map_mid[0], u.sz[1] = g.map_mid[1], u.sz[2] = MAP_HALF;
+    VkSpan sp = vk_transient_copy(&u, sizeof u, 256);
+    VkDescriptorSet set = vk_alloc_set(g.sl);
+    VkSampler nearest = vk_default_sampler(false);
+    VkDescriptorBufferInfo bi = {sp.buf, sp.off, sizeof u};
+    VkDescriptorImageInfo im = {nearest, dv, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet wr[4];
+    for (uint32_t i = 0; i < 4; i++) {
+        wr[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = i, .descriptorCount = 1};
+        if (i == 0) wr[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, wr[i].pBufferInfo = &bi;
+        else wr[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, wr[i].pImageInfo = &im;
+    }
+    rec_UpdateDescriptorSets(4, wr);
+    VkCommandBuffer cb = e->cb;
+    vk_full_barrier(cb);
+    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g.map.view, .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                    .loadOp = first ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                                    .clearValue = {.color = {.float32 = {-1e4f, -1e4f, -1e4f, -1e4f}}}};
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {MAP_N, MAP_N}}, .layerCount = 1,
+                          .colorAttachmentCount = 1, .pColorAttachments = &ca};
+    rec_CmdBeginRendering(cb, &ri);
+    VkViewport vpt = {0, 0, MAP_N, MAP_N, 0, 1};
+    VkRect2D sc = {{0, 0}, {MAP_N, MAP_N}};
+    rec_CmdSetViewport(cb, 0, 1, &vpt);
+    rec_CmdSetScissor(cb, 0, 1, &sc);
+    if (g_vk.vids) {
+        VkVertexInputBindingDescription2EXT vb = {.sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT};
+        VkVertexInputAttributeDescription2EXT va = {.sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT};
+        rec_CmdSetVertexInputEXT(cb, 0, &vb, 0, &va);
+    }
+    rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g.splat_p);
+    rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g.pl, 0, 1, &set, 0, NULL);
+    rec_CmdDraw(cb, d->width * d->height, 1, 0, 0);
+    rec_CmdEndRendering(cb);
+    vk_full_barrier(cb);
+    g.map_ok = true;
+}
+
+// (a capture frame) the mask and the erase. false: none made (no map: the box alone would take the table fit's own
+// draws past it out too), the frame shows what it has
 static bool mask_live(const StereoEyePost *e) {
     extern bool vr_cull_core_box(float lo[3], float hi[3]);
     extern uint32_t nvn_depth_mode(void);
     TexBackend *c = e->color, *d = e->depth;
-    float lo[3], hi[3], vp[16], m = RING_MARGIN;
+    float lo[3], hi[3], vp[16];
     EBlock eb = {.fl = {0, 0, e->dax, e->day}};
     mul4(e->P, e->V, vp);
-    if (!einit() || !vr_cull_core_box(lo, hi) || !inv4(vp, eb.cinv)) return false;
+    if (!g.map_ok || !einit() || !vr_cull_core_box(lo, hi) || !inv4(vp, eb.cinv)) return false;
     if (!img_make(&g.mask, VK_FORMAT_R8_UNORM, d->width, d->height, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                   VK_IMAGE_ASPECT_COLOR_BIT)) return false;
     VkPipeline ep = VK_NULL_HANDLE;
@@ -712,13 +826,14 @@ static bool mask_live(const StereoEyePost *e) {
     VkImageView dv = vk_image_view(d, VK_IMAGE_VIEW_TYPE_2D, d->format, 0, 1, e->depth_layer, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
     uint32_t w = (uint32_t)lroundf(e->ax * (float)c->width), h = (uint32_t)lroundf(e->ay * (float)c->height);
     if (!ep || !cv || !dv || !w || !h) return false;
-    eb.keep[0] = lo[0] - m, eb.keep[1] = lo[2] - m, eb.keep[2] = hi[0] + m, eb.keep[3] = hi[2] + m;
+    eb.keep[0] = lo[0], eb.keep[1] = lo[2], eb.keep[2] = hi[0], eb.keep[3] = hi[2];
     eb.zr[0] = e->zn, eb.zr[1] = e->zf - e->zn, eb.zr[2] = nvn_depth_mode() == 0 ? 1.0f : 0.0f, eb.zr[3] = renderer_origin_lower_left() ? 1.0f : -1.0f;
+    eb.mp[0] = g.map_mid[0], eb.mp[1] = g.map_mid[1], eb.mp[2] = MAP_HALF, eb.mp[3] = 1.0f;
     VkCommandBuffer cb = e->cb;
     VkSampler nearest = vk_default_sampler(false);
     vk_full_barrier(cb);
     eb.sz[0] = (float)d->width, eb.sz[1] = (float)d->height;
-    epass(cb, g.mask.view, d->width, d->height, g.mask_p, eset(&eb, dv, dv, nearest, dv));
+    epass(cb, g.mask.view, d->width, d->height, g.mask_p, eset(&eb, dv, g.map.view, nearest, dv));
     vk_full_barrier(cb);
     eb.sz[0] = (float)w, eb.sz[1] = (float)h;
     epass(cb, cv, w, h, ep, eset(&eb, dv, dv, nearest, g.mask.view));
@@ -748,9 +863,11 @@ void scene_eye_post(const StereoEyePost *e) {
         if (edge) edge_fill(e, false, NULL);
         return;
     }
+    static bool frame_map;  // this frame's outputs are the frame's before the wide culling (set at eye 0's)
     if (e->eye == 0) {
         double now = plat_now_ns() / 1e9;
         settle_watch(now);
+        frame_map = state == 1;
         if (state >= 2) {
             n_wide++;
             if (e->added) n_last = n_wide, n_first = n_first ? n_first : n_wide;
@@ -777,6 +894,7 @@ void scene_eye_post(const StereoEyePost *e) {
         }
     }
     // (a capture frame, both eyes) what the wide culling added: out of the picture again, and of the depth the fills go by
+    if (frame_map) map_note(e, e->eye == 0);
     Live live = {VK_NULL_HANDLE, e->dax, e->day};
     if (e->capture && mask_live(e)) live = (Live){g.mask.view, 1.0f, 1.0f};
     bool drawn = cap.valid && fill(e, &live);

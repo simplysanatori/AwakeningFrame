@@ -7669,10 +7669,11 @@ static bool ring_world_box(CmdRec *r, bool indexed, float wlo[3], float whi[3]) 
 // (Backdrop, scene.c) what the frame being drawn is to a capture (scene_ring_phase, taken once per frame). Between
 // captures Backdrop has no ring draws. Around one the game culls wide for some frames, and those must look like the
 // others: the draws the wide culling adds stay out of every pass but the capture frame's eye colour passes. They are
-// the ring draws the frame before the wide culling did not have (RP_LEARN notes that frame's by mesh and place); the
-// ring draws it had (the table fit's own, past the footprint) stay core, as they are between captures. The frame
-// before the wide culling and the frames after it are sorted here (ring_box_class): vr_cull's ring margin is on with
-// the wide culling only. The eyes' passes and the shared ones (the shadow maps) are noted and sorted apart: the table
+// the draws past the footprint that the frame before the wide culling did not have (RP_LEARN notes that frame's by
+// vertex count and place); the ones it had (the table fit's own) stay core, as they are between captures. Past the
+// footprint itself, not the footprint grown by the ring margin: the wide culling adds houses right behind the table's
+// rim too. These frames are sorted here (ring_box_class), not by vr_cull's ring margin, which is on with the wide
+// culling only. The eyes' passes and the shared ones (the shadow maps) are noted and sorted apart: the table
 // fit's shadow pass already has outer houses and people the eyes do not (the light's frustum reaches past the table),
 // and taken as known they came into the eyes on every wide frame: the pop a capture was meant not to show.
 enum { RP_NONE, RP_LEARN, RP_WIDE, RP_CAPTURE };
@@ -7749,18 +7750,18 @@ static int ring_class(CmdRec *r, bool indexed, int kind) {
     else {
         float lo[3], hi[3];
         bool box = ring_world_box(r, indexed, lo, hi);
-        // (the frame before the wide culling: half the margin, so that a draw the footprint moves away from in the
-        // frames that follow is known by then)
+        // (the frame before the wide culling: the draws from half a margin inside the footprint on, so that one the
+        // footprint moves away from in the frames that follow is known by then)
         if (ph == RP_LEARN) {
-            if (box && ring_box_class(lo, hi, frame, RING_MARGIN * 0.5f)) ring_known_draw(r, lo, hi, eye, true);
+            if (box && ring_box_class(lo, hi, frame, -RING_MARGIN * 0.5f)) ring_known_draw(r, lo, hi, eye, true);
             c = 0;
-        } else {
-            c = !box ? 0 : vr_ring_on() ? vr_ring_class(lo, hi, frame) : ring_box_class(lo, hi, frame, RING_MARGIN);
-            if (ph != RP_NONE && c >= 1) {
-                if (ring_known_draw(r, lo, hi, eye, false)) c = 0;
-                else if (eye) ring_added++;
+        } else if (ph != RP_NONE) {
+            c = 0;
+            if (box && ring_box_class(lo, hi, frame, 0.0f) && !ring_known_draw(r, lo, hi, eye, false)) {
+                c = vr_ring_on() && vr_ring_class(lo, hi, frame) == 3 ? 3 : 1;
+                if (eye) ring_added++;
             }
-        }
+        } else c = box ? vr_ring_class(lo, hi, frame) : 0;
         rc[k].key = key, rc[k].frame = frame, rc[k].c = (int8_t)c;
     }
     // only room geometry is left out past the box; characters, props and sprites still draw. Which it is, a colour pass

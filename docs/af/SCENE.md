@@ -64,18 +64,20 @@ Explicit `LARECOMP_VR_CULL_EXTENT` / `_TMAX` / `LARECOMP_VR_RING` win in every m
 Drawing the outer rooms every frame costs the game thread as much as the GPU: the game handles every object its
 frustum lets through, even those the executor then leaves out. Backdrop pays that only on a capture:
 
-1. the next frame, still culled to the table, notes the draws it has past the table's footprint grown by half the ring
-   margin (2 units), by vertex count and place, the eyes' passes and the shared ones (the shadow maps) apart. The table
-   fit's shadow pass already holds outer houses and people the eyes do not have (the light's frustum reaches past the
-   table): noted together, they counted as the eyes' own and came into the eyes on every wide frame;
+1. the next frame, still culled to the table, notes what it draws past the table's footprint (by vertex count and
+   place), the eyes' passes and the shared ones (the shadow maps) apart, and a map of everything it draws: a floor
+   plan about the table, 2 units a texel, holding the height of the highest drawn point (from both eyes' scene depth).
+   The table fit's shadow pass already holds outer houses and people the eyes do not have (the light's frustum reaches
+   past the table): noted together, they counted as the eyes' own and came into the eyes on every wide frame;
 2. ask vr_cull for the wide culling (as Full) and wait until the number of draws it adds stops growing: about 3 new eye
-   outputs (`LARECOMP_VR_BACKDROP_DELAY`, 8, at most). An added draw is a ring draw (past the footprint grown by the
-   ring margin, 4 units) that step 1 did not note. The executor leaves the added draws out of every pass on these
-   frames (`exec.c` `ring_phase`), so the eyes show what they showed before;
+   outputs (`LARECOMP_VR_BACKDROP_DELAY`, 8, at most). An added draw is one past the footprint that step 1 did not
+   note. The executor leaves the added draws out of every pass on these frames (`exec.c` `ring_phase`), so the eyes
+   show what they showed before;
 3. one frame, the capture frame, draws them in the eye colour passes. Eye 0's output and scene depth are copied, with
-   that frame's camera. Then what lies past the footprint grown by the ring margin is made black in both eyes' outputs
-   (the mask, from each eye's scene depth), and the fill below covers it from the capture just taken. So the capture
-   frame too shows the table live and the rest from the picture;
+   that frame's camera. Then both eyes' outputs are cut back to what step 1's frame had (the mask: a pixel stays when
+   it lies inside the footprint or no higher than the map has it there, and is made black otherwise), and the fill
+   below covers the rest from the capture just taken. So the capture frame too shows the table live and the rest from
+   the picture;
 4. back to the table fit. The game lets go of the added draws over about 10 more outputs, and they stay out of the eyes
    until their number stops falling (`LARECOMP_VR_BACKDROP_TAIL`, 60, at most);
 5. every frame after, draw the capture into both eyes as a grid mesh (`LARECOMP_VR_BACKDROP_GRID`, 128 x 128 cells): each
@@ -167,13 +169,13 @@ Checked and not at fault: the capture's matrices. They are the ones the output w
 
 ## Open
 
-- **The capture frame differs from its neighbours for one image.** Its mask cuts what lies past the footprint grown by
-  the ring margin out of both eyes, the table fit's own draws there too, and the fill gives them back from the
-  capture with holes where cells are left out at depth jumps; the haze the edge fill paints above the far houses is
-  missing from that image. Measured (still head, a capture every 2 s, eye pinned at 1536): the capture frame's top band
-  differs from the image before it by 11 (mean luma), against at most 2 between ordinary images. What would fix it:
-  keep the table fit's own draws past the box in the picture (a map of what the frame before the wide culling drew was
-  tried; its first form still let the pop through, by the shadow-pass mix-up above, and was not taken further).
+- **The capture frame still differs a little from its neighbours.** Where an added draw stood in front of table-fit
+  ground, the mask cannot give the ground back: for that one image the fill shows the added draw there, as the
+  capture has it, and the far band's outline shifts. Measured (still head, a capture every 2 s, eye pinned at 1536):
+  the capture frame's top band differs from the image before it by about 5 (mean luma), against at most 1.4 between
+  ordinary images (11 with the mask cutting at the footprint grown by the ring margin, without the map). Masking
+  every frame of the wide culling instead was tried: over its frames the head moves on from the map's view, and the
+  patches without a picture show.
 - **A capture still changes the picture.** What the old capture did not hold appears when the new one lands: after a
   turn the eye shows the void (with the edge fill) past the old picture's view until the next capture (25 degrees,
   at most one a second). A capture wider than the eye's view would need a pass of its own.
@@ -195,4 +197,8 @@ Checked and not at fault: the capture's matrices. They are the ones the output w
 - **Off / Backdrop reach.** One game-camera frustum fitted to the table and widened by the eyes' views, so the reach
   depends on pose. `LARECOMP_VR_CULL_HOLD_ALL=1` holds the widening in every mode; its 60 FPS cost is not measured.
 - **Draws the executor cannot place** (instanced ones, draws whose matrix is scaled unevenly: some buildings) are
-  core in every mode: they cast shadows and take the depth pre-pass however far out they are.
+  core in every mode: they cast shadows and take the depth pre-pass however far out they are. Around a Backdrop
+  capture they, and blended draws, reach the eyes on the wide frames too: in one ring dump 18 of the 111 draws the
+  wide culling brought into the eyes were of these (11 blended, 4 instanced, 3 without a box); the rest were the
+  shadow-pass mix-up of step 1. What these leave shows as one image that changes about as much as ordinary
+  images change from one to the next (top band 1.2 in mean luma, against at most 1.4).
