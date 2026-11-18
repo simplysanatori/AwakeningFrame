@@ -8056,6 +8056,7 @@ static void seen_frame(uint64_t frame) {
             memset(sn.n, 0, sizeof sn.n), memset(sn.cls, 0, sizeof sn.cls);
         }
     }
+    sn.sview = sn.sview && sn.view;  // (the frame before's frusta only: a frame without a latch leaves none for the next)
     sn.frame = frame, sn.on = 0, sn.view = false, sn.ylo_acc = 1e30f;
     extern int game_level_overworld(void);
     extern bool vr_ring_on(void);
