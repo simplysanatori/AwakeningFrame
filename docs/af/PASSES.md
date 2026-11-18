@@ -215,6 +215,22 @@ a second of grace for the switch's own frames. `tools/pace_replay.sh <log>` play
 through the pacer (`--as-logged`: as they were; by default a frame whose hold differs from the session's is remade from
 its work).
 
+The 30 fps cadence in VR (pace.c `vr_cadence`, vi.c `g_vsync_game_from`): held at 30 (the 90 Hz lock,
+`LARECOMP_XR_FPS=30`, or the pacer's hold at 120 Hz) a game frame is due two vsyncs after the one before. The game
+works, waits for its next vsync and presents; the pacer's old cadence started each frame a vsync after its present, so
+the work had one vsync, not two, and a frame whose work crossed it was shown a vsync late (50 ms), the next 16.7 ms after
+it. On the Frame at Mabe Village that was 1.3% of frames, 8.1% with `LARECOMP_XR_REPROJ=pos`. Now the game's vsync
+event is not signalled at the vsync between (the frame due at S + 2 keeps working through S + 1), and a frame starts as
+early as its work needs: its window to S + 2 is the third-highest busy time of the last 120 frames plus 3 ms, at least
+the old late start (no latency added) and at most both vsyncs (the start is the present); the hold's first 120 frames
+and the 120 after a late one take both. The start moves the game's input (read at the frame's start), not the eye
+poses: those are located at the present (0.1 to 0.7 ms after it, either start). A frame over two vsyncs is shown at the
+vsync after its work and the next is due two vsyncs after that (33.3 ms, not 16.7). The `[pace] VR 30 fps:` lines say
+when frames start before the late start and when late again. The flat window keeps the old cadence. Test switches:
+`LARECOMP_PACE_CADENCE=early|late` (always both vsyncs / always the late start), `LARECOMP_PACE_TEST_WORK_MS=<ms>[,<every>]`
+(the game thread busy-waits that long at the start of every frame or every n-th). `tools/pace_replay.sh <log> --cadence
+--idle <ms> --from <text>` replays a log's 30 fps frames on a simulated vsync clock.
+
 Measured (xrmock 1728x1728, diet + foveation medium with the gaze mocked at the centre, `LARECOMP_LOG_PACE=1`; before
 -> after; gpu = the pacer's GPU time per game frame, rcpu = render thread CPU, busy = game thread):
 
