@@ -137,6 +137,7 @@ int pace_cpu_frames(void) { return ncpu; }
 #define FW_MIN_EXTRA_VSYNCS 0x4e2  // (+0x4e3: the most, 1 - its 30 fps mode; +0x4e0 / +0x4e1: the current choice)
 static int xr_lock_fps;  // pace_xr_lock
 static int xr_frame_us;  // pace_xr_frame_ms (0: not the VR mode's 60)
+static int xr_changes;   // (calls of the two in the VR mode: pace_frame judges afresh)
 // FPS target (Video settings, Dynamic resolution's: settings_fps_target): 30 keeps the game in its 30 fps mode, and
 // "30 outdoors, 60 indoors" does it in the overworld (the level Field: Mabe Village, the beaches, the forest...) and
 // not in houses, caves and dungeons. 60 is the pacer's own choice as before. Dynamic resolution follows the same
@@ -233,9 +234,15 @@ void pace_try_60(void) { __atomic_store_n(&try_60, 1, __ATOMIC_RELEASE); }
 // refreshes. 0 or 60: back to the pacer's own choice. (LARECOMP_XR_FPS=60, a test: at 90 Hz too the pacer chooses, with
 // a 16.67 ms game frame: xr_loop.c turns each 60 Hz game vsync into the display's refresh at or after it, so a frame is
 // shown for one refresh or two, alternating - uneven motion at 60 fps instead of an even 30.)
-void pace_xr_lock(int fps) { __atomic_store_n(&xr_lock_fps, fps, __ATOMIC_RELAXED); }
+// Each call in the VR mode (to it, within it, out of it; not the flat mode's 0 / 0) is a change of the display's rate or
+// of the VR tab's choice at 90 Hz, and the pacer's judgement starts afresh (pace_frame).
+static void xr_changed(int to) {
+    if (to || __atomic_load_n(&xr_lock_fps, __ATOMIC_RELAXED) || __atomic_load_n(&xr_frame_us, __ATOMIC_RELAXED))
+        __atomic_add_fetch(&xr_changes, 1, __ATOMIC_RELEASE);
+}
+void pace_xr_lock(int fps) { xr_changed(fps), __atomic_store_n(&xr_lock_fps, fps, __ATOMIC_RELAXED); }
 // The VR mode at 100 Hz and up: a game frame at 60 is ms long (two refreshes); 0: not that mode (see PACE_VR_GPU)
-void pace_xr_frame_ms(double ms) { __atomic_store_n(&xr_frame_us, (int)(ms * 1000), __ATOMIC_RELAXED); }
+void pace_xr_frame_ms(double ms) { xr_changed((int)(ms * 1000)), __atomic_store_n(&xr_frame_us, (int)(ms * 1000), __ATOMIC_RELAXED); }
 bool pace_xr_free(void) { return __atomic_load_n(&xr_frame_us, __ATOMIC_RELAXED) > 0; }
 
 bool pace_is_slow(void) { return pace_slow; }
@@ -372,6 +379,25 @@ void pace_frame(void) {
         memset(over, 0, sizeof over);
         memset(recent, 0, sizeof recent);
     }
+    {   // The VR mode's rate changed (pace_xr_lock / pace_xr_frame_ms: the display's rate, the VR tab's 90 Hz choice): the
+        // hold, the backoff and the window were learned under the other frame - and at 90 Hz, where every frame is 33 ms,
+        // under none (session 2026-11-18 04:07: holds of the 90 Hz lock's frames had backed off to 8x, and at 120 Hz with
+        // the GPU at 11 ms the game stayed at 30). 60 gets a fresh try, with a hitch's grace for the switch's own frames.
+        static int xr_seen;
+        int xc = __atomic_load_n(&xr_changes, __ATOMIC_ACQUIRE);
+        if (xc != xr_seen && on) {
+            int lk = __atomic_load_n(&xr_lock_fps, __ATOMIC_RELAXED), us = __atomic_load_n(&xr_frame_us, __ATOMIC_RELAXED);
+            if (lk == 30) LOG("[pace] VR: the game held at 30 by the display's rate: nothing judged while it is\n");
+            else LOG("[pace] VR: a game frame of %.2f ms: back-off cleared, trying 60\n", us / 1000.0);
+            pace_slow = late_hold = try_back = false, backoff = 1, back_at = 0, gpu_back = -1;
+            clear = calm = cpu_clear = 0, scene = 0, gpu_said = 0;
+            nover = nbusy = ncpu = 0;
+            memset(over, 0, sizeof over);
+            memset(recent, 0, sizeof recent);
+            if (!first) pace_hitch("a display rate change");  // (not at the first frame: nothing to leave out)
+        }
+        xr_seen = xc;
+    }
     if (__atomic_exchange_n(&try_60, 0, __ATOMIC_ACQ_REL) && on && pace_slow) {  // (see above)
         LOG("[pace] dynamic resolution looks for 60: trying 60\n");
         pace_slow = late_hold = false, back_at = now, try_back = true, gpu_back = gpu_avg;
@@ -424,6 +450,14 @@ void pace_frame(void) {
             pace_scene() ? "" : " (no gameplay)");
         last_cpu = cpu;
         l_lock = g_rq_lock_ns, l_sub = g_submit_ns, l_gpu = g_gpu_wait_ns, l_pres = g_present_ns, l_hooks = g_hooks_ns;
+    }
+    // The VR mode's lock at 30 (pace_xr_lock: 90 Hz): the game is held for good, and its frames are 33 ms long because it
+    // is - counted as shown late, they started holds of the pacer's own and backed them off (see the change above).
+    // Nothing is judged until the lock ends.
+    if (__atomic_load_n(&xr_lock_fps, __ATOMIC_RELAXED) == 30) {
+        if (!on) return;
+        hold_cadence(hold_30(pace_slow));
+        return;
     }
     // Not held, a frame shown a vsync late (25 ms or more after the one before: not a 50 Hz display's 20 ms) didn't fit
     // 60 either, whatever its busy time: what made it late can be idle here (waiting for the GPU's frame through the

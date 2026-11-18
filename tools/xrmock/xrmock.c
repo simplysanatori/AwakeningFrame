@@ -21,6 +21,8 @@
 //   MOCK_XR_SECONDS=<s>      session length before STOPPING is sent (20; 0 = until the app quits)
 //   MOCK_XR_FRAMES=<n>       or stop after n frames (0 = off)
 //   MOCK_XR_HZ=<hz>          display refresh, 120 default (90, 72 ...); xrEnumerateDisplayRefreshRatesFB offers 72/90/120
+//                            <hz>,<hz>@<s>,...: then each rate from that many seconds into the session (the period
+//                            only, no event: SteamVR's switch 90 -> 120 on the Frame reported 144 Hz periods for 2.5 s)
 //   MOCK_XR_PERIOD_BLIP=n:ms every nth xrWaitFrame reports predictedDisplayPeriod = ms (one-frame blips, as SteamVR at 120 Hz)
 //   MOCK_XR_PIPELINE=<n>     refreshes from xrWaitFrame's return to the predicted display time (2)
 //   MOCK_XR_DEADLINE_MS=<ms> an xrEndFrame later than this before the display time counts as late (period / 2)
@@ -909,6 +911,24 @@ static XrResult XRAPI_CALL mWaitFrame(XrSession s, const XrFrameWaitInfo* wi, Xr
     (void)wi;
     if (!gSessionRunning) return XR_ERROR_SESSION_NOT_RUNNING;
     int64_t call = nowNs();
+    {   // MOCK_XR_HZ's later rates: the refresh grid goes on from the next refresh at the new period
+        static int nsch = -1, isch;
+        static double sch_hz[8], sch_at[8];
+        static int64_t sch_t0;  // (the session's start: gT0 moves with each rate)
+        if (nsch < 0) {
+            const char* e = getenv("MOCK_XR_HZ");
+            nsch = 0, sch_t0 = gT0;
+            for (const char* c = e ? strchr(e, ',') : NULL; c && nsch < 8; c = strchr(c + 1, ','))
+                if (sscanf(c + 1, "%lf@%lf", &sch_hz[nsch], &sch_at[nsch]) == 2 && sch_hz[nsch] > 0) nsch++;
+        }
+        if (isch < nsch && call - sch_t0 >= (int64_t)(sch_at[isch] * 1e9)) {
+            int64_t np = (int64_t)(1e9 / sch_hz[isch]), next = gT0 + (int64_t)gWaits * gPeriod;
+            gT0 = next - (int64_t)gWaits * np, gPeriod = np;
+            trace("refresh %.0f Hz", sch_hz[isch]);
+            fprintf(stderr, "xrmock: display at %.0f Hz (MOCK_XR_HZ, %.1f s in)\n", sch_hz[isch], sch_at[isch]);
+            isch++;
+        }
+    }
     static int skip = -1;
     if (skip < 0) skip = getenv("MOCK_XR_SKIP") ? atoi(getenv("MOCK_XR_SKIP")) != 0 : 1;
     int skipped = 0;
