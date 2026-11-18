@@ -10,6 +10,7 @@
 #   SYSROOT        the target's root filesystem, glibc 2.39 (default $HOME/frame-build/primedframe/sysroot-portable)
 #   RUN_SYSROOT    a root filesystem with the system libraries (Vulkan, shaderc) to start the program in under qemu
 #                  (default $HOME/frame-build/sysroot, the Frame's own)
+#   AF_BUILD_STAMP text (no spaces) the program's log prints as "[info] build ..." (steam-frame/dev/make-dev-app.sh sets it)
 #   JOBS           build jobs (default 8, at most 8)
 #   AF_CROSS_LOCK  lock file (default $HOME/frame-build/build-af-desk.lock); one cross build at a time per lock
 # Output: build/aarch64/lasrecomp, build/aarch64/portable/{lasrecomp,lib/} (the layout of the portable build's artifact),
@@ -156,7 +157,7 @@ for f in $(grep -rhoE 'shaderc_[a-z_0-9]+\(' runtime --include=*.c --include=*.c
 clang --target=$TRIPLE --sysroot="$SYSROOT" -fuse-ld=lld -shared -fPIC -o build/stub/libshaderc_shared.so.1 \
     -Wl,-soname,libshaderc_shared.so.1 build/stub/shaderc.c
 # (PATHMAP: the root filesystem's header paths in the debug info are named as "sysroot" too, as the checkout is ".")
-nice -n 19 make -j"$JOBS" ARCH=aarch64 SYSROOT="$SYSROOT" DEPS="$P" SHADERC="$ROOT/build/stub/libshaderc_shared.so.1" \
+nice -n 19 make -j"$JOBS" ARCH=aarch64 SYSROOT="$SYSROOT" DEPS="$P" SHADERC="$ROOT/build/stub/libshaderc_shared.so.1" AF_BUILD_STAMP="${AF_BUILD_STAMP:-}" \
     PATHMAP="-ffile-prefix-map=$ROOT=. -ffile-prefix-map=$SYSROOT=/sysroot" build/aarch64/lasrecomp > build/aarch64.log 2>&1 || { tail -n 30 build/aarch64.log >&2; exit 1; }
 
 # ---- collect, as portable.yml does
