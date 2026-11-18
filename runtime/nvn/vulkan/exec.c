@@ -7415,14 +7415,16 @@ static float g_eye_zr[2][2];
 // The latest twinned depth target of the window image's size drawn into this frame: the scene's own depth, at full eye
 // size. The latest depth of all (st_last_depth) is the game's quarter-size copy (480 x 270, made after the scene for its
 // ambient occlusion), whose texels are 3.6 x 6.4 eye pixels: the edge pass's fade read through it came out in steps
-// along every surface seen at a shallow angle (the sea at the table's edge, headset 2026-11-18).
+// along every surface seen at a shallow angle (the sea at the table's edge, headset 2026-11-18). Only a draw with depth
+// writes on counts: the last pass of the frame tests against another depth of that size (no writes), which in Tail Cave
+// 04B is empty when the eyes are composited (every pixel read as void); the scene's own is written by its pre-pass.
 static NvnTexture *st_full_depth;
 static float st_full_zr[2];
 static TexBackend *g_eye_full_depth[2];
 static float g_eye_full_zr[2][2];
 static void note_depth(void) {
     st_last_depth = st.rt.depth, memcpy(st_last_zr, st.depth_range[0], sizeof st_last_zr);
-    if (g_eye_out_ok && st.rt.depth->width == g_eye_out.width && st.rt.depth->height == g_eye_out.height)
+    if (g_eye_out_ok && st.ds[0] && st.ds[1] && st.rt.depth->width == g_eye_out.width && st.rt.depth->height == g_eye_out.height)
         st_full_depth = st.rt.depth, memcpy(st_full_zr, st.depth_range[0], sizeof st_full_zr);
 }
 static bool g_eye_capture[2];        // per eye output: of a Backdrop capture frame (ring_phase)

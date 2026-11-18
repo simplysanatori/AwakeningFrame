@@ -46,8 +46,10 @@ would band. The pass draws straight into the XR eye image instead (UNORM view, s
 
 **Which depth.** The eye post hook hands over two depths: the latest twinned depth target drawn into before the
 composite, which is the game's quarter-size copy made after the scene for its ambient occlusion (480 x 270, always
-whole), and the latest twinned depth target of the window image's size, the scene's own (`depth_full`: as large as the
-eye output and filled like it). The passes read the scene's own, each image through its own filled part; the copy only
+whole), and the latest twinned depth target of the window image's size drawn into with depth writes on, the scene's
+own (`depth_full`: as large as the eye output and filled like it). Writes on, because the frame's last pass tests
+against another depth of that size without writing it, and in the dungeons that one is empty when the eyes are
+composited (Tail Cave 04B: every pixel read as void). The passes read the scene's own, each image through its own filled part; the copy only
 when a frame had none. Read through the copy, as before 2026-11-18, every depth texel covered 3.6 x 6.4 eye pixels: the
 fade fell off in steps a few pixels tall on any surface seen at a shallow angle (the sea at the table's edge) and the
 outlines followed the copy's texels, with or without foveation. Read through the colour's filled part, as it also was,
