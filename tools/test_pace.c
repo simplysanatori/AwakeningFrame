@@ -22,15 +22,24 @@ uint64_t pace_test_game_mgr;
 static uint8_t game_mgr[0x500];
 static uint64_t zone;
 // The game's 60 Hz vsyncs: evenly 16.67 ms apart, or (hz90) the VR mode's at 90 Hz, two of every three refreshes
-// (11.1 and 22.2 ms apart). vsync_count: the latest at or before t; vsync_time: when vsync k comes.
+// (11.1 and 22.2 ms apart); (slip) every slip-th vsync and all after it a 120 Hz refresh later: one the display missed.
+// vsync_count: the latest at or before t; vsync_time: when vsync k comes.
 static bool hz90;
+static uint64_t slip;
 #define REFRESH90_NS 11111111ull
+static uint64_t vsync_time(uint64_t k) {
+    return hz90 ? (k / 2 * 3 + k % 2) * REFRESH90_NS : k * VSYNC_NS + (slip ? k / slip * (VSYNC_NS / 2) : 0);
+}
 static uint64_t vsync_count(uint64_t t) {
-    if (!hz90) return t / VSYNC_NS;
+    if (!hz90 && !slip) return t / VSYNC_NS;
+    if (!hz90) {
+        uint64_t k = t / VSYNC_NS;
+        while (k && vsync_time(k) > t) k--;
+        return k;
+    }
     uint64_t r = t / REFRESH90_NS;
     return r / 3 * 2 + (r % 3 ? 1 : 0);
 }
-static uint64_t vsync_time(uint64_t k) { return hz90 ? (k / 2 * 3 + k % 2) * REFRESH90_NS : k * VSYNC_NS; }
 static void vsyncs(void) { g_vsync_count = vsync_count(t_ns), g_vsync_ns = vsync_time(g_vsync_count); }
 // The game's own wait for its vsync event after its work (ending at t): the next vsync that signals it (vi.c: none
 // before g_vsync_game_from while that is at most two on)
@@ -422,6 +431,7 @@ typedef struct {
     double phase;          // (ms: when the first frame starts - 22.2 at 90 Hz: presents at the second vsync of three refreshes)
     double render;         // the render thread's ms after a present: a frame started sooner waits for it (busy)
     double max_lat;        // (the most start-to-present on average: a light load back to the late start; 0: any)
+    int slip;              // (every slip-th vsync a refresh late, and those after it: 41.7 ms across it is on time)
 } Cadence;
 static double mixed13_17(int n) { return n % 10 == 9 ? 17 : 13; }
 // A step up in load: 8 ms for 15 s (late starts), then 17 ms (450 frames at 30): the first frame over is late, then early
@@ -443,6 +453,8 @@ static const Cadence cadences[] = {
     {"VR 30 hold at 120 Hz, 8 ms for 15 s then 17 ms (a step up: one frame late at most)", 0, step8_17, 0, false, 0.002},
     {"VR 30 hold at 120 Hz, 8 ms with the render thread 10 ms after a present (the late start: its wait left out)", 8,
      NULL, 0, false, 0, 0, 10, 17},
+    {"VR 30 hold at 120 Hz, 6 ms and 5 ms of waits, a refresh missed every 3 s (the late start's window kept)", 6, NULL,
+     5, false, 0, 0, 0, 0, 181},
     {"VR 90 Hz (held at 30)", 12, NULL, 0, true}, {"VR 90 Hz (held at 30), the other phase (S + 1 22.2 ms after S: the late start leaves 10.9 ms)", 12, NULL, 0, true, 0, 22.2},
     {"VR 90 Hz (held at 30)", 20, NULL, 0, true},
     {"VR 90 Hz (held at 30)", 30, NULL, 0, true}, {"VR 90 Hz (held at 30), the Frame at Mabe", 0, frame_like, 0, true},
@@ -451,7 +463,7 @@ static int run_cadence(const Cadence *c) {
     memset(game_mgr, 0, sizeof game_mgr);
     game_mgr[0x4e3] = 1;
     pace_test_game_mgr = (uint64_t)(uintptr_t)game_mgr;
-    hz90 = c->hz90, rng = 9;
+    hz90 = c->hz90, slip = (uint64_t)c->slip, rng = 9;
     t_ns += (uint64_t)(c->phase * 1e6);
     pace_xr_lock(30);
     pace_xr_frame_ms(0);
@@ -474,7 +486,7 @@ static int run_cadence(const Cadence *c) {
         if (last && t0 - start0 > 10000000000ull) {
             double p = (shown - last) / 1e6;
             nframes++, lat += (shown - t0) / 1e6;
-            if (fabs(p - 1e3 / 30) < 1) n33++;
+            if (fabs(p - 1e3 / 30) < 1 || (slip && fabs(p - 1e3 / 24) < 1)) n33++;
             else if (fabs(p - 50) < 1) n50++;
             else if (p < 25) n16++;
             else nother++;

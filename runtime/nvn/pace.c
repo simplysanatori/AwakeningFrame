@@ -235,6 +235,14 @@ static double cadence_early_wait(double rq_wait) {
     double earlier = cad_window_ms > cad_late_ms ? cad_window_ms - cad_late_ms : 0;
     return rq_wait < earlier ? rq_wait : earlier;
 }
+// A vsync after the one before as the VR mode's display has it: 16.7 ms (every second refresh at 120 Hz) or 11.1 /
+// 22.2 ms (two of three at 90 Hz), within 1 ms
+static bool vsync_gap_regular(int64_t ns) {
+    static const int64_t gaps[] = {16666667, 11111111, 22222222};
+    for (int i = 0; i < 3; i++)
+        if (ns > gaps[i] - 1000000 && ns < gaps[i] + 1000000) return true;
+    return false;
+}
 static void vr_cadence(double busy) {  // (busy: as a late start would have had it)
     static int pin = -1;  // (LARECOMP_PACE_CADENCE: 1 early, 2 late)
     static bool wide_said;
@@ -302,9 +310,15 @@ static void vr_cadence(double busy) {  // (busy: as a late start would have had 
             uint64_t at = v + (n + 1 - m) * 16666667ull + 250000ull, now = plat_now_ns();
             plat_sleep_until_ns(at > now + 100000ull ? at : now + 100000ull);
         }
-        // (S + 2 is two vsyncs after S at 90 Hz too: three refreshes)
+        // (S + 2 is two vsyncs after S at 90 Hz too: three refreshes.) The late start's window is kept for the frames
+        // after only when S + 1 came as the display's rate has it - a refresh missed or caught up on (the mock's on a
+        // busy desktop: 8.2 ms) would leave a too-short window to start from, not measured again while it is in use
         int64_t left = (int64_t)(vt + 33333333ull) - (int64_t)plat_now_ns();
-        if (m == n + 1 && left > 0) cad_late_ms = cad_window_ms = left / 1e6;
+        if (m == n + 1 && left > 0) {
+            cad_window_ms = left / 1e6;
+            uint64_t v1 = __atomic_load_n(&g_vsync_ns, __ATOMIC_ACQUIRE);  // (S + 1's: the count was n + 1)
+            if (vsync_gap_regular((int64_t)(v1 - vt))) cad_late_ms = cad_window_ms;
+        }
     } else {
         uint64_t start = vt + 33333333ull - (uint64_t)(w * 1e6), now = plat_now_ns();
         if (start > now + 100000ull && start - now < 40000000ull) plat_sleep_until_ns(start);
