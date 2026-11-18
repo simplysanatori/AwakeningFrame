@@ -10761,7 +10761,7 @@ static bool vr_eye_post(VkCommandBuffer cb, TexBackend *b, uint32_t ly, uint32_t
 int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImageView *, VkFormat *, VkExtent2D *)) {
     st_ts_resolve();
     if (!g_eye_out_ok || !g_eye_out.backend) return 0;
-    int drawn = 0;
+    int drawn = 0, fresh = 0;
     for (int eye = 0; eye < 2; eye++) {
         TexBackend *b = g_eye_out.backend;
         bool lay = vk_b_layered(b);  // (multiview storage: eye 1 is layer 1)
@@ -10787,8 +10787,11 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
             ep.have_matrices = stereo_eye_matrices(eye, ep.V, ep.P);
             if (!ep.have_matrices) for (int i = 0; i < 16; i++) ep.V[i] = ep.P[i] = i % 5 == 0;
             extern void scene_eye_post(const StereoEyePost *e);  // (scene.c: the Surroundings row's Backdrop, into the output)
+            extern void reproj_eye_post(const StereoEyePost *e);  // (reproj.c: the depth the re-shown refreshes are drawn with)
             scene_eye_post(&ep);
             stereo_eye_post(&ep);
+            reproj_eye_post(&ep);
+            fresh |= 1 << eye;
         }
         VkImage img;
         VkImageView view;
@@ -10828,7 +10831,11 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
         rec_CmdEndRendering(cb);
         drawn |= 1 << eye;
     }
-    if (drawn == 3) stereo_set_views();  // (the layer: the poses these outputs were rendered with)
+    if (drawn == 3) {
+        stereo_set_views();  // (the layer: the poses these outputs were rendered with)
+        extern void reproj_eyes(VkCommandBuffer cb, bool new_outputs);  // (LARECOMP_XR_REPROJ: the set's re-shown refreshes)
+        reproj_eyes(cb, fresh == 3);
+    }
     return drawn;
 }
 

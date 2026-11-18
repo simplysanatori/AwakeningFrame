@@ -124,6 +124,29 @@ bool xr_latch_gaze(uint64_t id, float dir[3]);
 // as a mismatch), else a mask: 1 / 2 eye 0 / 1 differs from what it was rendered with, 4 the eyes come from different
 // latches.
 int xr_set_views(const uint64_t id[2], const XrEyeView rendered[2]);
+// ---- the refreshes that show a set again (LARECOMP_XR_REPROJ; runtime/nvn/vulkan/reproj.c, docs/af/STEREO.md
+// "Re-shown refreshes"). At 60 FPS on a 120 Hz display a set is shown on two refreshes (four in the 30 FPS hold).
+//   off     (default) every refresh shows the set's eye images with the poses they were rendered with
+//   fresh   (a test) the refreshes after a set's first carry a pose located for that refresh, on the same images: a
+//           compositor that reprojects by the layer's pose then pins them to the head; one that does not, changes nothing
+//   rot / pos / follow  the refreshes after the first get eye images of their own, drawn at the present from the set's
+//           for the head pose of each (rotation; and position from the scene depth; and the table's follow motion)
+enum { XR_REPROJ_OFF, XR_REPROJ_FRESH, XR_REPROJ_ROT, XR_REPROJ_POS, XR_REPROJ_FOLLOW };
+int xr_reproj_mode(void);
+void xr_set_reproj_mode(int mode);  // (the VR tab; any thread: the next set)
+// Between xr_set_begin and xr_set_submit, after the eye images and their views (xr_set_views): the display times of the
+// refreshes this set is expected on (times[0] its first, on the display's grid; then one a refresh, as many as the game's
+// cadence shows a frame, up to 4). Returns how many (0: none: no views, the session not running).
+int xr_reshow_times(int64_t times[4]);
+// The views for refresh k (1..3) of those, from one xrLocateViews at times[k] in the set's space.
+bool xr_reshow_views(int k, XrEyeView out[2]);
+// Eye `eye`'s image for refresh k (its own swapchains, made on the first call for k: the memory of 2 pairs x 2 eyes).
+bool xr_reshow_target(int k, int eye, XrEyeTarget *out);
+// Both eyes of refresh k are drawn (in this set's submission): from its display time on the layer shows them with
+// the views of xr_reshow_views.
+void xr_reshow_ready(int k);
+// The latch's display time (the one its views were located for), 0 when it is gone.
+int64_t xr_latch_time(uint64_t id);
 // The eye swapchains' size (false before xr_start).
 bool xr_eye_size(uint32_t *w, uint32_t *h);
 // GPU ms of eye 0 and eye 1 of the latest finished game frame: xr_timing.log's gpu0 / gpu1 (-1: unknown).

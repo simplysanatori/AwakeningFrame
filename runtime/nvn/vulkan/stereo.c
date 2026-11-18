@@ -134,9 +134,17 @@ static void anchor_update(const float raw[3], float out[3]) {
 
 // What the latest latch's eye cameras were built with: the latch (the poses go into the projection layer of the set its
 // eye images are shown in: stereo_note_composite / stereo_set_views), the head views, and the per-eye V / P (game units).
-static struct { bool ok; uint64_t id; XrEyeView ev[2]; float V[2][16], P[2][16]; } g_rv;
+// rig / rig_prev: the rig's table at that latch and at the one before, with their display times (reproj.c carries the
+// table's follow motion on for the refreshes that show a set again)
+#ifdef LARECOMP_HAVE_XR
+typedef struct { bool ok; XrRigPose rp; int64_t t; } RigAt;
+#else
+typedef struct { bool ok; } RigAt;
+#endif
+static struct { bool ok; uint64_t id; XrEyeView ev[2]; float V[2][16], P[2][16]; RigAt rig, rig_prev; } g_rv;
 // Per eye output: the latch it was composited with (0: none, or the game's own camera)
-static struct { uint64_t id; XrEyeView ev; float V[16], P[16]; } g_out[2];
+static struct { uint64_t id; XrEyeView ev; float V[16], P[16]; RigAt rig, rig_prev; } g_out[2];
+static int g_test = -1;  // LARECOMP_STEREO_TEST (eye_fn)
 
 static void quat_mat(const float q[4], float m[3][3]) {  // x y z w -> rotation (columns: the eye's axes in app space)
     float x = q[0], y = q[1], z = q[2], w = q[3];
@@ -155,6 +163,34 @@ bool stereo_table(float anchor[3], bool *room, bool *zone, float lo[3], float hi
 }
 
 #ifdef LARECOMP_HAVE_XR
+// An eye's view (game units, rigid; rows: its right, up and back in the world) from its pose in the app space and the
+// rig's table (app = A + s * R * (world - anchor)); E: the eye's position in the world
+static void eye_view(const XrEyeView *ev, const XrRigPose *rp, float v[16], float E[3]) {
+    const float *Rw = rp->R;  // world -> app (row-major); its transpose takes app to world
+    float m[3][3], w[3][3];
+    quat_mat(ev->orientation, m);
+    for (int r = 0; r < 3; r++)  // world rotation = R^T * m
+        for (int c = 0; c < 3; c++) w[r][c] = Rw[0 * 3 + r] * m[0][c] + Rw[1 * 3 + r] * m[1][c] + Rw[2 * 3 + r] * m[2][c];
+    float d[3] = {(ev->position[0] - rp->A[0]) / rp->s, (ev->position[1] - rp->A[1]) / rp->s, (ev->position[2] - rp->A[2]) / rp->s};
+    for (int r = 0; r < 3; r++) E[r] = rp->anchor[r] + Rw[0 * 3 + r] * d[0] + Rw[1 * 3 + r] * d[1] + Rw[2 * 3 + r] * d[2];
+    for (int r = 0; r < 3; r++) {
+        v[r * 4 + 0] = w[0][r], v[r * 4 + 1] = w[1][r], v[r * 4 + 2] = w[2][r];
+        v[r * 4 + 3] = -(w[0][r] * E[0] + w[1][r] * E[1] + w[2][r] * E[2]);
+    }
+    v[12] = v[13] = v[14] = 0, v[15] = 1;
+}
+
+// An eye's projection from its fov, with the game's axis signs (sx, sy) and depth terms (p10, p11) of `like`
+static void eye_proj(const float fov[4], const float like[16], float p[16]) {
+    float tl = tanf(fov[0]), tr = tanf(fov[1]), tu = tanf(fov[2]), td = tanf(fov[3]);
+    float sx = like[0] < 0 ? -1.0f : 1.0f, syy = like[5] < 0 ? -1.0f : 1.0f, p10 = like[10], p11 = like[11];
+    memset(p, 0, 64);
+    p[0] = sx * 2 / (tr - tl), p[2] = sx * (tr + tl) / (tr - tl);
+    p[5] = syy * 2 / (tu - td), p[6] = syy * (tu + td) / (tu - td);
+    p[10] = p10, p[11] = p11;
+    p[14] = -1;
+}
+
 static bool eye_fn(const CamLatch *l, const float pivot_in[3], float V[2][16], float P[2][16]) {
     XrEyeView ev[2];
     uint64_t vid;
@@ -187,39 +223,21 @@ static bool eye_fn(const CamLatch *l, const float pivot_in[3], float V[2][16], f
     g_table.ok = true, g_table.room = rp.area != XR_RIG_OPEN, g_table.zone = ri.zone;
     memcpy(g_table.anchor, rp.anchor, 12), memcpy(g_table.lo, ri.zlo, 12), memcpy(g_table.hi, ri.zhi, 12);
     cam_override_table_anchor(pivot);  // (the culling fit centres the table here)
-    const float *Rw = rp.R;  // world -> app (row-major); its transpose takes app to world
     const float *gp = l->ref.P;
     for (int e = 0; e < 2; e++) {
-        float m[3][3], w[3][3];
-        quat_mat(ev[e].orientation, m);
-        for (int r = 0; r < 3; r++)  // world rotation = R^T * m
-            for (int c = 0; c < 3; c++) w[r][c] = Rw[0 * 3 + r] * m[0][c] + Rw[1 * 3 + r] * m[1][c] + Rw[2 * 3 + r] * m[2][c];
-        float d[3] = {(ev[e].position[0] - rp.A[0]) / rp.s, (ev[e].position[1] - rp.A[1]) / rp.s, (ev[e].position[2] - rp.A[2]) / rp.s};
         float E[3];
-        for (int r = 0; r < 3; r++) E[r] = pivot[r] + Rw[0 * 3 + r] * d[0] + Rw[1 * 3 + r] * d[1] + Rw[2 * 3 + r] * d[2];
-        float *v = V[e];
-        for (int r = 0; r < 3; r++) {  // rows: the eye's right, up, back in world; rigid, game units
-            v[r * 4 + 0] = w[0][r], v[r * 4 + 1] = w[1][r], v[r * 4 + 2] = w[2][r];
-            v[r * 4 + 3] = -(w[0][r] * E[0] + w[1][r] * E[1] + w[2][r] * E[2]);
-        }
-        v[12] = v[13] = v[14] = 0, v[15] = 1;
-        float tl = tanf(ev[e].fov[0]), tr = tanf(ev[e].fov[1]), tu = tanf(ev[e].fov[2]), td = tanf(ev[e].fov[3]);
-        float *p = P[e];
-        memset(p, 0, 64);
-        float sx = gp[0] < 0 ? -1.0f : 1.0f, syy = gp[5] < 0 ? -1.0f : 1.0f;  // (the game's own axis signs)
-        p[0] = sx * 2 / (tr - tl), p[2] = sx * (tr + tl) / (tr - tl);
-        p[5] = syy * 2 / (tu - td), p[6] = syy * (tu + td) / (tu - td);
-        p[10] = gp[10], p[11] = gp[11];
+        float *v = V[e], *p = P[e];
+        eye_view(&ev[e], &rp, v, E);
+        eye_proj(ev[e].fov, gp, p);
         if (cfg.near_ > 0) {
             float f = l->far_, n = cfg.near_;
             p[10] = -(f + n) / (f - n), p[11] = -2 * f * n / (f - n);
         }
-        p[14] = -1;
-        static int test = -1;  // (debug bisect) LARECOMP_STEREO_TEST=gamecam: the game's V and P; gameP: the game's P
-        if (test < 0) {
+        if (g_test < 0) {  // (debug bisect) LARECOMP_STEREO_TEST=gamecam: the game's V and P; gameP: the game's P
             const char *t = getenv("LARECOMP_STEREO_TEST");
-            test = !t ? 0 : !strcmp(t, "gamecam") ? 1 : !strcmp(t, "gameP") ? 2 : !strcmp(t, "gamerot") ? 3 : !strcmp(t, "gamepos") ? 4 : 0;
+            g_test = !t ? 0 : !strcmp(t, "gamecam") ? 1 : !strcmp(t, "gameP") ? 2 : !strcmp(t, "gamerot") ? 3 : !strcmp(t, "gamepos") ? 4 : 0;
         }
+        int test = g_test;
         if (test == 1) memcpy(v, l->ref.V, 64);
         if (test == 3 || test == 4) {  // (the game's rotation with this eye's position / this rotation at the game's eye)
             const float *gv = l->ref.V, *pos = test == 3 ? E : l->ref.eye;
@@ -245,6 +263,8 @@ static bool eye_fn(const CamLatch *l, const float pivot_in[3], float V[2][16], f
         }
     }
     g_rv.ok = true, g_rv.id = vid;
+    g_rv.rig_prev = g_rv.rig;
+    g_rv.rig = (RigAt){true, rp, xr_latch_time(vid)};
     memcpy(g_rv.ev, ev, sizeof ev);
     fov_note_views((const float[2][4]){{ev[0].orientation[0], ev[0].orientation[1], ev[0].orientation[2], ev[0].orientation[3]},
                                       {ev[1].orientation[0], ev[1].orientation[1], ev[1].orientation[2], ev[1].orientation[3]}},
@@ -261,6 +281,7 @@ void stereo_note_composite(int eye) {
     if (g_rv.ok && cam_override_eye_ready()) {
         g_out[eye].id = g_rv.id, g_out[eye].ev = g_rv.ev[eye];
         memcpy(g_out[eye].V, g_rv.V[eye], 64), memcpy(g_out[eye].P, g_rv.P[eye], 64);
+        g_out[eye].rig = g_rv.rig, g_out[eye].rig_prev = g_rv.rig_prev;
         return;
     }
 #endif
@@ -271,6 +292,64 @@ bool stereo_eye_matrices(int eye, float V[16], float P[16]) {
     if (eye < 0 || eye > 1 || !g_out[eye].id) return false;
     memcpy(V, g_out[eye].V, 64), memcpy(P, g_out[eye].P, 64);
     return true;
+}
+
+#ifdef LARECOMP_HAVE_XR
+// The table carried on from the latch before (a) to the output's (b) for `ahead` more seconds at the same rate: the
+// anchor, A and s linearly, R by the same turn. Not over a cut or a snap (a step no follow makes in one frame), a blink,
+// or latches too close or too far apart to give a rate: then b as it is.
+static bool rig_ahead(const RigAt *a, const RigAt *b, float ahead, XrRigPose *out) {
+    *out = b->rp;
+    if (!a->ok || !b->ok || !a->t || !b->t || ahead <= 0 || xr_rig_fade() > 0.001f) return false;
+    float dt = (float)((b->t - a->t) / 1e9);
+    if (dt < 0.004f || dt > 0.05f) return false;
+    float f = ahead / dt, dA = 0, dP = 0;
+    for (int i = 0; i < 3; i++)
+        dA += (b->rp.A[i] - a->rp.A[i]) * (b->rp.A[i] - a->rp.A[i]), dP += (b->rp.anchor[i] - a->rp.anchor[i]) * (b->rp.anchor[i] - a->rp.anchor[i]);
+    const float *Ra = a->rp.R, *Rb = b->rp.R;
+    float D[9];  // Rb * Ra^T: the table's turn from a to b (app space)
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 3; c++) D[r * 3 + c] = Rb[r * 3 + 0] * Ra[c * 3 + 0] + Rb[r * 3 + 1] * Ra[c * 3 + 1] + Rb[r * 3 + 2] * Ra[c * 3 + 2];
+    float w[3] = {0.5f * (D[7] - D[5]), 0.5f * (D[2] - D[6]), 0.5f * (D[3] - D[1])};
+    float sn = sqrtf(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+    // (per game frame: 2 units of anchor is 120 a second, past any follow; 5 cm of table, 3 degrees of turn, 2% of size)
+    if (dP > 4.0f * (dt / 0.0167f) * (dt / 0.0167f) || dA > 0.0025f || sn > 0.052f || fabsf(b->rp.s - a->rp.s) > 0.02f * b->rp.s) return false;
+    for (int i = 0; i < 3; i++)
+        out->anchor[i] = b->rp.anchor[i] + (b->rp.anchor[i] - a->rp.anchor[i]) * f, out->A[i] = b->rp.A[i] + (b->rp.A[i] - a->rp.A[i]) * f;
+    out->s = b->rp.s + (b->rp.s - a->rp.s) * f;
+    if (sn > 1e-7f) {  // (Rodrigues: f times the turn, then b's)
+        float th = asinf(fminf(sn, 1.0f)) * f, k[3] = {w[0] / sn, w[1] / sn, w[2] / sn}, c = cosf(th), s1 = sinf(th), E[9];
+        for (int r = 0; r < 3; r++)
+            for (int cc = 0; cc < 3; cc++) {
+                float kk[3][3] = {{0, -k[2], k[1]}, {k[2], 0, -k[0]}, {-k[1], k[0], 0}}, k2 = 0;
+                for (int j = 0; j < 3; j++) k2 += kk[r][j] * kk[j][cc];
+                E[r * 3 + cc] = (r == cc) + s1 * kk[r][cc] + (1 - c) * k2;
+            }
+        for (int r = 0; r < 3; r++)
+            for (int cc = 0; cc < 3; cc++) out->R[r * 3 + cc] = E[r * 3 + 0] * Rb[0 * 3 + cc] + E[r * 3 + 1] * Rb[1 * 3 + cc] + E[r * 3 + 2] * Rb[2 * 3 + cc];
+    }
+    return true;
+}
+#endif
+
+bool stereo_eye_view_at(int eye, const float q[4], const float pos[3], const float fov[4], float follow_s, float V[16], float P[16],
+                        bool *followed) {
+    if (followed) *followed = false;
+#ifdef LARECOMP_HAVE_XR
+    if (eye < 0 || eye > 1 || !g_out[eye].id || !g_out[eye].rig.ok || g_test > 0) return false;
+    XrEyeView ev;
+    memcpy(ev.orientation, q, 16), memcpy(ev.position, pos, 12), memcpy(ev.fov, fov, 16);
+    XrRigPose rp = g_out[eye].rig.rp;
+    bool f = follow_s > 0 && rig_ahead(&g_out[eye].rig_prev, &g_out[eye].rig, follow_s, &rp);
+    if (followed) *followed = f;
+    float E[3];
+    eye_view(&ev, &rp, V, E);
+    eye_proj(ev.fov, g_out[eye].P, P);
+    return true;
+#else
+    (void)eye, (void)q, (void)pos, (void)fov, (void)follow_s, (void)V, (void)P;
+    return false;
+#endif
 }
 
 int stereo_set_views(void) {
