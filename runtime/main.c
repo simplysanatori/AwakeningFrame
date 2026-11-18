@@ -310,6 +310,9 @@ static void log_startup_info(void) {
     else if (si.ram) snprintf(ram, sizeof ram, "%llu GB RAM", tenths / 10);
     fprintf(stderr, "[info] LAS Recomp %s, %s, %s%s, %s%s%s\n", larecomp_version(), si.os[0] ? si.os : "unknown OS",
             si.cpu[0] ? si.cpu : "unknown CPU", cores, ram, si.package ? ", " : "", si.package ? si.package : "");
+#ifdef AF_BUILD_STAMP  // (steam-frame/dev/make-dev-app.sh: a test build says so in every log)
+    fprintf(stderr, "[info] build %s\n", AF_BUILD_STAMP);
+#endif
 }
 
 #ifndef _WIN32

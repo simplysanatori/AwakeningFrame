@@ -114,6 +114,16 @@ check "AF_FDM=0, the layer alone in the list: the variable is unset" grep -qx "f
 sleep 1; "$APP/awakeningframe.sh" > /dev/null; RUN10=$(ls -t "$T"/Games/AwakeningFrame/logs/run-*.log | head -1)
 check "AF_FDM=0, no list: only the disable variable is set" grep -qx "fake env: FDM_OFF=1 LAYERS=unset" "$RUN10"
 rm -f "$T/Games/AwakeningFrame/session.env"
+# logs: session.env kept per launch, $STAMP / $LOGS usable in it, and a log no run copied is kept at the next launch
+LG=$T/Games/AwakeningFrame/logs
+echo 'LARECOMP_XR_POSE_LOG=$LOGS/pose-$STAMP.log' > "$T/Games/AwakeningFrame/session.env"
+sleep 1; "$APP/awakeningframe.sh" > /dev/null; RUN11=$(ls -t "$LG"/run-*.log | head -1); S11=$(basename "$RUN11" .log); S11=${S11#run-}
+check "session.env copied per launch" grep -q POSE_LOG "$LG/session-$S11.env"
+rm -f "$T/Games/AwakeningFrame/session.env"
+echo "earlier game log" > "$T/data/lasrecomp.log"
+sleep 1; "$APP/awakeningframe.sh" > /dev/null
+check "a game log no run copied is kept (-unsaved)" grep -qx "earlier game log" "$(ls "$LG"/lasrecomp-*-unsaved.log | head -1)"
+rm -f "$T/data/lasrecomp.log" "$LG"/lasrecomp-*-unsaved.log
 # the flag exists while the game runs, and goes when the wrapper is stopped
 sleep 1; FAKE_MODE=sleep "$APP/awakeningframe.sh" > /dev/null 2>&1 &
 WPID=$!

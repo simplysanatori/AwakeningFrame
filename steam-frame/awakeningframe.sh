@@ -16,7 +16,8 @@
 # 90 Hz, frames alternating one and two refreshes; the VR tab's third Refresh Rate choice does the same), AF_VRTIMING=0 (no compositor log), AF_THROTTLE=1 (a test: SteamVR
 # paces the game to every other refresh and makes the second refresh itself), AF_FDM (0: Valve's foveation layer
 # VK_LAYER_VALVE_fdm_injection removed, 1: left as Steam set it; unset: as Steam set it), AF_VRCMD,
-# AF_HEADSET_FLAG, AF_LOGS, AF_KEEP (sessions of logs kept, default 12), LARECOMP_DATA_ROOT.
+# AF_HEADSET_FLAG, AF_LOGS, AF_KEEP (sessions of logs kept, default 12), LARECOMP_DATA_ROOT. session.env is sourced by the shell,
+# so a value may use $STAMP (the launch time) and $LOGS: LARECOMP_XR_POSE_LOG=$LOGS/pose-$STAMP.log is one file per launch.
 HERE=$(dirname "$(readlink -f "$0")")
 ROOT=$(dirname "$HERE")
 LOGS=${AF_LOGS:-$ROOT/logs}
@@ -38,8 +39,10 @@ for a in "$@"; do
 done
 
 log "wrapper, session $STAMP, steam appid '${SteamAppId:-unset}', program $HERE"
+[ -f "$HERE/VERSION" ] && log "version $(head -n 1 "$HERE/VERSION"), $(head -n 1 "$HERE/.af-install" 2> /dev/null || echo 'no install marker')"
 if [ -f "$ROOT/session.env" ]; then
     log "session.env:"; cat "$ROOT/session.env"
+    cp -f "$ROOT/session.env" "$LOGS/session-$STAMP.env" 2> /dev/null   # (as it was for this launch)
     set -a; . "$ROOT/session.env"; set +a
     [ -n "${AF_FLAT:-}" ] && FLAT=$AF_FLAT
 fi
@@ -64,6 +67,16 @@ esac
 
 export LARECOMP_DATA_ROOT=${LARECOMP_DATA_ROOT:-$HOME/.local/share/lasrecomp}
 DATA=$LARECOMP_DATA_ROOT
+# A session the wrapper did not see end (killed, power loss) has no copies of the game's logs yet, and this launch rewrites
+# them: keep what the data folder still holds.
+for f in xr_timing.log lasrecomp.log; do
+    [ -f "$DATA/$f" ] || continue
+    newest=$(ls -1t "$LOGS/${f%.log}"-*.log 2> /dev/null | head -n 1)
+    if [ -z "$newest" ] || [ "$DATA/$f" -nt "$newest" ]; then
+        cp -f "$DATA/$f" "$LOGS/${f%.log}-$(date -r "$DATA/$f" +%Y%m%d-%H%M%S)-unsaved.log" 2> /dev/null &&
+            log "kept the earlier $f, which no run copied"
+    fi
+done
 cd "$HERE" || exit 1   # (no extracted/ here, so the data root is never taken for a source checkout)
 
 # ---- what is there
@@ -193,7 +206,7 @@ for f in xr_timing.log lasrecomp.log; do
 done
 rm -f "$SESSION_START"
 KEEP=${AF_KEEP:-12}
-for pfx in run xr_timing lasrecomp vrtiming; do
-    ls -1t "$LOGS/$pfx"-*.log 2> /dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -f --
+for pfx in run xr_timing lasrecomp vrtiming pose session; do
+    ls -1t "$LOGS/$pfx"-*.log "$LOGS/$pfx"-*.env 2> /dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -f --
 done
 exit $rc
