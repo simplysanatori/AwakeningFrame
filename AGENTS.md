@@ -114,6 +114,7 @@ Further reading:
 - [docs/TECHNICAL.md](docs/TECHNICAL.md): how the Steam Frame port works.
 - [docs/af/](docs/af/): the design notes for each part (stereo, rig, edge, surroundings, passes, settings, tooling).
 - [docs/af/BUILD-frame.md](docs/af/BUILD-frame.md) and [docs/af/INSTALL.md](docs/af/INSTALL.md): building and installing on the Frame.
+- [docs/af/DEVKIT.md](docs/af/DEVKIT.md): test builds made on the desktop, copied to the Frame beside the release (`steam-frame/dev/`), their logs and the bench.
 - [docs/CONTROLS.md](docs/CONTROLS.md): every control and layout.
 - [docs/USER_GUIDE.md](docs/USER_GUIDE.md): the user-facing detail (install details, full controls, settings, files, troubleshooting).
 - [README.upstream.md](README.upstream.md): LAS Recomp's README. Leave it untouched.

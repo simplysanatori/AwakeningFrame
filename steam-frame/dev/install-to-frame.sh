@@ -60,7 +60,8 @@ run() {  # <what> <command...>: print it; run it unless --dry-run
     [ "$DRY" = 1 ] || "$@"
 }
 say() { echo "== $*"; }
-echo "install $APP ($(head -n 1 "$APP/VERSION"), ${SIZEKB} KB) to ${FRAME_HOME:-the headset's home}/Games/AwakeningFrame-dev/app; ssh: ${SSH[*]}"
+WHERE=${FRAME_HOME:-"the headset"}
+echo "install $APP ($(head -n 1 "$APP/VERSION"), ${SIZEKB} KB) to $WHERE:Games/AwakeningFrame-dev/app; ssh: ${SSH[*]}"
 
 say "1 preflight"
 PRE="set -e; K=$KIT; if pgrep -x lasrecomp > /dev/null; then echo RUNNING; exit 3; fi; mkdir -p \"\$K\"; df -Pk \"\$K\" | awk 'NR==2{print \"FREEKB\", \$4}'; echo OK"
