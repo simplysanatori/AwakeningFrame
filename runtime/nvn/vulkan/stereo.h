@@ -57,6 +57,10 @@ typedef struct {
     bool have_matrices;
     float zn, zf;              // the scene pass's depth range (st.depth_range of its viewport 0)
     uint32_t layer, depth_layer;  // (LARECOMP_MV) the image layer of color / depth that is this eye's (0 otherwise)
+    void *depth_full;          // TexBackend *: the scene's own depth at the eye output's size (GENERAL; read only), or NULL
+    uint32_t depth_full_layer; // (LARECOMP_MV) its layer that is this eye's
+    float fax, fay;            // its filled part (0..1 of its own width / height)
+    float fzn, fzf;            // its depth range
     bool capture;              // (Backdrop, scene.c) the output of a capture frame: it holds the draws past the table too
     uint32_t added;            // (Backdrop) the draws the wide culling added to this output's frame (drawn only in a capture frame)
 } StereoEyePost;

@@ -48,6 +48,9 @@ static struct {
     bool fit;                  // fade, overworld: fitted inside the floor the culling draws (LARECOMP_VR_EDGE_FIT=0: not)
 } cfg;
 
+// LARECOMP_VR_EDGE_DEPTH=quarter: the passes read the game's quarter-size depth copy, as before (a comparison)
+static bool g_depth_quarter;
+
 // fade's defaults (game units; a screen is about 15 x 12, a tile 1.5; docs/af/EDGE.md "Fade")
 #define FADE_RADIUS 13.0f
 #define FADE_WIDTH 12.0f
@@ -100,6 +103,7 @@ static void cfg_init(void) {
     cfg.room_margin = FADE_ROOM_MARGIN;
     cfg.smooth_off = (e = getenv("LARECOMP_VR_EDGE_SMOOTH")) && atoi(e) == 0;
     cfg.fit = !((e = getenv("LARECOMP_VR_EDGE_FIT")) && atoi(e) == 0);
+    g_depth_quarter = (e = getenv("LARECOMP_VR_EDGE_DEPTH")) && !strcmp(e, "quarter");
     float s = (e = getenv("LARECOMP_VR_SCALE")) && atof(e) > 0 ? (float)atof(e) : 0.067f;
     float d = (e = getenv("LARECOMP_VR_DIST")) && atof(e) > 0 ? (float)atof(e) : 1.0f;
     cfg.pivot_default = d / s;
@@ -677,7 +681,7 @@ static struct {
     bool have;
     TexBackend *color, *depth;
     uint32_t layer, depth_layer;  // (LARECOMP_MV: the eye's layer of each)
-    float ax, ay, V[16], P[16], zn, zf;
+    float ax, ay, dax, day, V[16], P[16], zn, zf;  // (ax, ay: the colour's filled part; dax, day: the depth's own)
     bool vrs;       // the passes that made it were foveated (fov_shade): their coarse blocks are smoothed
     FovShade sh;
 } noted[2];
@@ -688,7 +692,15 @@ void stereo_eye_post(const StereoEyePost *e) {
     // (noted in every mode, black too: a switch from the VR tab then finds the current images, never stale ones)
     __typeof__(noted[0]) *n = &noted[e->eye];
     n->have = e->depth && e->have_matrices;
-    n->color = e->color, n->depth = e->depth, n->layer = e->layer, n->depth_layer = e->depth_layer, n->ax = e->ax, n->ay = e->ay, n->zn = e->zn, n->zf = e->zf;
+    n->color = e->color, n->layer = e->layer, n->ax = e->ax, n->ay = e->ay;
+    // the depth: the scene's own at full eye size when the frame had one, else the game's quarter-size copy (480 x 270,
+    // always whole). Each is read through its own filled part: with dynamic resolution the colour fills 0.89 of its image
+    // at 1536 px while the copy fills all of its own, so the colour's part put every depth sample of the copy 11% toward
+    // the corner. The copy's texels are 3.6 x 6.4 eye pixels: the fade read through it fell off in steps a few pixels tall
+    // on a surface seen at a shallow angle (the sea at the table's edge) and its outline came out blocky.
+    if (e->depth_full && !g_depth_quarter)
+        n->depth = e->depth_full, n->depth_layer = e->depth_full_layer, n->dax = e->fax, n->day = e->fay, n->zn = e->fzn, n->zf = e->fzf;
+    else n->depth = e->depth, n->depth_layer = e->depth_layer, n->dax = e->dax, n->day = e->day, n->zn = e->zn, n->zf = e->zf;
     memcpy(n->V, e->V, 64), memcpy(n->P, e->P, 64);
     n->vrs = fov_shade(&n->sh) && n->sh.w == e->width && n->sh.h == e->height;
     {
@@ -696,6 +708,19 @@ void stereo_eye_post(const StereoEyePost *e) {
         FovShade sh;
         if (!said_vrs && fov_shade(&sh) && !n->vrs)
             LOG("[edge] foveated passes %ux%u, eye output %ux%u: their blocks are not smoothed\n", sh.w, sh.h, e->width, e->height), said_vrs = true;
+    }
+    {   // (each change of the images' sizes, once: which depth the passes read, and the part of each that is filled)
+        static uint32_t said_cw[2], said_dw[2], said_dh[2];
+        static float said_ax[2];
+        const TexBackend *d = e->depth_full && !g_depth_quarter ? e->depth_full : e->depth;
+        float dax = d == e->depth ? e->dax : e->fax, day = d == e->depth ? e->day : e->fay;
+        uint32_t dl = d == e->depth ? e->depth_layer : e->depth_full_layer;
+        int i = e->eye;
+        if (d && (said_cw[i] != e->width || said_dw[i] != d->width || said_dh[i] != d->height || fabsf(said_ax[i] - e->ax) > 0.004f))
+            LOG("[edge] eye %d output %ux%u filled %.3f x %.3f; reads the %s scene depth %ux%u fmt %d layer %u filled %.3f x %.3f\n", i,
+                e->width, e->height, e->ax, e->ay, d == e->depth ? "quarter-size" : "full-size", d->width, d->height, (int)d->format, dl,
+                dax, day),
+                said_cw[i] = e->width, said_dw[i] = d->width, said_dh[i] = d->height, said_ax[i] = e->ax;
     }
     static bool said;
     if (!said && edge_mode() != EDGE_BLACK && (!e->depth || !e->have_matrices)) LOG("[edge] eye %d: no %s noted: the edge pass waits for it\n", e->eye, e->depth ? "matrices" : "depth"), said = true;
@@ -812,7 +837,7 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
                     : n->color->format == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_B8G8R8A8_UNORM : n->color->format;
         ein.color = vk_image_view(n->color, VK_IMAGE_VIEW_TYPE_2D, cf, 0, 1, n->layer, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
         ein.depth = vk_image_view(n->depth, VK_IMAGE_VIEW_TYPE_2D, n->depth->format, 0, 1, n->depth_layer, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
-        ein.color_crop[0] = ein.depth_crop[0] = n->ax, ein.color_crop[1] = ein.depth_crop[1] = n->ay;
+        ein.color_crop[0] = n->ax, ein.color_crop[1] = n->ay, ein.depth_crop[0] = n->dax, ein.depth_crop[1] = n->day;
         memcpy(ein.V, n->V, 64), memcpy(ein.P, n->P, 64);
         ein.zn = n->zn, ein.zf = n->zf, ein.pivot_dist = 0;
         ein.origin_lower_left = renderer_origin_lower_left();

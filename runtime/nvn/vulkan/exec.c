@@ -7412,6 +7412,19 @@ static NvnTexture *st_last_depth;    // the latest twinned depth target drawn in
 static float st_last_zr[2];
 static TexBackend *g_eye_depth[2];   // per eye output: that eye's scene depth (stereo_eye_post)
 static float g_eye_zr[2][2];
+// The latest twinned depth target of the window image's size drawn into this frame: the scene's own depth, at full eye
+// size. The latest depth of all (st_last_depth) is the game's quarter-size copy (480 x 270, made after the scene for its
+// ambient occlusion), whose texels are 3.6 x 6.4 eye pixels: the edge pass's fade read through it came out in steps
+// along every surface seen at a shallow angle (the sea at the table's edge, headset 2026-11-18).
+static NvnTexture *st_full_depth;
+static float st_full_zr[2];
+static TexBackend *g_eye_full_depth[2];
+static float g_eye_full_zr[2][2];
+static void note_depth(void) {
+    st_last_depth = st.rt.depth, memcpy(st_last_zr, st.depth_range[0], sizeof st_last_zr);
+    if (g_eye_out_ok && st.rt.depth->width == g_eye_out.width && st.rt.depth->height == g_eye_out.height)
+        st_full_depth = st.rt.depth, memcpy(st_full_zr, st.depth_range[0], sizeof st_full_zr);
+}
 static bool g_eye_capture[2];        // per eye output: of a Backdrop capture frame (ring_phase)
 static uint32_t g_eye_added[2];      // per eye output: the draws the wide culling added to its frame
 static void clone_target(NvnTexture *dst, bool *ok, const NvnTexture *win, uint32_t fmt, const char *label) {
@@ -7463,8 +7476,11 @@ static void stereo_composite(void) {
         stereo_note_composite(e);  // (the poses this output was rendered with go with it into the layer)
         g_eye_depth[e] = st_last_depth ? vk_tex(st_last_depth, true) : NULL;
         memcpy(g_eye_zr[e], st_last_zr, sizeof st_last_zr);
+        g_eye_full_depth[e] = st_full_depth ? vk_tex(st_full_depth, true) : NULL;
+        memcpy(g_eye_full_zr[e], st_full_zr, sizeof st_full_zr);
         stereo_composite_ring(e);
     }
+    st_full_depth = NULL;  // (the next output's own: a frame that draws none falls back to the quarter-size copy)
     static uint64_t n[2];
     if (n[g_eye]++ % 600 == 0) LOG("[stereo] eye %d composite #%llu (frame %llu)\n", g_eye, (unsigned long long)n[g_eye], (unsigned long long)renderer_exec_frame());
 }
@@ -7909,7 +7925,7 @@ static bool ring_early(CmdRec *r, bool indexed) {
     bool skip = tw ? c >= 1 : (c == 1 || c == 3);
     ring_dump(r, indexed, tw ? 1 : 0, c);
     if (skip) {
-        if (tw) st_last_depth = st.rt.depth, memcpy(st_last_zr, st.depth_range[0], sizeof st_last_zr);
+        if (tw) note_depth();
         if (g_eye == 1) eye1_skip_rt();  // (its counters)
         Range s5 = st.ubuf[0][5];
         if (s5.addr && s5.size == 320) {
@@ -8050,7 +8066,7 @@ static void draw_(CmdRec *r, bool indexed) {
         }
     }
     if (g_eye >= 0) {  // (stereo executor)
-        if (st.rt.depth && vk_tex_twinned(st.rt.depth)) st_last_depth = st.rt.depth, memcpy(st_last_zr, st.depth_range[0], sizeof st_last_zr);
+        if (st.rt.depth && vk_tex_twinned(st.rt.depth)) note_depth();
         if (wx_composite && !wx_mirror) stereo_composite();
         else if (g_eye == 0 && st_hud_alpha && g_hud_win && st.rt.ncolor && st.rt.color[0] == g_hud_win) stereo_hud_redirect();
         if (eye1_skip_rt()) return;
@@ -10429,6 +10445,12 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
                                 .day = zb && zb->scalable && zb->ay > 0 ? zb->sy / zb->ay : 1,
                                 .capture = g_eye_capture[eye], .added = g_eye_added[eye],
                                 .zn = g_eye_zr[eye][0], .zf = g_eye_zr[eye][1]};
+            TexBackend *fb = g_eye_full_depth[eye];
+            if (fb && fb->image) {
+                ep.depth_full = fb, ep.depth_full_layer = vk_b_layered(fb) ? (uint32_t)eye : 0;
+                ep.fax = fb->scalable && fb->ax > 0 ? fb->sx / fb->ax : 1, ep.fay = fb->scalable && fb->ay > 0 ? fb->sy / fb->ay : 1;
+                ep.fzn = g_eye_full_zr[eye][0], ep.fzf = g_eye_full_zr[eye][1];
+            }
             ep.have_matrices = stereo_eye_matrices(eye, ep.V, ep.P);
             if (!ep.have_matrices) for (int i = 0; i < 16; i++) ep.V[i] = ep.P[i] = i % 5 == 0;
             extern void scene_eye_post(const StereoEyePost *e);  // (scene.c: the Surroundings row's Backdrop, into the output)
