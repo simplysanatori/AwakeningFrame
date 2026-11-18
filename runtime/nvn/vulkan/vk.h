@@ -9,7 +9,11 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#ifdef __ANDROID__
+#include <volk.h>  // (every Vulkan function through volk: Android's loader exports 1.1 only before API 33)
+#else
 #include <vulkan/vulkan.h>
+#endif
 #if __has_include(<vma/vk_mem_alloc.h>)
 #include <vma/vk_mem_alloc.h>
 #else
@@ -20,9 +24,19 @@
 #include "../maxwell/shader.h"
 
 void vk_device_fault_report(void);
+#ifdef __ANDROID__
+void vk_android_load(void);  // android_driver.c: the Vulkan driver (a custom one through libadrenotools, or the system's)
+#endif
 #define VK_CHECK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { if (r_ == VK_ERROR_DEVICE_LOST) vk_device_fault_report(); \
     FATAL("%s failed: %d (%s:%d)\n", #x, r_, __FILE__, __LINE__); } } while (0)
 
+// Swapchain images the renderer keeps (the driver decides how many it makes from the count asked: a Mali-G68 made 9
+// for 8 asked). From mamcjr's LASRecompAndroid (MIT).
+#ifdef __ANDROID__
+#define VK_SC_MAX 16
+#else
+#define VK_SC_MAX 8
+#endif
 typedef struct {
     VkInstance inst;
     VkPhysicalDevice phys;
@@ -32,6 +46,8 @@ typedef struct {
     uint32_t ts_bits;          // the queue's timestampValidBits (0: no timestamps)
     VmaAllocator vma;
     VkPhysicalDeviceProperties props;
+    VkDriverId driver_id;  // (device.c; 0 when the driver doesn't say)
+    bool cpu_astc;  // ASTC decoded on the CPU although the driver lists it (device.c)
     VkPipelineCache pcache;
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
@@ -48,6 +64,8 @@ typedef struct {
     bool heap_no_split;        // ... whose mapping page protection must never split (Turnip / msm: exec.c backend_guest_heap_prepare)
     bool heap_sparse;          // ... made lazily: a sparse buffer, driver memory per granule on first use (exec.c heap_lazy_try)
     VkQueue sparse_queue;      // (heap_sparse: the queue its binds go to - a sparse-only family's own, else NULL: the main queue)
+    bool cb_release;  // command buffers reset with RELEASE_RESOURCES before each begin: Arm's driver (device.c; LARECOMP_VK_CB_RELEASE)
+    bool cb_early_reset;  // a slot's command buffers reset once its submission completes: PanVK (device.c; LARECOMP_VK_CB_EARLY_RESET)
     bool ssbo_chunks;  // stores and atomics from fragment and vertex shaders (exec.c: the heap in chunks counts misses)
     bool lazy_heap, bda;  // the heap imported chunk by chunk (device.c lazy_heap_predicted), buffer device addresses enabled for it
     bool heap_probe;      // one import tried at the start, lazy chunks if it runs out of memory (exec.c whole_import_probe_oom)
@@ -60,11 +78,16 @@ typedef struct {
     VkSurfaceKHR surface;
     VkSwapchainKHR swapchain;
     VkFormat sc_format;
-    VkExtent2D sc_extent;
+    VkExtent2D sc_extent;  // the window's size: what everything drawn into the window image is laid out in
+    VkExtent2D sc_phys;    // the swapchain images' own size (the panel's orientation when pre-rotated: sc_quarter)
+    int sc_quarter;        // Android pre-rotation: 0, or quarter turns (1: 90 degrees, 3: 270) applied when drawing into them
     uint32_t sc_count;
-    VkImage sc_images[8];
-    VkImageView sc_views[8];
+    VkImage sc_images[VK_SC_MAX];
+    VkImageView sc_views[VK_SC_MAX];
 } VkG;
+// (device.c) a rect / viewport of the window (sc_extent) in the swapchain image (sc_phys): turned with sc_quarter
+VkRect2D vk_sc_rect(int32_t x, int32_t y, uint32_t w, uint32_t h);
+VkViewport vk_sc_viewport(float x, float y, float w, float h);
 void vk_log_memory(const char *why);  // (device.c: per-heap budget and use, at start and on allocation failures)
 extern VkG g_vk;
 
@@ -105,6 +128,8 @@ typedef struct TexBackend {
     uint64_t data_hash, sample_hash, checked_frame, full_frame;
     uint32_t wgen;  // page write tracking generation at the last upload check (textures.c)
     bool scalable, presented;
+    bool ao;             // (scalable) the game's ambient occlusion: at its own scale (textures.c tex_ao)
+    bool shadow;         // (scalable) the game's shadow map: at its own scale (textures.c tex_shadow)
     uint64_t touched_frame, frame_cleared;
     uint32_t level_gen;
     float sx, sy;        // the scale the contents were drawn at (scalable textures)
@@ -115,6 +140,7 @@ typedef struct TexBackend {
     uint32_t pending_uv_off;
     uint8_t astc_bw, astc_bh;  // ASTC without GPU support: decoded to RGBA8 on upload (runtime/nvn/astc.c)
     bool astc_srgb;
+    uint8_t cpu_bc;      // a BC format the driver doesn't list: decoded on upload (runtime/nvn/bc.h kind)
     int tp;              // runtime/nvn/texpatch.c: 0 not checked yet, -1 none, else known UI texture + 1
     uint32_t tp_gen;     // texpatch_generation() it was last uploaded with
     int reg;  // slot in textures.c's live list + 1 (a reboot destroys them all)
@@ -134,8 +160,8 @@ typedef struct TexBackend {
 
 TexBackend *vk_tex(NvnTexture *t, bool for_render);  // backend image (uploads CPU contents unless for_render)
 // (stereo executor) eye1: every twinned render target's backend becomes its eye-1 twin (made on first use); !eye1:
-// back to eye 0's. Twinned: 16:9 render targets (the scalable ones) and the guest-sized ambient occlusion targets,
-// except presented (window) images. Returns how many were swapped.
+// back to eye 0's. Twinned: the 16:9 render targets (the scalable ones, the ambient occlusion's among them; not the
+// shadow map), except presented (window) images. Returns how many were swapped.
 int vk_stereo_swap(bool eye1);
 // (stereo) eye 0 wrote shared texture t from a twin (a copy): t is twinned from the next eye-1 run on, its twin filled
 // with eye 0's image first. false: twinned already, or not a candidate (presented, no image).

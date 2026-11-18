@@ -38,8 +38,9 @@ gamescope the window shows on the Frame's own display; for a check without one, 
 ## Ported from the Android fork (Nycolazs/LASRecomp-Android-Plus)
 The fork is built on beta_5 plus a phone port; most of what it fixed for Turnip is already in beta_6. Taken:
 - Quad shuffles in fragment shaders emulated through derivatives where the GPU reports subgroup shuffles for compute
-  only (older Turnip hung the GPU otherwise). The Frame's driver reports fragment support, so nothing changes here;
-  `LARECOMP_VK_FRAG_SUBGROUPS=0` forces the emulation for a test.
+  only (older Turnip hung the GPU otherwise). The Frame's driver reports fragment support, so nothing changes here.
+  LAS Recomp 0.6 has the same fix, and its code is the one kept: `LARECOMP_VK_QUAD_DERIV=1` forces the emulation for a
+  test.
 - `LARECOMP_VK_ACQUIRE_FENCE=1`: wait for the window image with a fence instead of a semaphore (a device-lost lever;
   off by default).
 Left out: Turnip's LRZ off (`TU_DEBUG=nolrz`: an Adreno 650 water artefact, Android only; the env variable works by

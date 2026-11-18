@@ -1,9 +1,10 @@
 #!/bin/bash
 # Looks for personal data before anything is published. Adapted from GalaxyFrame's tools/privacy-check.sh
 # (and Moonlight XR Native's).
-#   steam-frame/privacy-check.sh                 what this work added: the lines added since upstream/beta_6 (committed,
-#                                                staged or not, and new untracked files), and the authors, committers and
-#                                                messages of the commits since then
+#   steam-frame/privacy-check.sh                 what this work added: the lines added since upstream/release/0.6, the
+#                                                LAS Recomp branch last merged (committed, staged or not, and new
+#                                                untracked files; of a merge, what its resolution added), and the
+#                                                authors, committers and messages of the commits since then
 #   steam-frame/privacy-check.sh --since REF     the same against another base (a branch, tag or commit)
 #   steam-frame/privacy-check.sh DIR|TAR         every file under DIR, or inside a release archive
 # (upstream's own files carry their authors' addresses, so the whole tree is not scanned by default.)
@@ -26,13 +27,14 @@ cd "$(dirname "$0")/.." || exit 2
 PAT="${AF_PRIVACY_PATTERNS:-${GQ_PRIVACY_PATTERNS:-${MLXR_PRIVACY_PATTERNS:-$HOME/.config/moonlight-xr-privacy-patterns.txt}}}"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 MODE=files
-SINCE=upstream/beta_6
+SINCE=upstream/release/0.6
 if [ "${1:-}" = "--since" ]; then SINCE=${2:?--since needs a ref}; shift 2; fi
 if [ $# -eq 0 ]; then
     git rev-parse --verify -q "$SINCE^{commit}" > /dev/null || { echo "privacy-check: no such ref: $SINCE (--since REF)"; exit 2; }
     MODE=history; BASE=.
     git log --format='@@@%H%n%an <%ae>%n%cn <%ce>%n%B%n@@@END' "$SINCE..HEAD" > "$TMP/meta"
-    { git log -p -U0 --no-color --no-ext-diff --format='@@@COMMIT %H' "$SINCE..HEAD"
+    # (--remerge-diff: a merge of upstream shows what its resolution wrote, not upstream's own lines)
+    { git log -p --remerge-diff -U0 --no-color --no-ext-diff --format='@@@COMMIT %H' "$SINCE..HEAD"
       echo '@@@COMMIT worktree'; git diff -U0 --no-color --no-ext-diff HEAD
       git ls-files -o --exclude-standard -z | while IFS= read -r -d '' f; do
           [ -f "$f" ] && ! grep -qI . "$f" 2> /dev/null && continue

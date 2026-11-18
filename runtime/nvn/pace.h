@@ -14,6 +14,10 @@ void pace_hitch(const char *why);
 // any thread: a user setting that changes the GPU's load ("resolution", "upscaler", "anti-aliasing"; not Dynamic's own
 // steps): the 30 fps hold and its backoff start over, and 60 gets a fresh try (pace.c)
 void pace_settings_changed(const char *what);
+// any thread: Dynamic resolution looks for 60 from its hold at 30 (output_scale.c): a hold of the game's 30 fps mode ends
+// now, as after headroom, but the backoff is kept and a hold that follows doesn't double it (Dynamic waits its own
+// way between tries) (pace.c)
+void pace_try_60(void);
 // any thread: the VR mode's lock (runtime/xr): 30 holds the game in its 30 fps mode for good (90 Hz displays), 0 / 60
 // leaves the choice to the pacer
 void pace_xr_lock(int fps);

@@ -82,6 +82,7 @@ typedef struct {
                             // (c0 0x110 + 16 * i vertex, 0x510 + 16 * i fragment): the slots it actually uses
     bool uses_rscale;       // reads the resolution-scale table (fragment/compute buffer 18): float4 [0] = render
                             // target scale, [1 + i] = allocation scale of texture i
+    bool uses_ao_taps;      // (fragment) reads rscale[65].y, the AO blur's tap scale, or .z, AO Off (translate.c ao_grid_fix): 66 rows
     uint32_t local_mem;     // bytes of local memory
     uint32_t num_insts;
     // (GLSL fragment, LARECOMP_VK_PUSH_CB=1) constant buffer words moved into push constants (pcw[k]: the word at byte
@@ -110,8 +111,6 @@ typedef struct {
 // slots by the entry's slot bits (exec.c gmap_build) - which slots each program writes.
 #define GFAST_FLAG_WORD ((32u << 20) / 4 - 64u)
 extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
-// 0: no subgroup shuffles in fragment shaders (Adreno: compute only); quad shuffles emulated with derivatives
-extern int maxwell_frag_subgroups;
 // (GLSL / Vulkan) The heap reaches shaders in chunks of 1 << maxwell_gmem_chunk_shift bytes in two cases:
 // - windows of one import where a storage buffer can't span the heap (issue #8) and lazy chunks aren't possible (or
 //   LARECOMP_VK_GMEM_LAZY=0): one binding per window (GMEM_CHUNK_BINDING + k in set GMEM_CHUNK_SET) and plain
@@ -141,6 +140,23 @@ extern bool maxwell_gmem_fs_miss;
 extern bool maxwell_glsl_stack_vars;
 extern bool maxwell_glsl_structured;  // (the backend's default for this GPU: LARECOMP_VK_STATIC_STACKS / _STRUCTURE override)
 extern bool maxwell_glsl_push;  // (the backend's default: c1 inlined + push constants; LARECOMP_VK_INLINE_C1 / _PUSH_CB override)
+// The push constants part of it: the backend's default (exec.c: not on Qualcomm's own driver); LARECOMP_VK_PUSH_CB
+// overrides.
+extern bool maxwell_glsl_push_cb;
+// (GLSL) fmin / fmax / saturate as the GPU's own min / max / clamp instead of the helpers that test for NaN: for GPUs
+// whose min / max return the operand that isn't NaN and whose clamp to [0, 1] saturates NaN to 0 (Adreno, as D3D
+// requires). The backend's default (exec.c: Android); LARECOMP_VK_FAST_MINMAX=1 / =0 overrides.
+extern bool maxwell_glsl_fast_minmax;
+// (GLSL) fragment quad xor shuffles (SHFL.BFLY with lane mask 1 / 2 / 3) as the neighbour's value from fine
+// derivatives, and the lane as the pixel's place in its quad: for drivers without subgroup operations in fragment
+// shaders (Turnip on Adreno 6xx lists compute only; subgroupShuffleXor there hung the GPU). The backend's default
+// (exec.c); LARECOMP_VK_QUAD_DERIV overrides.
+extern bool maxwell_glsl_quad_deriv;
+// (GLSL) the fragment shaders' HSV recolour (Cosmetics colours: ltint[0].w < 0) behind the specialization constant
+// RECOLOUR (false unless the pipeline is built for it, exec.c): unused, its code still cost Turnip on an Adreno 650 40%
+// of the house's lit pass. The backend's default (exec.c: Adreno, Mali); LARECOMP_VK_TINT_BRANCH overrides.
+extern bool maxwell_glsl_tint_branch;
+#define RECOLOUR_SPEC_ID 100
 // VR: the game's light-culling compute gives every tile one frustum wide enough for any eye (translate.c
 // light_tiles_fix). Set by the Vulkan backend in the VR mode before any translation.
 extern bool maxwell_vr_light_tiles;
