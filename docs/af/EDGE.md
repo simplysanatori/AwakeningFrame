@@ -108,6 +108,29 @@ everywhere: the overworld, interiors, dungeons, side views.
 | `LARECOMP_VR_EDGE_SMOOTH=0` | foveation's blocks left as they are |
 | `LARECOMP_VR_EDGE_SMOOTH=all` | (a test) with Table Edge off too: the fade's main pass with every pixel kept whole, only to smooth foveation's blocks (one full-size pass per eye, plus the block-centre images) |
 | `LARECOMP_VR_EDGE_DEBUG=6` | the factor in red, geometry in green, over the dimmed eye (unsmoothed, no fit's floor fade) |
+| `LARECOMP_VR_EDGE_ROUND=1` | (off) each pixel's ray from its output row: the fade round as described above ("The fade's rows" below); the draws past it are then left out |
+| `LARECOMP_VR_EDGE_BLACK=<units>` | (overworld fit) black past this at the most, `W` 40% of it: a smaller round table; with `_ROUND=1` the culling follows it |
+
+### The fade's rows (2026-11-18)
+
+Each pixel's ray is taken from the colour image's row (`q`, `qmap(p)`): `1 - 2 q.y`. With the game's lower-left origin
+(`renderer_origin_lower_left()`, 1 in the overworld) that row is the output's mirrored, so the fade reads the top of the
+eye as its bottom: a far pixel at the top gets the ray of a near one, steep down, and its point on the table (the ray
+times its depth) lands near the eye. `scene.c` (`(g.y * 2 - 1) * ce.w`) and `foveation.c` turn the row by the origin;
+the fade does not. Seen at the beach (Field_16E), the owner's rig, seated: the factor (`LARECOMP_VR_EDGE_DEBUG=6`) is 1
+along the top rows, posts 24 units from the centre (black past 21.8) are lit, and void pixels whose rays are nearly
+level read 1. So today's fade is not round about the table's centre: far rows stay lit well past its black radius (the dark
+band is mostly the corners: rays far to the side).
+The other modes (Black, fog, gradient, passthrough) use the same ray expression in the main pass; untouched.
+
+`LARECOMP_VR_EDGE_ROUND=1` takes the row from the output position (`p`, as the colour is shown), in the Fade mode only
+(`fw.w`): the top rows go black past the radius, the corners darken. It changes the picture (at Mabe, seated: the
+houses past the weathercock go black; in Marin and Tarin's house a blue glow lit above the back wall goes), so it is
+off by default; the owner chooses. Only with it does `edge_fade_disc` answer, and so only then do the
+eyes' passes leave out the draws past the circle (PASSES.md "Draws the eyes cannot see") and the table's culling camera
+take no more than the square the fade can light (`vr_cull_note_fade`, `LARECOMP_VR_CULL_FADE=0`: not). Without it a
+smaller black radius (`LARECOMP_VR_EDGE_BLACK`) would cut the culling to a square the fade does not end inside: a
+straight cut at the far side.
 
 ## The Mysterious Woods' fog: the dome and the edge curtain
 

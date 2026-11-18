@@ -47,6 +47,8 @@ static struct {
     bool smooth_off;           // LARECOMP_VR_EDGE_SMOOTH=0: the foveated passes' coarse blocks are left as they are
     bool smooth_all;           // LARECOMP_VR_EDGE_SMOOTH=all: with Table Edge off too, the blocks smoothed (no fade)
     bool fit;                  // fade, overworld: fitted inside the floor the culling draws (LARECOMP_VR_EDGE_FIT=0: not)
+    float black;               // fade, overworld fit: black past this at the most (LARECOMP_VR_EDGE_BLACK; radius + width)
+    bool round;                // fade: each pixel's ray from its output row (LARECOMP_VR_EDGE_ROUND=1; see fade_k)
 } cfg;
 
 // LARECOMP_VR_EDGE_DEPTH=quarter: the passes read the game's quarter-size depth copy, as before (a comparison)
@@ -105,13 +107,18 @@ static void cfg_init(void) {
     cfg.smooth_off = (e = getenv("LARECOMP_VR_EDGE_SMOOTH")) && !strcmp(e, "0");
     cfg.smooth_all = (e = getenv("LARECOMP_VR_EDGE_SMOOTH")) && !strcmp(e, "all");
     cfg.fit = !((e = getenv("LARECOMP_VR_EDGE_FIT")) && atoi(e) == 0);
+    // LARECOMP_VR_EDGE_BLACK=<units>: the fitted fade (overworld) black past this at the most, its width 40% of it as
+    // always: a smaller round table for less to draw (the culling follows it, vr_cull_note_fade). Default radius + width
+    cfg.black = (e = getenv("LARECOMP_VR_EDGE_BLACK")) && atof(e) > 0 ? (float)atof(e) : cfg.radius + cfg.width;
+    cfg.round = (e = getenv("LARECOMP_VR_EDGE_ROUND")) && atoi(e) == 1;
     g_depth_quarter = (e = getenv("LARECOMP_VR_EDGE_DEPTH")) && !strcmp(e, "quarter");
     float s = (e = getenv("LARECOMP_VR_SCALE")) && atof(e) > 0 ? (float)atof(e) : 0.067f;
     float d = (e = getenv("LARECOMP_VR_DIST")) && atof(e) > 0 ? (float)atof(e) : 1.0f;
     cfg.pivot_default = d / s;
     if (cfg.mode == EDGE_FADE)
-        LOG("[edge] mode fade: clear within %.1f units of the table's centre, black past %.1f (rooms: their farthest corner + %.1f at least)\n",
-            cfg.radius, cfg.radius + cfg.width, cfg.room_margin);
+        LOG("[edge] mode fade: clear within %.1f units of the table's centre, black past %.1f (rooms: their farthest corner + %.1f at least)%s%s\n",
+            cfg.radius, cfg.radius + cfg.width, cfg.room_margin, cfg.black < cfg.radius + cfg.width ? "; fitted (overworld): black past LARECOMP_VR_EDGE_BLACK at most" : "",
+            cfg.round ? "; rays from the output's rows (LARECOMP_VR_EDGE_ROUND=1)" : "");
     else
     LOG("[edge] mode %s, fog %.2f..%.2f x pivot distance, edge fade radius %.3f of the height x %.2f, haze desat %.2f x%.2f%s\n",
         cfg.mode == EDGE_BLACK ? "black" : cfg.mode == EDGE_FOG ? "fog" : cfg.mode == EDGE_GRADIENT ? "gradient" : cfg.mode == EDGE_FADE ? "fade" : "passthrough",
@@ -147,6 +154,7 @@ void edge_set_mode(int vrs) {
     EdgeMode old = edge_mode();
     if (old == k[vrs]) return;
     __atomic_store_n(&g_mode, (int)k[vrs], __ATOMIC_RELEASE), g_mode_changed = true;
+    if (k[vrs] != EDGE_FADE) vr_cull_note_fade(0);  // (the table's culling: no fade to follow now)
     LOG("[edge] mode %s (VR settings; was %s)\n", vrs == 0 ? "black" : vrs == 1 ? "fade" : "passthrough",
         old == EDGE_BLACK ? "black" : old == EDGE_FADE ? "fade" : old == EDGE_PASSTHROUGH ? "passthrough" : old == EDGE_FOG ? "fog" : "gradient");
 }
@@ -172,7 +180,7 @@ void edge_set_mode(int vrs) {
     "  vec4 rb;    // the fade band at each edge of the quadrilateral (game units)\n"                                  \
     "  vec4 sky;   // the sky tone, how much of the backdrop it takes\n"                                               \
     "  vec4 fd;    // fade: the table's centre (world), radius (units)\n"                                               \
-    "  vec4 fw;    // fade: width (units), -, -, -\n"                                                                   \
+    "  vec4 fw;    // fade: width (units), -, -, rays from the output's rows (LARECOMP_VR_EDGE_ROUND)\n"                                                                   \
     "  vec4 pf;    // the present's screen filter: mode, the rig's blink (screen_filter.h)\n"                         \
     "  vec4 va;    // foveation (fov_shade): on, foci, r0, r1\n"                                                      \
     "  vec4 vc;    // the foci in the colour image's pixels: x0 y0 x1 y1\n"                                            \
@@ -285,14 +293,17 @@ static const char *tint_fs =
 
 // (fade) how much of the pixel at output position p is kept: its point on the table (its depth, else where its ray
 // meets the floor) against the round fade, and against the edges of the floor the culling draws (nothing past them
-// is drawn, so the fade has ended before them: a cut never shows)
+// is drawn, so the fade has ended before them: a cut never shows). The ray's height comes from q, the colour's row:
+// with the game's lower-left origin (the overworld's) that is mirrored, the top of the eye taken for its bottom, and
+// the fade is not round (far rows lit past the black radius, near ones dimmed). LARECOMP_VR_EDGE_ROUND=1 (fw.w) takes
+// it from p, the output's row, as the colour is shown; docs/af/EDGE.md "The fade's rows"
 // (fade) the treated pixel at output position p (a black pixel stays black: its depth is not read, and the void is
 // most of the eye)
 #define FADE_FUNCS \
     "float fade_k(vec2 p, float d, bool geo) {\n" \
     "  if (u.fl.z > 4.5) return 1.0;\n"  /* (smoothing only: Table Edge off, LARECOMP_VR_EDGE_SMOOTH=all) */ \
     "  vec2 q = qmap(p);\n" \
-    "  vec2 nd = vec2(p.x * 2.0 - 1.0, 1.0 - 2.0 * q.y);\n" \
+    "  vec2 nd = vec2(p.x * 2.0 - 1.0, 1.0 - 2.0 * (u.fw.w > 0.5 ? p.y : q.y));\n" \
     "  vec2 xy = vec2((nd.x + u.proj.z) / u.proj.x, (nd.y + u.proj.w) / u.proj.y);\n" \
     "  float z = (d - u.zt.z) / u.zt.w;\n" \
     "  if (u.fl.x > 0.5) z = z * 2.0 - 1.0;\n" \
@@ -376,7 +387,7 @@ static const char *main_fs =
     "  float d = u.fl.z > 3.5 && max(s.r, max(s.g, s.b)) <= 0.0 ? 1.0 : dsample(q);\n"
     "  bool geo = is_geo(d);\n"
     // the pixel's ray in eye space (x / depth, y / depth), and its distance from the eye in game units
-    "  vec2 nd = vec2(p.x * 2.0 - 1.0, 1.0 - 2.0 * q.y);\n"
+    "  vec2 nd = vec2(p.x * 2.0 - 1.0, 1.0 - 2.0 * (u.fw.w > 0.5 ? p.y : q.y));\n"  // (fw.w: fade only, see fade_k)
     "  vec2 xy = vec2((nd.x + u.proj.z) / u.proj.x, (nd.y + u.proj.w) / u.proj.y);\n"
     "  vec3 ray = vec3(xy, -1.0);\n"
     "  float z = (d - u.zt.z) / u.zt.w;\n"
@@ -792,7 +803,7 @@ static bool fade_fit(int eye, const float q[4][2], float c[3], float *r, float *
                 float sc = m - 0.25f * sqrtf(ox * ox + oz * oz);
                 if (sc > best) best = sc, bo[0] = ox, bo[1] = oz, bin = m;
             }
-        float rb = fmaxf(fminf(cfg.radius + cfg.width, bin - FADE_FIT_MARGIN), FADE_MIN_BLACK);
+        float rb = fmaxf(fminf(fminf(cfg.radius + cfg.width, cfg.black), bin - FADE_FIT_MARGIN), FADE_MIN_BLACK);
         double now = plat_now_ns() / 1e9;
         float jump = hypotf(c[0] - f.anchor[0], c[2] - f.anchor[1]);
         if (!f.ok || now - f.t > 0.5 || jump > 3.0f) f.off[0] = bo[0], f.off[1] = bo[1], f.rb = rb;  // (a new place: no glide)
@@ -807,6 +818,13 @@ static bool fade_fit(int eye, const float q[4][2], float c[3], float *r, float *
     *w = fminf(fmaxf(f.rb * 0.4f, 3.0f), cfg.width);
     *r = fmaxf(f.rb - *w, 0.5f);
     *cut = drawn_dist(q, c[0], c[2], -1, 0) < f.rb + 0.5f * FADE_FIT_MARGIN;  // (the circle reaches past the drawn floor: fade to its edges too)
+    return true;
+}
+
+static struct { bool ok; float off[2], black; double t; } g_disc;  // (edge_fade_disc) the latest eye-0 fade pass's, overworld
+bool edge_fade_disc(float off[2], float *black) {
+    if (!g_disc.ok || edge_mode() != EDGE_FADE || plat_now_ns() / 1e9 - g_disc.t > 0.25) return false;
+    off[0] = g_disc.off[0], off[1] = g_disc.off[1], *black = g_disc.black;
     return true;
 }
 
@@ -844,7 +862,16 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
                 float dx = (i & 1 ? hi[0] : lo[0]) - fade_c[0], dz = (i & 2 ? hi[2] : lo[2]) - fade_c[2];
                 fade_r = fmaxf(fade_r, sqrtf(dx * dx + dz * dz) + cfg.room_margin);
             }
+        float anchor[2] = {fade_c[0], fade_c[2]};
         if (ow == 1 && cfg.fit && !(reach > 0) && vr_cull_drawn(drawn)) fitted = fade_fit(eye, drawn, fade_c, &fade_r, &fade_w, &cut);
+        if (eye == 0) {  // (only a round fade can be culled to: LARECOMP_VR_EDGE_ROUND)
+            g_disc.ok = ow == 1 && cfg.round, g_disc.t = plat_now_ns() / 1e9;
+            g_disc.off[0] = fade_c[0] - anchor[0], g_disc.off[1] = fade_c[2] - anchor[1], g_disc.black = fade_r + fade_w;
+            // (the table's culling) the farthest from the table's centre the fade can be lit: the settings', not this fit's,
+            // which is fitted inside the floor that culling draws (it would follow its own cut down)
+            float lit = cfg.fit ? fmaxf(fminf(cfg.radius + cfg.width, cfg.black), FADE_MIN_BLACK) : cfg.radius + cfg.width;
+            vr_cull_note_fade(g_disc.ok && !(reach > 0) ? lit + hypotf(g_disc.off[0], g_disc.off[1]) : 0.0f);
+        }
     }
     EdgeEye ein = {.eye = eye};
     const EdgeEye *in = &ein;
@@ -925,7 +952,7 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
         }
     }
     memcpy(u.sky, cfg.sky, sizeof cfg.sky), u.sky[3] = cfg.skymix;
-    memcpy(u.fd, fade_c, sizeof fade_c), u.fd[3] = fade_r, u.fw[0] = fade_w;
+    memcpy(u.fd, fade_c, sizeof fade_c), u.fd[3] = fade_r, u.fw[0] = fade_w, u.fw[3] = mode == EDGE_FADE && cfg.round;
     if (fitted && cut) {
         memcpy(u.dq, drawn, sizeof drawn);
         u.dk[0] = 1, u.dk[1] = FADE_CUT_BAND, u.dk[2] = FADE_CUT_MARGIN;

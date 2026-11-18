@@ -85,6 +85,9 @@ typedef struct {
     float eye[3], fwd[3], right[3], up[3];
     bool ok;
 } CamRef;
+// (exec.c, render thread) the eye cameras of the latch of `frame` (both eyes; the ones the executor substitutes in that
+// frame's draws). false: no latch for that frame, or no eye cameras for it
+bool cam_override_eye_refs(uint64_t frame, const CamRef **eye0, const CamRef **eye1);
 typedef enum { CAM_OFF, CAM_IDENTITY, CAM_PASSTHROUGH, CAM_ORBIT, CAM_SPIN, CAM_STEREO } CamKind;
 typedef struct {
     CamKind kind;

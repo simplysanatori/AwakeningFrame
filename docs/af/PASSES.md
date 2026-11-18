@@ -100,7 +100,11 @@ Tools:
 - `LARECOMP_COPY_READERS=1`: every 10 s a `[copyread]` line per kind of copy: whether the destination was read (in the
   same frame, the next, later) or overwritten first, and by whom, over the whole run.
 - `tools/mv_check.sh --mode env --base-env '...' --cand-env '...' [--cand-env '...'] [--env '...'] [--more]`: a switch
-  on and off, several candidates against one base and noise run; `--base-only` for an audit run.
+  on and off, several candidates against one base and noise run; `--base-only` for an audit run. `--xr` compares the
+  eye images as the headset gets them (Table Edge applied, `MOCK_XR_SHOT_REQ`) instead of the eye outputs before the
+  edge pass; `--spot 'NAME|LEVEL:LOCATOR|'` (repeatable) replaces the spot list; `--base-bin PATH` runs the base and
+  noise sessions on another binary (keep a copy next to `lasgame.so`, e.g. `build/lasrecomp.base`: the game code and
+  the fonts are found beside the binary).
 
 Mabe at frame 1320 (Frame-like profile, 1728² eyes): 41 passes (37 multiview), 15 of them only clears, 1087 draws, 14
 copies (7 full-size layer copies), 5 dispatches. The copies and their readers over a whole run:
@@ -158,6 +162,57 @@ So the deferral costs 0.7 to 0.9 ms there although it removes six passes, and it
 0.1 to 0.4 ms. With the deferral and the alias on: `LARECOMP_CHUNK_PASSES=0` 15.37 / 13.98 (0.7 ms less render CPU at
 Mabe), `LARECOMP_SHADOW_SCALE=0.5` 15.51 / 13.70, Table Edge off 14.86 / 13.51, the edge reading the quarter-size depth
 (`LARECOMP_VR_EDGE_DEPTH=quarter`) 15.37 / 13.71, FXAA 16.41 / 14.61, SMAA 17.12 / 15.18.
+
+## Draws the eyes cannot see (VR, overworld; on by default)
+
+The game culls on its game thread with one frustum: in VR the table's culling camera (`vr_cull.c`, STREAM.md), a
+rectangle about the table's centre (+-22.3 x +-23.6 units outdoors) cut to the bounding rectangle of what both eyes see
+of it. A frustum can only give a rectangle. The executor (`exec.c`, "the draws the eyes cannot see") knows more for a
+draw with a world box (`ring_world_box`: the vertex box through block 2's model matrix, or the bone palette's matrix
+for a skinned or attached mesh): this frame's own eye cameras (`cam_override_eye_refs`) and, with the round fade
+(EDGE.md "The fade's rows"), where Table Edge Fade is black (`edge_fade_disc`). A draw whose box (padded 0.25 units,
+2 for a palette mesh) is
+
+- **view**: outside both eyes' frusta (left, right, bottom, top, near planes of each eye), or
+- **fade** (round fade only): wholly past the black circle plus 1 unit, while both eyes are inside the circle (then
+  nothing past it can stand in front of anything inside: the fade is a cylinder). A box reaching under the floor plane
+  is taken where the eyes' rays through its bottom meet the plane (cleared depth reads that point; water drawn over it),
+
+is left out of the eyes' full-size passes, the depth pre-pass and the colour pass alike (the class is memoised per
+frame, so the EQUAL test of the colour pass meets the same set), and kept in the small passes. A **shadow** caster
+(the 2048 x 2048 shadow pass, shared, drawn before the frame's camera is latched) is left out when its box, swept along
+the light (the shadow pass's orthographic block 1: its depth row) down to the lowest box the eyes kept last frame less
+1 unit, lies outside both of the previous frame's eye frusta widened by 0.3 NDC (as `vr_cull.c`'s margin), or past the
+round fade's circle. Kept: blended, instanced and unplaceable draws, a box whose matrix sits at the world's origin (a
+mesh placed another way), everything indoors and in side views, the Surroundings' ring draws (Low, Full) and the frames
+around a Backdrop capture. Table Edge Off and Passthrough get view and shadow (both leave the picture as it was).
+
+| Variable | Meaning |
+|---|---|
+| `LARECOMP_VR_CULL_DRAWS` | unset / `1`: all; `0`: none; or a list of `view`, `shadow`, `fade` (any separator: `view+shadow`). `fade` acts only with `LARECOMP_VR_EDGE_ROUND=1` |
+| `LARECOMP_VR_CULL_DRAWS_MARGIN=<units>` | the fade's margin (1) |
+| `LARECOMP_VR_EDGE_ROUND=1` | (off; EDGE.md) the fade made round: then the fade cull, and the table's culling camera cut to the square the fade can light (`vr_cull_note_fade`, `LARECOMP_VR_CULL_FADE=0`: not) |
+| `LARECOMP_VR_EDGE_BLACK=<units>` | (off) a smaller round table: with the round fade, the game's culling follows it |
+| `LARECOMP_VR_DRAWLOG=<frame>[,...]`, `LARECOMP_VR_DRAWLOG_FRAMES=<n>` | every draw of eye 0's run of those frames: pass, count, instances, blend, box, class; the frame's table, fade, light and eyes. `tools/cull_check/drawlog.py <log> [--mirror]`: per pass, a histogram by distance from the table's centre, what lies past the clear / black radius or outside both views, the casters' sweep, the trade for smaller radii (`--mirror`: the fade as drawn without the round fade) |
+
+A `[seen]` line every 10 s gives the draws left out per frame. Measured (xrmock, the owner's rig: size 3, distance 1.4,
+tilt 25, height -0.31, Follow Smooth; Table Edge Fade, eyes 1728 x 1728, `MOCK_XR_FOV=-52,44,50,-54` mirrored, head
+seated 25 degrees down; draws of the eyes' full-size depth pass left out of all, indices in thousands per pass; casters
+of the shadow pass):
+
+| spot | default (view, shadow) | with `LARECOMP_VR_EDGE_ROUND=1` |
+|---|---|---|
+| Mabe (Field_11C) | eyes 77 of 260 (216k of 857k), casters 18 of 282 | eyes 109 of 258 (325k of 850k), casters 101 of 280 |
+| Mysterious Forest (Field_06C) | 51 of 184 (117k of 641k), 20 of 185 | 74 of 184 (219k of 641k), 43 of 185 |
+| beach (Field_16E) | 60 of 220 (142k of 514k), 15 of 234 | 81 of 218 (172k of 508k), 39 of 232 |
+| Animal Village (Field_10M) | 31 of 257 (54k of 490k), 11 of 270 | 49 of 261 (149k of 503k), 32 of 274 |
+
+With the head along the table (45 degrees left or right) more lies outside the views: Animal Village 100-137 of about
+260 eye draws, Mabe 93-111 (drawlog.py on the cull-off runs). The game thread is unchanged (its cull is the table's);
+the render thread records that many fewer draws. Checked with `mv_check --mode env --xr` (the eye images after Table
+Edge) at Mabe, the forest, the beach, Animal Village, the house and Tail Cave 04B, seated and along the table, with
+Fade, Off and Passthrough and with Backdrop: equal but for the run-to-run noise (moving characters, flames; a null
+candidate, the base's own settings again, differs as much).
 
 ## Dynamic eye resolution (off by default)
 

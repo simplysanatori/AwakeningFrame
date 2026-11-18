@@ -7869,13 +7869,17 @@ static bool ring_bounds(CmdRec *r, bool indexed, float lo[3], float hi[3]) {
 // mostly still held the class of the draw's first pass; when another draw had taken its slot (the blocks' addresses,
 // and with them the slots, alternate between two sets from frame to frame), the draw was gone for that frame: Link's
 // head at Marin and Tarin's door on every other frame, and props past the box left out or not by the same chance.
+static bool ring_box_palette;  // (ring_world_box) the last box came through the bone palette (a skinned or attached mesh)
+static bool ring_box_origin;   // (ring_world_box) and its matrix sits at the world's origin: a mesh placed some other way
 static bool ring_world_box(CmdRec *r, bool indexed, float wlo[3], float whi[3]) {
     if (!st.ubuf[0][2].addr || st.ubuf[0][2].size < 64) return false;
     const float *m2 = (const float *)(uintptr_t)st.ubuf[0][2].addr, *m = NULL;
     float pos[3], sc;
     if (!ring_matrix_at(m2, pos, &sc)) return false;
+    ring_box_palette = false;
     if (pos[0] != 0 || pos[2] != 0) m = m2;
     else {
+        ring_box_palette = true;
         uint32_t idx;
         memcpy(&idx, m2 + 12, 4);
         if (st.ubuf[0][3].addr && (uint64_t)idx * 48 + 48 <= st.ubuf[0][3].size &&
@@ -7884,6 +7888,7 @@ static bool ring_world_box(CmdRec *r, bool indexed, float wlo[3], float whi[3]) 
     }
     float lo[3], hi[3];
     if (!m || !ring_bounds(r, indexed, lo, hi)) return false;
+    ring_box_origin = m[3] == 0 && m[11] == 0;
     for (int i = 0; i < 3; i++) {
         float c = m[i * 4 + 3], e = 0;
         for (int k = 0; k < 3; k++) c += m[i * 4 + k] * (lo[k] + hi[k]) * 0.5f, e += fabsf(m[i * 4 + k]) * (hi[k] - lo[k]) * 0.5f;
@@ -7954,6 +7959,273 @@ static int ring_box_class(const float blo[3], const float bhi[3], uint64_t frame
     if (frame != at) at = frame, ok = vr_cull_core_box(lo, hi);
     return ok && !(bhi[0] >= lo[0] - m && blo[0] <= hi[0] + m && bhi[2] >= lo[2] - m && blo[2] <= hi[2] + m);
 }
+// ---- (VR) the draws the eyes cannot see (docs/af/PASSES.md "Draws the eyes cannot see"). The game culls on its game
+// thread with one frustum, the table's culling camera (vr_cull.c): a rectangle about the table's centre, cut to the
+// bounding rectangle of what both eyes see of it. The executor knows more for a draw with a world box (ring_world_box):
+// where this frame's own eye cameras look and, with Table Edge Fade made round (LARECOMP_VR_EDGE_ROUND=1: as drawn by
+// default the fade's rows are mirrored and it lights draws past its black radius, edge.c fade_k), where it is black.
+// A draw whose box is
+//   - wholly past the fade's black circle (edge_fade_disc, plus seen_margin for the table moving between that pass and
+//     this frame). Only while both eyes are inside the circle: then nothing past it can stand in front of what lies
+//     inside (the fade is a cylinder about the vertical, and the eye's ray to any point inside stays inside). A box that
+//     reaches under the floor plane is taken where the eyes' rays through its bottom meet that plane: where depth is
+//     left cleared the fade reads that point, and water drawn over the cleared pixel would show,
+//   - or outside both eyes' frusta (a skinned or attached mesh's box is one bone's: padded by SEEN_PAD_SKIN),
+// is left out of the eyes' full-size passes, the depth pre-pass and the colour pass alike (class 4; their EQUAL test
+// then agrees). Class 5 also leaves it out of the shared depth-only passes, the shadow maps: its box swept along the
+// light down to the lowest point the eyes' passes drew last frame is past the circle or outside both views as well, so
+// no shadow it casts lands where an eye can see it. Blended, instanced and unplaceable draws stay. Only the overworld
+// with a floor rectangle (not a side view), never with the Surroundings' ring draws nor around a Backdrop capture.
+// LARECOMP_VR_CULL_DRAWS: 0 none, 1 all, or a list of fade, view, shadow (any separator: view+shadow; default all, the
+// fade's only with the round fade); LARECOMP_VR_CULL_DRAWS_MARGIN=<units>.
+// LARECOMP_VR_DRAWLOG=<frame>[,<frame>...] (LARECOMP_VR_DRAWLOG_FRAMES=<n> from each, 1): every draw of eye 0's run of
+// those frames with its box, pass and class, and the frame's table, fade and eyes (tools/cull_check/drawlog.py).
+enum { SEEN_FADE = 1, SEEN_VIEW = 2, SEEN_SHADOW = 4 };
+#define SEEN_PAD 0.25f       // (units) every box, for vertex sway (trees, grass) the box does not hold (not below it)
+#define SEEN_PAD_SKIN 2.0f   // a mesh placed by one bone of a skeleton: the other bones move its vertices about
+static int seen_cfg = -1;
+static float seen_margin = 1.0f;
+static struct {
+    uint64_t frame;
+    int on;                      // SEEN_* in effect this frame
+    bool view;                   // (view) this frame's eye frusta are known: the frame's camera is latched
+    float c[2], r, floor_y;      // (fade) the circle's centre (x, z), the radius past which a box is unseen, the floor plane
+    float E[2][3], pl[2][5][4];  // the eyes' positions (the latest known), this frame's frusta (left, right, bottom, top,
+                                 // near: n.x + d >= 0)
+    float spl[2][5][4], sa[2];   // (shadow) the latest frusta widened by SEEN_SHADOW_WIDEN, and the table's centre then: the
+    bool sview;                  // shadow maps are drawn before the frame's camera is latched
+    float L[3], ylo;             // (shadow) the light's direction (unit, downward); the lowest point the eyes drew last frame
+    bool light;                  // L known (a shadow pass's camera, this frame's or an earlier one)
+    float ylo_acc;               // (this frame's, for the next)
+    uint64_t n[3][2];            // (log) unseen draws per pass kind (shared, eye depth, eye colour): kept, left out
+    uint64_t frames, cls[3];     // (log) past the fade, outside both views, casters whose shadow nobody sees
+} sn = {.frame = ~0ull, .ylo = 1e30f, .ylo_acc = 1e30f};
+#define SEEN_SHADOW_WIDEN 0.3f  // (NDC, as vr_cull.c's margin) the head's turn between the frame before and this one
+static void seen_init(void) {
+    const char *e = getenv("LARECOMP_VR_CULL_DRAWS");
+    seen_cfg = SEEN_FADE | SEEN_VIEW | SEEN_SHADOW;
+    if (e) {
+        seen_cfg = 0;
+        if (strstr(e, "fade")) seen_cfg |= SEEN_FADE;
+        if (strstr(e, "view")) seen_cfg |= SEEN_VIEW;
+        if (strstr(e, "shadow")) seen_cfg |= SEEN_SHADOW;
+        if (!strcmp(e, "1")) seen_cfg = SEEN_FADE | SEEN_VIEW | SEEN_SHADOW;
+    }
+    if ((e = getenv("LARECOMP_VR_CULL_DRAWS_MARGIN")) && atof(e) >= 0) seen_margin = (float)atof(e);
+    if (stereo_wanted()) {
+        char l[160] = "";
+        if (seen_cfg & SEEN_FADE) strcat(l, ", past the round fade");
+        if (seen_cfg & SEEN_VIEW) strcat(l, ", outside both views");
+        if (seen_cfg & SEEN_SHADOW) strcat(l, ", shadow casters whose shadow nobody sees");
+        LOG("[seen] draws the eyes cannot see left out: %s (margin %.2f units)\n", seen_cfg ? l + 2 : "none", seen_margin);
+    }
+}
+static int ring_phase(uint64_t frame);
+static int ring_class(CmdRec *r, bool indexed, int kind);
+static void seen_view(void) {  // this frame's eye frusta, once its camera is latched
+    const CamRef *e[2];
+    float a[3], zlo[3], zhi[3];
+    bool room, zone;
+    if (sn.view || !cam_override_eye_refs(sn.frame, &e[0], &e[1]) || !stereo_table(a, &room, &zone, zlo, zhi)) return;
+    for (int k = 0; k < 2; k++) {
+        const float *vp = e[k]->VP;  // (row-major, clip = VP * x: w +- x, w +- y, w)
+        memcpy(sn.E[k], e[k]->eye, 12);
+        for (int i = 0; i < 4; i++)
+            for (int j = 0; j < 4; j++) {
+                sn.pl[k][i][j] = vp[12 + j] + (i & 1 ? -1.0f : 1.0f) * vp[(i / 2) * 4 + j];
+                sn.spl[k][i][j] = (1 + SEEN_SHADOW_WIDEN) * vp[12 + j] + (i & 1 ? -1.0f : 1.0f) * vp[(i / 2) * 4 + j];
+            }
+        for (int j = 0; j < 4; j++) sn.pl[k][4][j] = sn.spl[k][4][j] = vp[12 + j];
+    }
+    sn.view = sn.sview = true, sn.sa[0] = a[0], sn.sa[1] = a[2];
+}
+static void seen_frame(uint64_t frame) {
+    if (sn.frame == frame) return;
+    if (seen_cfg < 0) seen_init();
+    if (sn.frame != ~0ull) {  // (the frame before: its lowest drawn point, its counts)
+        sn.ylo = sn.ylo_acc;
+        sn.frames += sn.on != 0;
+        static double t_log;
+        double now = plat_now_ns() / 1e9;
+        if (sn.frames && now - t_log > 10.0) {
+            if (t_log > 0) {
+                double k = 1.0 / (double)sn.frames;
+                LOG("[seen] %llu frames: per frame left out %.1f shadow casters, %.1f eye depth draws, %.1f eye colour draws (%.1f kept in "
+                    "smaller passes); boxes past the fade %.1f, outside both views %.1f, casters whose shadow nobody sees %.1f\n",
+                    (unsigned long long)sn.frames, sn.n[0][1] * k, sn.n[1][1] * k, sn.n[2][1] * k, (sn.n[1][0] + sn.n[2][0]) * k,
+                    sn.cls[0] * k, sn.cls[1] * k, sn.cls[2] * k);
+            }
+            t_log = now, sn.frames = 0;
+            memset(sn.n, 0, sizeof sn.n), memset(sn.cls, 0, sizeof sn.cls);
+        }
+    }
+    sn.sview = sn.sview && sn.view;  // (the frame before's frusta only: a frame without a latch leaves none for the next)
+    sn.frame = frame, sn.on = 0, sn.view = false, sn.ylo_acc = 1e30f;
+    extern int game_level_overworld(void);
+    extern bool vr_ring_on(void);
+    extern bool vr_cull_core_box(float lo[3], float hi[3]);
+    float blo[3], bhi[3], a[3], zlo[3], zhi[3], off[2], black;
+    bool room, zone;
+    if (!seen_cfg || g_eye < 0 || game_level_overworld() != 1 || vr_ring_on() || ring_phase(frame) != RP_NONE || !vr_cull_core_box(blo, bhi) ||
+        !stereo_table(a, &room, &zone, zlo, zhi)) {
+        sn.sview = false;
+        return;
+    }
+    if (hypotf(a[0] - sn.sa[0], a[2] - sn.sa[1]) > 3.0f) sn.sview = false;  // (a warp or a snap since: those frusta are elsewhere)
+    if (seen_cfg & SEEN_VIEW) sn.on |= SEEN_VIEW;
+    if ((seen_cfg & SEEN_FADE) && sn.sview && edge_fade_disc(off, &black)) {
+        sn.c[0] = a[0] + off[0], sn.c[1] = a[2] + off[1], sn.r = black + seen_margin, sn.floor_y = a[1];
+        bool inside = true;  // (the eyes as the frame before had them: they move far less than the half unit kept here)
+        for (int k = 0; k < 2; k++)
+            inside &= hypotf(sn.E[k][0] - sn.c[0], sn.E[k][2] - sn.c[1]) < black - 0.5f && sn.E[k][1] > sn.floor_y + 0.1f;
+        if (inside) sn.on |= SEEN_FADE;
+    }
+    if ((seen_cfg & SEEN_SHADOW) && sn.light && sn.ylo < 1e29f && sn.sview) sn.on |= SEEN_SHADOW;
+    seen_view();
+}
+static bool seen_on(void) {
+    if (g_eye < 0) return false;
+    seen_frame(renderer_exec_frame());
+    return sn.on != 0;
+}
+static bool seen_out(const float pl[2][5][4], const float lo[3], const float hi[3]) {  // the box outside both frusta
+    for (int k = 0; k < 2; k++) {
+        bool out = false;
+        for (int i = 0; i < 5 && !out; i++) {
+            const float *p = pl[k][i];  // (the box's corner farthest along the plane's normal)
+            float x = p[0] >= 0 ? hi[0] : lo[0], y = p[1] >= 0 ? hi[1] : lo[1], z = p[2] >= 0 ? hi[2] : lo[2];
+            out = p[0] * x + p[1] * y + p[2] * z + p[3] < 0;
+        }
+        if (!out) return false;
+    }
+    return true;
+}
+static bool seen_past_fade(const float lo[3], const float hi[3], bool floor_rays) {  // the box wholly past the circle
+    float l[2] = {lo[0], lo[2]}, h[2] = {hi[0], hi[2]};
+    if (floor_rays && lo[1] < sn.floor_y)  // (where the eyes' rays through its bottom meet the floor plane)
+        for (int k = 0; k < 2; k++)
+            for (int c = 0; c < 4; c++) {
+                const float *E = sn.E[k];
+                float q[3] = {c & 1 ? hi[0] : lo[0], lo[1], c & 2 ? hi[2] : lo[2]}, t = (E[1] - sn.floor_y) / (E[1] - q[1]);
+                float px = E[0] + t * (q[0] - E[0]), pz = E[2] + t * (q[2] - E[2]);
+                l[0] = fminf(l[0], px), h[0] = fmaxf(h[0], px), l[1] = fminf(l[1], pz), h[1] = fmaxf(h[1], pz);
+            }
+    float dx = fmaxf(fmaxf(l[0] - sn.c[0], sn.c[0] - h[0]), 0.0f), dz = fmaxf(fmaxf(l[1] - sn.c[1], sn.c[1] - h[1]), 0.0f);
+    return dx * dx + dz * dz > sn.r * sn.r;
+}
+// An eye pass's draw (the depth pre-pass and the colour pass find the same): 0 seen, 4 not
+static int seen_class_eye(const float blo[3], const float bhi[3], bool palette) {
+    float pad = palette ? SEEN_PAD_SKIN : SEEN_PAD, lo[3], hi[3];
+    for (int i = 0; i < 3; i++) lo[i] = blo[i] - pad, hi[i] = bhi[i] + pad;
+    lo[1] = blo[1] - (palette ? SEEN_PAD : 0.0f);  // (sway is sideways: a static mesh's bottom stays, so the floor rays do too)
+    seen_view();
+    bool fade = (sn.on & SEEN_FADE) && seen_past_fade(lo, hi, true), view = !fade && (sn.on & SEEN_VIEW) && sn.view && seen_out(sn.pl, lo, hi);
+    if (!fade && !view) {
+        if (!(sn.on & SEEN_FADE) || !seen_past_fade(lo, hi, false))
+            sn.ylo_acc = fminf(sn.ylo_acc, lo[1]);  // (a receiver an eye may see; not one the floor rays alone keep)
+        return 0;
+    }
+    sn.cls[fade ? 0 : 1]++;
+    return 4;
+}
+// A shared pass's draw (a shadow caster): 5 when its box swept along the light down to the lowest point the eyes drew
+// last frame lies past the circle or outside the frusta of the frame before (widened): no shadow of it can be seen
+static int seen_class_shadow(const float blo[3], const float bhi[3], bool palette) {
+    if (!(sn.on & SEEN_SHADOW)) return 0;
+    float pad = palette ? SEEN_PAD_SKIN : SEEN_PAD, s[3], t[3];
+    for (int i = 0; i < 3; i++) s[i] = blo[i] - pad, t[i] = bhi[i] + pad;
+    s[1] = fminf(s[1], sn.ylo - 1.0f);
+    float d = (t[1] - s[1]) / -sn.L[1];
+    for (int i = 0; i < 3; i += 2) s[i] += fminf(d * sn.L[i], 0.0f), t[i] += fmaxf(d * sn.L[i], 0.0f);
+    bool unseen = ((sn.on & SEEN_FADE) && seen_past_fade(s, t, false)) || seen_out(sn.spl, s, t);
+    sn.cls[2] += unseen;
+    return unseen ? 5 : 0;
+}
+// (a shared depth-only pass) the light's direction from the shadow map's view-projection: block 1 of the overworld's
+// shadow pass is an orthographic one (rows x, y, depth; 2048 x 2048, about 47 units across round Link), so the light
+// travels along its depth row. Taken from the first such draw of a frame; not an orthographic one: no shadow test
+static void seen_light(void) {
+    static uint64_t at = ~0ull;
+    Range b1 = st.ubuf[0][1];
+    if (at == sn.frame || !b1.addr || b1.size < 64 || st.rt.depth->width < 1024) return;
+    at = sn.frame;
+    const float *m = (const float *)(uintptr_t)b1.addr;
+    float n[3];
+    for (int i = 0; i < 3; i++) n[i] = sqrtf(m[i * 4] * m[i * 4] + m[i * 4 + 1] * m[i * 4 + 1] + m[i * 4 + 2] * m[i * 4 + 2]);
+    bool ortho = m[12] == 0 && m[13] == 0 && m[14] == 0 && m[15] == 1 && n[0] > 0 && n[1] > 0 && n[2] > 0;
+    for (int i = 0; i < 3 && ortho; i++) {
+        const float *a = m + i * 4, *b = m + ((i + 1) % 3) * 4;
+        ortho = fabsf(a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) < 0.02f * n[i] * n[(i + 1) % 3];
+    }
+    float d[3] = {m[8] / n[2], m[9] / n[2], m[10] / n[2]};
+    if (d[1] > 0) d[0] = -d[0], d[1] = -d[1], d[2] = -d[2];  // (downward, from the light to the ground)
+    sn.light = ortho && d[1] < -0.2f;
+    if (sn.light) memcpy(sn.L, d, sizeof d);
+}
+static void draw_log(CmdRec *r, bool indexed) {
+    static int64_t at[16], frames = 1, cur = -1;
+    static int nat = -1, n;
+    static const NvnTexture *last_depth;
+    if (nat < 0) {
+        const char *e = getenv("LARECOMP_VR_DRAWLOG");
+        nat = 0;
+        for (const char *p = e; p && *p && nat < 16;) {
+            at[nat++] = strtoll(p, (char **)&p, 10);
+            while (*p == ',' || *p == ' ') p++;
+        }
+        if ((e = getenv("LARECOMP_VR_DRAWLOG_FRAMES")) && atoll(e) > 0) frames = atoll(e);
+    }
+    int64_t f = (int64_t)renderer_exec_frame();
+    bool in = false;
+    for (int i = 0; i < nat && !in; i++) in = f >= at[i] && f < at[i] + frames;
+    if (!in || g_eye != 0) return;
+    bool on = seen_on();
+    if (f != cur) {
+        cur = f, n = 0, last_depth = NULL;
+        float a[3] = {0}, zl[3], zh[3], off[2] = {0}, black = 0;
+        bool room, zone, ta = stereo_table(a, &room, &zone, zl, zh), fd = edge_fade_disc(off, &black);
+        LOG("[drawlog] f%lld head: seen %d anchor %d %.3f %.3f %.3f fade %d off %.3f %.3f black %.3f light %d %.4f %.4f %.4f ylo %.2f scene %u\n",
+            (long long)f, sn.on, ta, a[0], a[1], a[2], fd, off[0], off[1], black, sn.light, sn.L[0], sn.L[1], sn.L[2], sn.ylo, wx_scene_w);
+        const CamRef *e[2];
+        if (cam_override_eye_refs((uint64_t)f, &e[0], &e[1]))
+            for (int k = 0; k < 2; k++) {
+                const float *m = e[k]->VP;
+                LOG("[drawlog] f%lld eye%d: pos %.4f %.4f %.4f vp %.7g %.7g %.7g %.7g %.7g %.7g %.7g %.7g %.7g %.7g %.7g %.7g %.7g %.7g %.7g %.7g\n",
+                    (long long)f, k, e[k]->eye[0], e[k]->eye[1], e[k]->eye[2], m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10],
+                    m[11], m[12], m[13], m[14], m[15]);
+            }
+    }
+    if (n++ >= 8000) return;
+    bool tw = false;
+    int nc = 0;
+    for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) nc++, tw |= vk_tex_twinned(st.rt.color[i]);
+    if (st.rt.depth) tw |= vk_tex_twinned(st.rt.depth);
+    int kind = !tw ? 0 : !nc ? 1 : 2;
+    const NvnTexture *tg = nc && st.rt.color[0] ? st.rt.color[0] : st.rt.depth;
+    if (kind == 0 && !nc && st.rt.depth && st.rt.depth != last_depth) {  // (a shared depth-only pass: its blocks)
+        last_depth = st.rt.depth;
+        for (int i = 0; i < 18; i++) {
+            Range u = st.ubuf[0][i];
+            if (!u.addr || u.size < 64) continue;
+            const float *v = (const float *)(uintptr_t)u.addr;
+            LOG("[drawlog] f%lld pass %ux%u block %d size %llu: %.5g %.5g %.5g %.5g / %.5g %.5g %.5g %.5g / %.5g %.5g %.5g %.5g / %.5g %.5g %.5g %.5g\n",
+                (long long)f, st.rt.depth->width, st.rt.depth->height, i, (unsigned long long)u.size, v[0], v[1], v[2], v[3], v[4], v[5], v[6],
+                v[7], v[8], v[9], v[10], v[11], v[12], v[13], v[14], v[15]);
+        }
+    }
+    uint64_t fs = st.program && st.program->stages[1].code_addr ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(st.program->stages[1].code_addr + 0x30), 0x200) : 0;
+    char b[512];
+    int l = snprintf(b, sizeof b, "[drawlog] f%lld d k%d w%u nc%d fs %016llx inst %llu n %llu ix %d bl %d ds %d%d s4 %llu", (long long)f, kind,
+                     tg ? tg->width : 0, nc, (unsigned long long)fs, (unsigned long long)(indexed ? r->x[6] : r->x[4]), (unsigned long long)r->x[2],
+                     indexed, st.color_state[0] & 1, st.ds[0], st.ds[1], (unsigned long long)(st.ubuf[0][4].addr ? st.ubuf[0][4].size : 0));
+    float lo[3], hi[3];
+    if (ring_world_box(r, indexed, lo, hi))
+        l += snprintf(b + l, sizeof b - l, " box %d %.2f %.2f %.2f %.2f %.2f %.2f", ring_box_palette | ring_box_origin << 1, lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
+    else l += snprintf(b + l, sizeof b - l, " box -");
+    if (on) snprintf(b + l, sizeof b - l, " class %d", ring_class(r, indexed, kind));
+    LOG("%s\n", b);
+}
+
 // 0 core, 1 ring, 2 ring that casts, 3 past the EXTENT box. The memo holds where the draw lies (its box against the
 // frame's footprint and box), which every pass finds alike
 static int ring_class(CmdRec *r, bool indexed, int kind) {
@@ -7969,6 +8241,7 @@ static int ring_class(CmdRec *r, bool indexed, int kind) {
     int ph = ring_phase(frame);
     bool eye = kind != 0;
     if (ph != RP_NONE && eye) key ^= 0xD6E8FEB86659FD93ull;  // (around a capture the eyes' passes and the shared ones sort apart)
+    if (ph == RP_NONE && eye && seen_on()) key ^= 0x5851F42D4C957F2Dull;  // (the shared passes, the casters, are sorted by their shadow)
     uint32_t k = (uint32_t)(key ^ key >> 29) & (RC - 1);
     int c;
     if (rc[k].key == key && rc[k].frame == frame) c = rc[k].c;
@@ -7986,7 +8259,10 @@ static int ring_class(CmdRec *r, bool indexed, int kind) {
                 c = vr_ring_on() && vr_ring_class(lo, hi, frame) == 3 ? 3 : 1;
                 if (eye) ring_added++;
             }
-        } else c = box ? vr_ring_class(lo, hi, frame) : 0;
+        } else {
+            c = box ? vr_ring_class(lo, hi, frame) : 0;
+            if (!c && box && !ring_box_origin && seen_on()) c = eye ? seen_class_eye(lo, hi, ring_box_palette) : seen_class_shadow(lo, hi, ring_box_palette);
+        }
         rc[k].key = key, rc[k].frame = frame, rc[k].c = (int8_t)c;
     }
     // only room geometry is left out past the box; characters, props and sprites still draw. Which it is, a colour pass
@@ -8029,13 +8305,21 @@ static void ring_dump(CmdRec *r, bool indexed, int kind, int c) {
         l += snprintf(b + l, sizeof b - l, " world x %.1f..%.1f z %.1f..%.1f", lo[0], hi[0], lo[2], hi[2]);
     LOG("%s\n", b);
 }
+// (the draws the eyes cannot see) class 4 / 5 in a pass of this kind into target t: left out of the eyes' full-size passes
+// (4 and 5) and of the shared depth-only ones the size of a shadow map (5, seen_light's). The eyes' smaller passes keep
+// them: their camera is not known here.
+static bool seen_skip(int kind, int nc, int c, const NvnTexture *t) {
+    bool skip = kind == 0 ? !nc && c == 5 && t && t->width >= 1024 : t && t->width == wx_scene_w;
+    sn.n[kind][skip]++;
+    return skip;
+}
 static bool ring_route_(CmdRec *r, bool indexed, int log);
 static bool ring_route(CmdRec *r, bool indexed) {  // true: skip this draw
     extern bool vr_ring_on(void);
     g_ring_leq = false;
     static int log = -1;  // (vr_ring_on is read per draw: the VR tab's Surroundings row switches it live)
     if (log < 0) log = getenv("LARECOMP_VR_RING_LOG") != NULL;
-    if (g_eye < 0 || !(vr_ring_on() || ring_phase(renderer_exec_frame()) != RP_NONE)) return false;
+    if (g_eye < 0 || !(vr_ring_on() || ring_phase(renderer_exec_frame()) != RP_NONE || seen_on())) return false;
     if (!log) return ring_route_(r, indexed, 0);
     uint64_t t0 = SDL_GetTicksNS();
     bool skip = ring_route_(r, indexed, 1);
@@ -8049,6 +8333,7 @@ static bool ring_route_(CmdRec *r, bool indexed, int log) {
     if (st.rt.depth) tw |= vk_tex_twinned(st.rt.depth);
     int kind = !tw ? 0 : !nc ? 1 : 2;  // shared / an eye's depth-only pass / an eye's colour pass
     int c = ring_class(r, indexed, kind);
+    if (c >= 4) return seen_skip(kind, nc, c, nc ? st.rt.color[0] : st.rt.depth);
     bool skip = (kind == 0 && !nc && (c == 1 || c == 3)) || (kind == 1 && c >= 1) || (kind == 2 && c == 3);  // (shared: depth-only ones, the casters)
     if (kind == 2 && c >= 1 && ring_phase(renderer_exec_frame()) == RP_WIDE) skip = true;  // (Backdrop: only the capture frame draws them)
     static int lowres = -1;  // LARECOMP_VR_RING_LOWRES=0: ring draws stay out of the eyes' smaller colour passes too
@@ -8057,7 +8342,7 @@ static bool ring_route_(CmdRec *r, bool indexed, int log) {
     g_ring_leq = kind == 2 && c >= 1;
     ring_dump(r, indexed, kind, c);
     if (log) {
-        static uint64_t hist[2][3][4][2], hframe;
+        static uint64_t hist[2][3][6][2], hframe;
         uint64_t f = renderer_exec_frame();
         if (f != hframe) {
             if (hframe % 300 == 0) {
@@ -8126,12 +8411,13 @@ static bool ring_early(CmdRec *r, bool indexed) {
     static int log = -1;
     if (log < 0) log = getenv("LARECOMP_VR_RING_LOG") != NULL;
     if (g_eye < 0 || g_interp_log || g_interp_replaying || !st.rt.depth) return false;
-    if (!(vr_ring_on() || ring_phase(renderer_exec_frame()) != RP_NONE)) return false;
+    if (!(vr_ring_on() || ring_phase(renderer_exec_frame()) != RP_NONE || seen_on())) return false;
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) return false;
     uint64_t t0 = log ? SDL_GetTicksNS() : 0;
     bool tw = vk_tex_twinned(st.rt.depth);
+    if (!tw && sn.on) seen_light();  // (a shared depth-only pass: the shadow map, drawn from the light)
     int c = ring_class(r, indexed, tw ? 1 : 0);
-    bool skip = tw ? c >= 1 : (c == 1 || c == 3);
+    bool skip = c >= 4 ? seen_skip(tw ? 1 : 0, 0, c, st.rt.depth) : tw ? c >= 1 : (c == 1 || c == 3);
     ring_dump(r, indexed, tw ? 1 : 0, c);
     if (skip) {
         if (tw) note_depth();
@@ -8222,6 +8508,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
     g_mvp = false, g_tex_amask = 0, g_mv_bits[0] = g_mv_bits[1] = 0;
     if (!st.program) { SKIP(SK_NO_PROGRAM); return; }
+    draw_log(r, indexed);
     if (ring_early(r, indexed)) { SKIP(SK_RING); return; }  // (ring draws: a ring draw in a depth-only pass)
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
@@ -10846,9 +11133,16 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
 __attribute__((weak)) void stereo_eye_post(const StereoEyePost *e) { (void)e; }
 
 // (device.c, LARECOMP_STEREO_DUMP_AT=<frame>,...: the eye outputs as PNGs, <dir>/stereo_<frame>_eye<n>.png)
+// LARECOMP_STEREO_DUMP_XR=1: also the eye images as the runtime gets them (Table Edge applied): <dir>/xr.req asks the mock
+// runtime (tools/xrmock, MOCK_XR_SHOT_REQ=<dir>/xr.req) for <dir>/stereo_<frame>_xr_eye<n>.png a few refreshes later
 void vk_stereo_dump(const char *dir, uint64_t frame) {
     if (!g_eye_out_ok || !g_eye_out.backend) return;
     char p[512];
+    if (getenv("LARECOMP_STEREO_DUMP_XR") && atoi(getenv("LARECOMP_STEREO_DUMP_XR")) > 0) {
+        snprintf(p, sizeof p, "%s/xr.req", dir);
+        FILE *f = fopen(p, "w");
+        if (f) fprintf(f, "%s/stereo_%05llu_xr\n", dir, (unsigned long long)frame), fclose(f);
+    }
     for (int e = 0; e < 2; e++) {
         TexBackend *b = g_eye_out.backend;
         bool lay = vk_b_layered(b);
