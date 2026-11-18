@@ -438,9 +438,11 @@ dmg: app
 # helpers are built with an x64 Python 3.12 (RANDO_PY=...: capstone / unicorn have no ARM64 Windows wheels) and run
 # under emulation, everything else is ARM64.
 DIST     := build/dist/LAS Recomp
-WIN_B    := build/win-release
+# PCVR=1: the PC VR zip (docs/af/PCVR.md): the VR mode built in (OpenXR headers from pcvr/fetch-openxr-windows.sh in
+# build/deps-win), Khronos' openxr_loader.dll next to the exe, a build folder and zip name of its own
+WIN_B    := build/win-release$(if $(filter 1,$(PCVR)),-pcvr)
 # the zip's platform name, as the update check names it (runtime/ui/launcher.mm LARECOMP_PLATFORM)
-WINZIP   := windows$(if $(filter aarch64,$(WINARCH)),-arm64)
+WINZIP   := windows$(if $(filter aarch64,$(WINARCH)),-arm64)$(if $(filter 1,$(PCVR)),-pcvr)
 deps-windows:
 	tools/build_deps_windows.sh
 dist:
@@ -448,7 +450,9 @@ dist:
 	@[ -d build/helper/rando-gen ] || { echo "make rando-helper first (the seed generator)"; exit 1; }
 	@[ -d build/helper/lasgen ] || { echo "make gen-helper first (the game code generator)"; exit 1; }
 	@[ -x build/zig/zig.exe ] || { echo "tools/fetch_zig.sh first (the compiler)"; exit 1; }
-	$(MAKE) B=$(WIN_B) DEPS=$(CURDIR)/build/deps-win RELEASE=1 $(WIN_B)/lasrecomp.exe
+	@[ "$(PCVR)" != 1 ] || [ -f build/deps-win/bin/openxr_loader.dll ] || { echo "pcvr/fetch-openxr-windows.sh first (OpenXR)"; exit 1; }
+	@[ "$(PCVR)" != 1 ] || [ "$(WINARCH)" != aarch64 ] || { echo "PCVR=1: x64 only"; exit 1; }
+	$(MAKE) B=$(WIN_B) DEPS=$(CURDIR)/build/deps-win RELEASE=1 XR=$(if $(filter 1,$(PCVR)),1,0) $(WIN_B)/lasrecomp.exe
 	! nm $(WIN_B)/lasrecomp.exe | grep ' f_70' >/dev/null  # (no game code inside)
 	rm -rf build/dist && mkdir -p "$(DIST)/gamelib-src"
 	cp $(WIN_B)/lasrecomp.exe $(WIN_B)/lasrecomp.dll.a "$(DIST)/"
@@ -464,6 +468,9 @@ dist:
 	cp third_party/fonts/DejaVu/LICENSE "$(DIST)/DejaVu-LICENSE.txt"
 	cp README.md LICENSE "$(DIST)/"  # (licenses and source links of the bundled components: README "License")
 	cp -R build/helper/rando-gen "$(DIST)/"
+	if [ "$(PCVR)" = 1 ]; then cp build/deps-win/bin/openxr_loader.dll "$(DIST)/" && \
+	    cp build/deps-win/share/openxr/LICENSE "$(DIST)/OpenXR-LICENSE.txt" && \
+	    cp build/deps-win/share/openxr/jsoncpp-LICENSE "$(DIST)/OpenXR-jsoncpp-LICENSE.txt"; fi  # (the OpenXR loader)
 	PATH="$(CURDIR)/build/deps-win/bin:$$PATH" ldd $(WIN_B)/lasrecomp.exe | awk '(/ucrt64/ || /clangarm64/ || /deps-win/) && !/vulkan-1/ {print $$3}' | sort -u | \
 	    xargs -I{} cp -u {} "$(DIST)/"
 	! ls "$(DIST)" | grep -iE 'x264|x265|xvid|postproc'  # (no GPL codec libraries in the release)
@@ -521,8 +528,9 @@ build/rando-venv/.ok: third_party/LAS-Randomizer/requirements.txt
 # Linux: build/dist/LAS Recomp-<version>-linux-<arch>.AppImage, built in Ubuntu 22.04 containers (podman) with SDL3, LGPL
 # FFmpeg, shaderc and the seed generator helper inside; the Vulkan loader and GPU drivers are the system's.
 # `make appimage` (ARCH: this machine's, or aarch64 cross-compiled), `make appimages` both. See docs/linux.md.
+# PCVR=1: the PC VR AppImage (x86-64 only; docs/af/PCVR.md). Without it the AppImage is built without the VR mode.
 appimage:
-	tools/linux/appimage.sh $(ARCH)
+	PCVR=$(PCVR) tools/linux/appimage.sh $(ARCH)
 appimages:
 	tools/linux/appimage.sh x86_64
 	tools/linux/appimage.sh aarch64

@@ -47,9 +47,14 @@ build folder. They are not part of this repository.
 | [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) 3.3.0, Advanced Micro Devices, Inc. (header, compiled into the program) | `steam-frame/fetch-vma.sh` | MIT |
 | [OpenXR SDK](https://github.com/KhronosGroup/OpenXR-SDK) 1.1.63, The Khronos Group Inc. (headers the program is compiled against) | `tools/fetch_openxr.sh` | Apache 2.0 |
 
-At run time the program opens SteamVR's own OpenXR loader. The loader that
-`tools/fetch_openxr.sh` builds is used only by the mock runtime in
-`tools/xrmock/`.
+On the Steam Frame the program opens SteamVR's own OpenXR loader at run time;
+there the loader that `tools/fetch_openxr.sh` builds is used only by the mock
+runtime in `tools/xrmock/`. The PC VR packages (docs/af/PCVR.md) carry a loader:
+
+| Component | In | License |
+|---|---|---|
+| OpenXR loader 1.1.63, The Khronos Group Inc., built by `tools/fetch_openxr.sh` in the AppImage's build container, with the JsonCpp library built in | the PC VR AppImage (`usr/lib/libopenxr_loader.so.1`; `OpenXR-LICENSE.txt`, `OpenXR-jsoncpp-LICENSE.txt`) | Apache 2.0 OR MIT; JsonCpp: MIT (or public domain) |
+| OpenXR loader 1.1.63, The Khronos Group Inc., Khronos' release build (OpenXR.Loader NuGet package, fetched by `pcvr/fetch-openxr-windows.sh`) | the Windows PC VR zip (`openxr_loader.dll`; `OpenXR-LICENSE.txt`, `OpenXR-jsoncpp-LICENSE.txt`) | Apache 2.0 OR MIT; JsonCpp: MIT (or public domain) |
 
 ## Tools used to prepare the game
 

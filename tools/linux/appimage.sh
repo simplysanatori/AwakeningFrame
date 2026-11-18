@@ -5,12 +5,14 @@
 # cross-compiles against the arm64 image's root filesystem (build/linux/aarch64/sysroot), only the generator helpers
 # are frozen in the arm64 container (PyInstaller builds for the machine it runs on: QEMU, binfmt - slow, since pip
 # also compiles oead and keystone there). No game code inside: the start screen builds it on the player's machine.
-# See docs/linux.md.
+# See docs/linux.md. PCVR=1 (make appimage PCVR=1): the PC VR AppImage instead, x86-64 only (docs/af/PCVR.md).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ARCH=${1:?usage: tools/linux/appimage.sh x86_64|aarch64}
 case $ARCH in x86_64) PODARCH=amd64 ;; aarch64) PODARCH=arm64 ;;
     *) echo "unknown arch $ARCH"; exit 1 ;; esac
+PCVR=${PCVR:-0}
+if [ "$PCVR" = 1 ] && [ "$ARCH" != x86_64 ]; then echo "PCVR=1: x86_64 only (the OpenXR loader is built for the container's arch)"; exit 1; fi
 
 image() {  # arch -> tag (built once, then cached by podman)
     podman build -q --arch "$1" -t "localhost/lasrecomp-build:$1" -f tools/linux/Containerfile tools/linux >/dev/null || return
@@ -18,7 +20,7 @@ image() {  # arch -> tag (built once, then cached by podman)
 }
 run() {  # image, command...: the checkout mounted at /src
     local img=$1; shift
-    podman run --rm --arch "${img##*:}" -v "$PWD:/src" -w /src -e SYSROOT=/src/build/linux/aarch64/sysroot "$img" "$@"
+    podman run --rm --arch "${img##*:}" -v "$PWD:/src" -w /src -e SYSROOT=/src/build/linux/aarch64/sysroot -e PCVR="$PCVR" "$img" "$@"
 }
 
 if [ "$ARCH" = "$(uname -m)" ]; then  # native: one container of this arch does it all
