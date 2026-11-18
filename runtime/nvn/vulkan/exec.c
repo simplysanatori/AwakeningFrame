@@ -7672,7 +7672,9 @@ static bool ring_world_box(CmdRec *r, bool indexed, float wlo[3], float whi[3]) 
 // the ring draws the frame before the wide culling did not have (RP_LEARN notes that frame's by mesh and place); the
 // ring draws it had (the table fit's own, past the footprint) stay core, as they are between captures. The frame
 // before the wide culling and the frames after it are sorted here (ring_box_class): vr_cull's ring margin is on with
-// the wide culling only.
+// the wide culling only. The eyes' passes and the shared ones (the shadow maps) are noted and sorted apart: the table
+// fit's shadow pass already has outer houses and people the eyes do not (the light's frustum reaches past the table),
+// and taken as known they came into the eyes on every wide frame: the pop a capture was meant not to show.
 enum { RP_NONE, RP_LEARN, RP_WIDE, RP_CAPTURE };
 #define RING_MARGIN 4.0f  // (vr_cull.c: the ring margin of the Surroundings modes)
 static int ring_ph;                 // the frame's phase
@@ -7706,8 +7708,9 @@ static bool ring_known_cell(uint64_t mesh, int32_t cx, int32_t cz, bool add) {
     }
     return false;
 }
-static bool ring_known_draw(CmdRec *r, const float lo[3], const float hi[3], bool add) {
+static bool ring_known_draw(CmdRec *r, const float lo[3], const float hi[3], bool eye, bool add) {
     uint64_t mesh = (r->x[2] * 0xBF58476D1CE4E5B9ull) ^ (r->x[0] << 56);  // (its vertex count: some draws' buffers move every frame)
+    if (eye) mesh ^= 0x94D049BB133111EBull;  // (an eye pass's set, apart from the shared passes')
     int32_t cx = (int32_t)floorf(lo[0] + hi[0]), cz = (int32_t)floorf(lo[2] + hi[2]);
     if (add) return ring_known_cell(mesh, cx, cz, true);
     if (ring_known_cell(mesh, cx, cz, false)) return true;
@@ -7737,23 +7740,25 @@ static int ring_class(CmdRec *r, bool indexed, int kind) {
     static struct { uint64_t key, frame; int8_t c; } rc[RC];
     uint64_t frame = renderer_exec_frame();
     uint64_t key = ((st.ubuf[0][2].addr * 0x9E3779B97F4A7C15ull) ^ (r->x[3] * 0xBF58476D1CE4E5B9ull) ^ st.vbuf[0].addr ^ (r->x[2] << 40)) | 1;
+    int ph = ring_phase(frame);
+    bool eye = kind != 0;
+    if (ph != RP_NONE && eye) key ^= 0xD6E8FEB86659FD93ull;  // (around a capture the eyes' passes and the shared ones sort apart)
     uint32_t k = (uint32_t)(key ^ key >> 29) & (RC - 1);
     int c;
     if (rc[k].key == key && rc[k].frame == frame) c = rc[k].c;
     else {
         float lo[3], hi[3];
-        int ph = ring_phase(frame);
         bool box = ring_world_box(r, indexed, lo, hi);
         // (the frame before the wide culling: half the margin, so that a draw the footprint moves away from in the
         // frames that follow is known by then)
         if (ph == RP_LEARN) {
-            if (box && ring_box_class(lo, hi, frame, RING_MARGIN * 0.5f)) ring_known_draw(r, lo, hi, true);
+            if (box && ring_box_class(lo, hi, frame, RING_MARGIN * 0.5f)) ring_known_draw(r, lo, hi, eye, true);
             c = 0;
         } else {
             c = !box ? 0 : vr_ring_on() ? vr_ring_class(lo, hi, frame) : ring_box_class(lo, hi, frame, RING_MARGIN);
             if (ph != RP_NONE && c >= 1) {
-                if (ring_known_draw(r, lo, hi, false)) c = 0;
-                else ring_added++;
+                if (ring_known_draw(r, lo, hi, eye, false)) c = 0;
+                else if (eye) ring_added++;
             }
         }
         rc[k].key = key, rc[k].frame = frame, rc[k].c = (int8_t)c;

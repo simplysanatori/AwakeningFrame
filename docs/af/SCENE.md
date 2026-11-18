@@ -65,7 +65,9 @@ Drawing the outer rooms every frame costs the game thread as much as the GPU: th
 frustum lets through, even those the executor then leaves out. Backdrop pays that only on a capture:
 
 1. the next frame, still culled to the table, notes the draws it has past the table's footprint grown by half the ring
-   margin (2 units), by vertex count and place;
+   margin (2 units), by vertex count and place, the eyes' passes and the shared ones (the shadow maps) apart. The table
+   fit's shadow pass already holds outer houses and people the eyes do not have (the light's frustum reaches past the
+   table): noted together, they counted as the eyes' own and came into the eyes on every wide frame;
 2. ask vr_cull for the wide culling (as Full) and wait until the number of draws it adds stops growing: about 3 new eye
    outputs (`LARECOMP_VR_BACKDROP_DELAY`, 8, at most). An added draw is a ring draw (past the footprint grown by the
    ring margin, 4 units) that step 1 did not note. The executor leaves the added draws out of every pass on these
@@ -158,13 +160,20 @@ moving head, the Frame-like profile. Four faults came out of it, each described 
 | the fill in fragments, or none, when the eye was below full size; Full and Low losing a quarter of their edge | the scene depth read with the colour's filled part | "Each image has its own filled part" |
 | the fill sliding and doubling the table with every head movement | the eye output's rows taken top down | "The rows run as the game drew them" |
 | Link's head on every other frame in Low Quality and Full; props past the box coming and going | a draw's box picked by a block the depth-only passes do not bind | the last point of the Low and Full list |
-| outer objects popping in and out at each capture | the capture's wide frames were shown | Backdrop, steps 1 to 4 |
+| outer objects popping in and out at each capture | the capture's wide frames were shown; then, with them kept out, the draws the table fit's shadow pass had were taken for the eyes' own | Backdrop, steps 1 to 4 |
 
 Checked and not at fault: the capture's matrices. They are the ones the output was composited with (the same latch,
 `stereo_note_composite`).
 
 ## Open
 
+- **The capture frame differs from its neighbours for one image.** Its mask cuts what lies past the footprint grown by
+  the ring margin out of both eyes, the table fit's own draws there too, and the fill gives them back from the
+  capture with holes where cells are left out at depth jumps; the haze the edge fill paints above the far houses is
+  missing from that image. Measured (still head, a capture every 2 s, eye pinned at 1536): the capture frame's top band
+  differs from the image before it by 11 (mean luma), against at most 2 between ordinary images. What would fix it:
+  keep the table fit's own draws past the box in the picture (a map of what the frame before the wide culling drew was
+  tried; its first form still let the pop through, by the shadow-pass mix-up above, and was not taken further).
 - **A capture still changes the picture.** What the old capture did not hold appears when the new one lands: after a
   turn the eye shows the void (with the edge fill) past the old picture's view until the next capture (25 degrees,
   at most one a second). A capture wider than the eye's view would need a pass of its own.
