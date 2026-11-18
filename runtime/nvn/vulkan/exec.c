@@ -35,6 +35,7 @@
 #include "edge.h"
 #include "vr_diet.h"
 #include "foveation.h"
+#include "passlog.h"
 
 // ---- stereo executor (VR mode, stereo.h; docs/af/STEREO.md): the eye being executed (-1: not in stereo). In eye 1 a
 // draw, clear or copy runs only when a target is twinned (vk_tex_twinned); compute, counters and read-backs run in
@@ -1361,6 +1362,18 @@ const char *renderer_stats(void) {
     {
         extern void vk_alias_stats(void);
         vk_alias_stats();
+        cr_stats();
+        if (vr_saving(VR_CLEAR_FOLD)) {  // (every 10th stats line) the held pass begins since the last one
+            static uint64_t prev[3];
+            static int n;
+            uint64_t c[3];
+            if (n++ % 10 == 0) {
+                rec_held_stats(c);
+                LOG("[diet] clear fold: %llu passes begun, %llu empty passes not recorded, %llu clears made load ops\n",
+                    (unsigned long long)(c[0] - prev[0]), (unsigned long long)(c[1] - prev[1]), (unsigned long long)(c[2] - prev[2]));
+                memcpy(prev, c, sizeof c);
+            }
+        }
     }
     if (prof) {
         prof_up = prof_up_ns;
@@ -1686,6 +1699,7 @@ static void vk_end_pass_at(int line) {
     if (prof && line < 4096) prof_end_line[line]++;
     rec_CmdEndRendering(vk_cmd());
     in_pass = false;
+    if (pl_any()) pl_pass_end();
     if (g_debug_frame && pass_rt.ncolor && pass_rt.color[0] && pass_rt.color[0]->backend) {
         char path[256];
         static uint64_t debug_pass_frame = ~0ull;
@@ -1729,6 +1743,7 @@ static void begin_pass(void) {
         // uploads end the pass): the draw joins the open pass - no barrier, tile load / store or binning of its own
         st.rt_dirty = false;
         vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
+        if (pl_any()) pl_pass(g_eye, pass_view_mask, true, 0, NULL, NULL, NULL, pass_w, pass_h);
         return;
     }
     vk_end_pass();
@@ -1888,6 +1903,11 @@ static void begin_pass(void) {
         }
     }
     pass_w = minw; pass_h = minh;
+    if (pl_any()) {  // (LARECOMP_PASSLOG / LARECOMP_COPY_READERS)
+        int load[8] = {0};
+        for (int i = 0; i < st.rt.ncolor && i < 8; i++) load[i] = !placed && ca[i].imageView && ca[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
+        pl_pass(g_eye, pass_view_mask, false, st.rt.ncolor, st.rt.color, load, has_d || has_s ? st.rt.depth : NULL, minw, minh);
+    }
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = 1,
                           .viewMask = pass_view_mask, .colorAttachmentCount = pass_ncolor, .pColorAttachments = pass_ncolor ? ca : NULL,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
@@ -1932,7 +1952,10 @@ static void begin_pass(void) {
         else LOG(", no depth / stencil");
         LOG(", samples %u\n", pass_samples);
     }
-    rec_CmdBeginRendering(cb, &ri);
+    // (LARECOMP_VR_CLEAR_FOLD) held until the first draw: whole clears before it become load ops (clear), and a pass
+    // with nothing in it is not recorded (record.c rec_CmdBeginRenderingHeld)
+    if (!placed && vr_saving(VR_CLEAR_FOLD)) rec_CmdBeginRenderingHeld(cb, &ri);
+    else rec_CmdBeginRendering(cb, &ri);
     ss_forget();  // (whatever ran between the passes may have set its own state)
     in_pass = true;
     pass_rt = st.rt;
@@ -2115,6 +2138,30 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
     if (!rect.extent.width || !rect.extent.height) return;
     if (index >= 0 && (index >= (int)pass_ncolor || pass_color[index] == VK_FORMAT_UNDEFINED)) return;
     bool simple = (index < 0 || (mask & 0xF) == 0xF) && (!stencil || (smask & 0xFF) == 0xFF);
+    if (pl_any()) {
+        bool whole = rect.offset.x <= 0 && rect.offset.y <= 0 && rect.offset.x + rect.extent.width >= pass_w &&
+                     rect.offset.y + rect.extent.height >= pass_h;
+        pl_clear(index, depth, stencil, whole, !simple);
+        // (a whole clear of every aspect replaces the contents: LARECOMP_COPY_READERS counts it as an overwrite)
+        NvnTexture *t = index >= 0 ? st.rt.color[index] : st.rt.depth;
+        bool all = index >= 0 ? (mask & 0xF) == 0xF
+                              : (!pass_depth || depth) && (!pass_stencil || (stencil && (smask & 0xFF) == 0xFF));
+        if (whole && all) pl_overwrite(t, "clear");
+    }
+    if (simple && vr_saving(VR_CLEAR_FOLD) && rect.offset.x <= 0 && rect.offset.y <= 0 && rect.offset.x + rect.extent.width >= pass_w &&
+        rect.offset.y + rect.extent.height >= pass_h) {
+        // (LARECOMP_VR_CLEAR_FOLD) the pass has not drawn yet: a clear of the whole area is the attachments' load op
+        VkRenderingAttachmentInfo *ca = index >= 0 ? rec_held_attachment(index) : NULL;
+        VkRenderingAttachmentInfo *da = index < 0 && depth && pass_depth ? rec_held_attachment(8) : NULL;
+        VkRenderingAttachmentInfo *sa = index < 0 && stencil && pass_stencil ? rec_held_attachment(9) : NULL;
+        bool want_d = index < 0 && depth && pass_depth, want_s = index < 0 && stencil && pass_stencil;
+        if (index >= 0 ? ca != NULL : (want_d || want_s) && (!want_d || da) && (!want_s || sa)) {
+            if (ca) ca->loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, memcpy(ca->clearValue.color.float32, color, 16);
+            if (da) da->loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, da->clearValue.depthStencil.depth = dval;
+            if (sa) sa->loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, sa->clearValue.depthStencil.stencil = sval;
+            return;
+        }
+    }
     if (simple) {
         VkClearAttachment a[2];
         uint32_t n = 0;
@@ -3054,7 +3101,7 @@ static void ct_draw(Prog *pr, const char *what) {
 //     destination bound as an attachment, a texture freed or reallocated): the real copy is made first.
 // Only same-size, same-format, single-level, single-sample depth/stencil images, whole-image copies.
 // LARECOMP_VK_COPY_OPT=0: always copy (the old behaviour).
-typedef struct { NvnTexture *src, *dst; VkImage simg, dimg; } CopyAlias;
+typedef struct { NvnTexture *src, *dst; VkImage simg, dimg; bool lay; } CopyAlias;  // lay: both layered (multiview)
 extern uint32_t vk_view_gen;
 static CopyAlias aliases[8];
 static int naliases;
@@ -3063,14 +3110,24 @@ static uint64_t stat_alias_made, stat_alias_renamed, stat_alias_partial, stat_al
 static int copy_opt(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("LARECOMP_VK_COPY_OPT"); on = e && *e ? atoi(e) : 1; }
-    if (on && stereo_wanted()) on = 0;  // (copy aliases hand images over between textures: not with eye twins)
+    // (stereo) copy aliases hand images over between textures, so not with eye twins of their own (stereo v1, a twin
+    // that is not a layer: vk_stereo_swap trades backends per eye), only in a multiview run (eye 0 copies both layers at
+    // once), and only with LARECOMP_VR_COPY_ALIAS; alias_make checks the textures (stereo_alias_ok)
+    if (on && stereo_wanted()) return vr_saving(VR_COPY_ALIAS) && g_mv_run && g_eye == 0 ? on : 0;
     return on;
+}
+// (stereo, LARECOMP_VR_COPY_ALIAS) a texture whose image an alias may stand for: no eye twin backend, and either a
+// layered twin (both eyes in its one image, for good: mv_tw is never undone) or not a twin candidate at all (one
+// image, not a layer pair whose eye 1 is not latched yet). Its image only changes by a re-creation, which ends the
+// alias first (vk_stereo_twin_add's callers, a resize: vk_alias_texture_destroyed).
+static bool stereo_alias_ok(const TexBackend *b) {
+    return b && !b->twin && !b->is_twin && (b->mv2 ? b->mv_tw : !b->mv_tw);
 }
 
 // still valid: both textures keep the images the alias was made with (a resolution change reallocates them)
 static bool alias_valid(const CopyAlias *a) {
     const TexBackend *s = a->src->backend, *d = a->dst->backend;
-    return s && d && s->image == a->simg && d->image == a->dimg;
+    return s && d && s->image == a->simg && d->image == a->dimg && vk_b_layered(s) == a->lay && vk_b_layered(d) == a->lay;
 }
 
 static void alias_drop(int i) {
@@ -3088,7 +3145,8 @@ static void alias_copy(CopyAlias *a, VkImageAspectFlags aspects, const char *why
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
     gp_mark(cb, "copy texture (deferred, %s%s) %ux%u", why, aspects == d->aspect ? "" : ", stencil only", a->dst->width, a->dst->height);
-    VkImageCopy c = {.srcSubresource = {aspects, 0, 0, 1}, .dstSubresource = {aspects, 0, 0, 1}, .extent = {d->width, d->height, 1}};
+    uint32_t nl = a->lay ? 2 : 1;  // (multiview: both eyes' layers)
+    VkImageCopy c = {.srcSubresource = {aspects, 0, 0, nl}, .dstSubresource = {aspects, 0, 0, nl}, .extent = {d->width, d->height, 1}};
     rec_CmdCopyImage(cb, s->image, VK_IMAGE_LAYOUT_GENERAL, d->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
     if (aspects == d->aspect) stat_alias_copied++; else stat_alias_partial++;
     if (ct_on()) LOG("[ct] alias copy %p -> %p aspects %#x (%s)\n", (void *)a->src, (void *)a->dst, aspects, why);
@@ -3150,6 +3208,7 @@ static bool alias_make(NvnTexture *src, NvnTexture *dst, TexBackend *s, TexBacke
         d->levels != 1 || s->layers != 1 || d->layers != 1 || s->depth != 1 || d->depth != 1 || s->samples != 1 || d->samples != 1 ||
         s->base_type != d->base_type || s->presented || d->presented || !s->image || !d->image || !s->gpu_owned || !d->gpu_owned)
         return false;
+    if (g_eye >= 0 && (!stereo_alias_ok(s) || !stereo_alias_ok(d) || vk_b_layered(s) != vk_b_layered(d))) return false;
     // the destination's previous contents (or alias) are replaced whole; a destination that is itself the source of
     // aliases gets those resolved first
     alias_before_write(dst, d->aspect, "copy dst");
@@ -3157,7 +3216,7 @@ static bool alias_make(NvnTexture *src, NvnTexture *dst, TexBackend *s, TexBacke
     s = src->backend;
     if (src == dst) return true;  // (copied back onto itself)
     if (naliases == (int)(sizeof aliases / sizeof aliases[0])) return false;
-    aliases[naliases++] = (CopyAlias){src, dst, s->image, d->image};
+    aliases[naliases++] = (CopyAlias){src, dst, s->image, d->image, vk_b_layered(s)};
     vk_view_gen++;
     stat_alias_made++;
     return true;
@@ -3226,6 +3285,7 @@ static void resolve_feedback(Prog *pr) {
                 continue;
             }
             stat_feedback_copies++;
+            if (pl_any()) pl_copy("snapshot", g_eye, t, NULL, (int)src->width, (int)src->height, 0, 0, false, 0);
             if (ct_on()) LOG("[ct] snapshot %p %ux%u (was %s, si %d)\n", (void *)t, src->width, src->height, si >= 0 ? snap_why[si] : "new", si);
             vk_end_pass();
             TexBackend *dst = snapshot_image(t, src, both);
@@ -6343,8 +6403,8 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
                 memo[ms].type == mtype && memo[ms].has_view == e->has_view) {
                 view = memo[ms].view;
             } else {
-                view = arr ? vk_view_mv(e->tex, &e->view, e->has_view, false)
-                           : vk_view(naliases ? alias_read(e->tex) : e->tex, &e->view, e->has_view, false, st_->type);
+                NvnTexture *rt_ = naliases ? alias_read(e->tex) : e->tex;  // (a copy alias: its source's image)
+                view = arr ? vk_view_mv(rt_, &e->view, e->has_view, false) : vk_view(rt_, &e->view, e->has_view, false, st_->type);
                 memo[ms].tex = e->tex; memo[ms].vh = vh; memo[ms].frame = frame; memo[ms].gen = vk_view_gen;
                 memo[ms].type = mtype; memo[ms].has_view = e->has_view; memo[ms].view = view;
             }
@@ -6969,6 +7029,16 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         }
         LOG("\n");
     }
+    if (pl_any()) {
+        NvnTexture *pt[32];
+        bool im[32];
+        int np = 0;
+        for (int i = 0; i < cp->si->ntex && np < 32; i++) {
+            NvnTexture *t = shader_texture_object(5, &cp->si->tex[i]);
+            if (t) im[np] = cp->si->tex[i].is_image, pt[np++] = t;
+        }
+        pl_dispatch(st.program->stages[5].code_addr, gx, gy, gz, np, pt, im);
+    }
     if (cp->si->uses_gmem_map && gmir_on()) gmir_table(5, cp->si->uses_gmem_store, cb, gmap_tab);
     else if (cp->si->uses_gmem_map) gfast_prepare(cb);
     VkDescriptorSet ds = stage_set(&cp->p, cp->p.set_layout[0], 0, 5, cp->si, NULL, NULL, gx, gy, gz, NULL, NULL, NULL);
@@ -7462,6 +7532,7 @@ static void stereo_composite(void) {
         g_eye_out_n[e]++;
         stereo_note_composite(e);  // (the poses this output was rendered with go with it into the layer)
         g_eye_depth[e] = st_last_depth ? vk_tex(st_last_depth, true) : NULL;
+        if (pl_any() && st_last_depth) pl_read(st_last_depth, "eye post depth");
         memcpy(g_eye_zr[e], st_last_zr, sizeof st_last_zr);
         stereo_composite_ring(e);
     }
@@ -8181,6 +8252,17 @@ static void draw_(CmdRec *r, bool indexed) {
         Prog *mp = mv_program(pr, &vkey, &fkey);
         if (!mp) { SKIP(SK_PROG_BUILDING); return; }
         pr = mp;
+    }
+    if (pl_any()) {  // (LARECOMP_PASSLOG / LARECOMP_COPY_READERS) the draw and what it samples
+        NvnTexture *pt[64];
+        int np = 0;
+        ShaderInfo *pi[2] = {pr->vi, pr->fi};
+        for (int sg = 0; sg < 2; sg++)
+            for (int i = 0; pi[sg] && i < pi[sg]->ntex && np < 64; i++) {
+                NvnTexture *t = shader_texture_object(sg, &pi[sg]->tex[i]);
+                if (t) pt[np++] = t;
+            }
+        pl_draw(g_cur_fs_hash, np, pt);
     }
 
     uint32_t mode = (uint32_t)r->x[0];
@@ -9007,6 +9089,7 @@ static void depth_blit_via_color(VkCommandBuffer cb, TexBackend *s, TexBackend *
 
 static bool depth_upsample_draw(VkCommandBuffer cb, TexBackend *s, TexBackend *d, uint32_t slv, uint32_t sly, int sx, int sy,
                                 int sw, int sh, uint32_t dlv, uint32_t dly, int dx, int dy, int dw, int dh);
+static bool copy_aliased;  // (the last copy_texture made an alias instead of a copy)
 static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t flags) {
     snap_reason = "tex2tex"; snapshots_invalidate(NULL);
     NvnTexture *st_ = (NvnTexture *)(uintptr_t)src->tex, *dt = (NvnTexture *)(uintptr_t)dst->tex;
@@ -9069,8 +9152,14 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     if (!mirror_y && copy_opt() && sx0 == 0 && sy0 == 0 && dx0 == 0 && dy0 == 0 && sw == (int)s->width && sh == (int)s->height && dw == (int)d->width &&
         dh == (int)d->height && slv == 0 && dlv == 0 && sly == 0 && dly == 0 && alias_make(st_, dt, s, d)) {
         if (ct_on()) LOG("[ct] alias made %p -> %p\n", (void *)st_, (void *)dt);
+        if (pl_any()) pl_copy("alias", g_eye, st_, dt, sw, sh, dw, dh, true, 0);
+        copy_aliased = true;
         return;
     }
+    if (pl_any())
+        pl_copy(s->samples > 1 && d->samples == 1 ? "resolve" : !mirror_y && sw == dw && sh == dh && s->format == d->format ? "copy" : "blit", g_eye,
+                st_, dt, sw, sh, dw, dh, dx0 == 0 && dy0 == 0 && dw == (int)level_extent(d->width, dlv) && dh == (int)level_extent(d->height, dlv),
+                vk_b_layered(d) ? vk_eye_layer : 0);
     alias_before_write(dt, 0, "copy dst");
     if (naliases) s = alias_read(st_)->backend;
     VkCommandBuffer cb = vk_cmd();
@@ -9125,7 +9214,9 @@ static void diet_copy(NvnTexture *src, NvnTexture *dst) {
     int nl = g_mv_run && g_eye == 0 && dst && vk_b_layered(dst->backend) ? 2 : 1;  // (multiview run: both layers)
     for (int l = 0; l < nl; l++) {
         if (nl == 2) vk_eye_layer = l;
+        copy_aliased = false;
         copy_texture(&s, &d, 0);
+        if (copy_aliased) break;  // (an alias of the whole image stands for both layers)
     }
     if (nl == 2) vk_eye_layer = 0;
 }
@@ -10050,12 +10141,25 @@ static void exec_list(uint64_t handle, int depth) {
                 if (g_eye == 1 && (!tw || (g_mv_run && lay))) { st_skipped[1]++; break; }  // (stereo: shared; mv: eye 0 did both layers)
                 if (g_eye == 0 && g_mv_run && tw && !lay) mv_need_eye1 = true;  // (a twin without an eye-1 layer: eye 1 copies)
             }
+            if (r->op == CMD_COPY_TEXTURE_TO_TEXTURE && g_eye == 0 && st_hud_alpha && g_hud_ok && g_hud_win &&
+                (NvnTexture *)(uintptr_t)t[0].tex == g_hud_win && (NvnTexture *)(uintptr_t)dst->tex != g_hud_win &&
+                renderer_texture_presented((NvnTexture *)(uintptr_t)dst->tex) && vr_saving(VR_PRESENT_COPY)) {
+                // (LARECOMP_VR_PRESENT_COPY=0) the game's copy of its window image into the texture it presents: this frame
+                // the scene went to the eye outputs and the HUD to its clone, and the present shows the clone
+                // (vk_present_draw), so the window image holds only its clear and nothing reads the copy. A frame without
+                // the composite (menus) presents the window and keeps its copy (st_hud_alpha is false there).
+                static uint64_t n;
+                if (!n++) LOG("[diet] the window image's copy into the presented texture is left out while the HUD clone is presented\n");
+                if (pl_any()) pl_note("present copy left out");
+                break;
+            }
             if (g_eye == 0 && r->op != CMD_COPY_BUFFER_TO_TEXTURE && !vk_tex_twinned((NvnTexture *)(uintptr_t)dst->tex) &&
                 vk_tex_twinned((NvnTexture *)(uintptr_t)t[0].tex)) {
                 // (a shared target made from a twin: eye 1 would see eye 0's) the destination is twinned from now on, so
                 // eye 1 runs this copy into its own image (filled with eye 0's first: vk_stereo_twin_add)
                 NvnTexture *s_ = (NvnTexture *)(uintptr_t)t[0].tex, *d_ = (NvnTexture *)(uintptr_t)dst->tex;
                 vk_end_pass();  // (multiview: the twin add copies the image into its eye-1 layer now, outside a pass)
+                if (naliases) alias_before_write(d_, 0, "twin add");  // (its image is re-made: an alias of it ends first)
                 vk_tex(d_, true);
                 bool added = vk_stereo_twin_add(d_);
                 static int n;
@@ -10069,9 +10173,11 @@ static void exec_list(uint64_t handle, int depth) {
                 mvs.copies += nl == 2;
                 for (int l = 0; l < nl; l++) {
                     if (nl == 2) vk_eye_layer = l;
+                    copy_aliased = false;
                     if (r->op == CMD_COPY_TEXTURE_TO_TEXTURE) copy_texture(&t[0], &t[1], r->x[6]);
                     else if (r->op == CMD_DOWNSAMPLE) copy_texture(&t[0], &t[1], 1);
                     else copy_buffer_to_texture(r->x[0], x);
+                    if (copy_aliased) break;  // (an alias of the whole image stands for both layers)
                 }
                 if (nl == 2) vk_eye_layer = 0;
             }

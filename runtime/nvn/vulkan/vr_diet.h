@@ -18,3 +18,12 @@ typedef struct { int act; NvnTexture *into, *copy_from, *copy_to; } DietAct;
 // fixed: the draw can't be moved to another target (blending on, a view, already redirected); tex: the first
 // fragment textures (ntex of them, at most 4 read)
 DietAct vr_diet_draw(uint64_t fs_hash, int eye, NvnTexture *rt, bool fixed, int ntex, NvnTexture *const *tex);
+
+// Savings outside the diet list, each its own switch (docs/af/PASSES.md "Clears and copies"), VR mode with the stereo
+// executor only; flat mode is unchanged. VR_CLEAR_FOLD: LARECOMP_VR_CLEAR_FOLD (a pass's begin waits for its first draw:
+// whole clears before it become load ops, passes with nothing in them are not recorded).
+// VR_COPY_ALIAS: LARECOMP_VR_COPY_ALIAS (the flat mode's depth copy aliases, exec.c copy_opt, in multiview runs).
+// VR_PRESENT_COPY: LARECOMP_VR_PRESENT_COPY (the window image's copy into the presented texture is left out on frames
+// that present the HUD clone).
+enum { VR_CLEAR_FOLD = 1, VR_COPY_ALIAS = 2, VR_PRESENT_COPY = 4 };
+bool vr_saving(int what);

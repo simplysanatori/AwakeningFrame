@@ -143,3 +143,24 @@ DietAct vr_diet_draw(uint64_t h, int eye, NvnTexture *rt, bool fixed, int ntex, 
     }
     return a;
 }
+
+bool vr_saving(int what) {
+    static int mask = -1;
+    if (mask < 0) {
+        static const struct { int bit; const char *env; int def; } sw[] = {
+            {VR_CLEAR_FOLD, "LARECOMP_VR_CLEAR_FOLD", 0},
+            {VR_COPY_ALIAS, "LARECOMP_VR_COPY_ALIAS", 0},
+            {VR_PRESENT_COPY, "LARECOMP_VR_PRESENT_COPY", 0},
+        };
+        mask = 0;
+        for (size_t i = 0; i < sizeof sw / sizeof sw[0]; i++) {
+            const char *e = getenv(sw[i].env);
+            if (e && *e ? atoi(e) != 0 : sw[i].def) mask |= sw[i].bit;
+        }
+        if (!stereo_wanted()) mask = 0;
+        LOG("[diet] VR savings:%s%s%s%s (LARECOMP_VR_CLEAR_FOLD, LARECOMP_VR_COPY_ALIAS, LARECOMP_VR_PRESENT_COPY)\n",
+            mask & VR_CLEAR_FOLD ? " clear-fold" : "", mask & VR_COPY_ALIAS ? " copy-alias" : "", mask & VR_PRESENT_COPY ? " present-copy" : "",
+            mask ? "" : " none");
+    }
+    return (mask & what) && stereo_active();
+}

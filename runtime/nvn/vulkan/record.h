@@ -100,6 +100,12 @@ void rec_CmdPushConstants(VkCommandBuffer cb, VkPipelineLayout layout, VkShaderS
                           const void *data);
 void rec_CmdBeginRendering(VkCommandBuffer cb, const VkRenderingInfo *ri);
 void rec_CmdEndRendering(VkCommandBuffer cb);
+// (exec.c begin_pass, LARECOMP_VR_CLEAR_FOLD) a begin held until the pass's first draw: whole clears before it become load
+// ops through rec_held_attachment (slot 0-7 colour, 8 depth, 9 stencil; NULL: no held begin or no such attachment), and a
+// pass with nothing in it is not recorded. rec_held_stats: passes begun, passes dropped, clears made load ops.
+void rec_CmdBeginRenderingHeld(VkCommandBuffer cb, const VkRenderingInfo *ri);
+VkRenderingAttachmentInfo *rec_held_attachment(int slot);
+void rec_held_stats(uint64_t n[3]);
 void rec_CmdPipelineBarrier2(VkCommandBuffer cb, const VkDependencyInfo *di);
 void rec_CmdSetViewport(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkViewport *v);
 void rec_CmdSetScissor(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkRect2D *r);
