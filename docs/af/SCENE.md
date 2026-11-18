@@ -169,11 +169,13 @@ Checked and not at fault: the capture's matrices. They are the ones the output w
 
 ## Open
 
-- **The capture frame still differs a little from its neighbours.** Where an added draw stood in front of table-fit
-  ground, the mask cannot give the ground back: for that one image the fill shows the added draw there, as the
-  capture has it, and the far band's outline shifts. Measured (still head, a capture every 2 s, eye pinned at 1536):
-  the capture frame's top band differs from the image before it by about 5 (mean luma), against at most 1.4 between
-  ordinary images (11 with the mask cutting at the footprint grown by the ring margin, without the map). Masking
+- **The capture frame still differs a little from its neighbours.** Measured (still head, a capture every 2 s, eye
+  pinned at 1536): the capture frame's top band differs from the image before it by about 5 (mean luma), and the
+  image after it from the capture frame by about 4.7, against at most 1.4 between ordinary images (11 with the mask
+  cutting at the footprint grown by the ring margin, without the map). Why is not established. A likely reading,
+  not measured: where an added draw stood in front of table-fit ground, the mask cannot give the ground back, so for
+  that one image the fill shows the added draw there and the far band's outline shifts. A ring dump of the capture
+  frame's eye passes against the frame before would settle it. Masking
   every frame of the wide culling instead was tried: over its frames the head moves on from the map's view, and the
   patches without a picture show.
 - **A capture still changes the picture.** What the old capture did not hold appears when the new one lands: after a
@@ -199,6 +201,7 @@ Checked and not at fault: the capture's matrices. They are the ones the output w
 - **Draws the executor cannot place** (instanced ones, draws whose matrix is scaled unevenly: some buildings) are
   core in every mode: they cast shadows and take the depth pre-pass however far out they are. Around a Backdrop
   capture they, and blended draws, reach the eyes on the wide frames too: in one ring dump 18 of the 111 draws the
-  wide culling brought into the eyes were of these (11 blended, 4 instanced, 3 without a box); the rest were the
-  shadow-pass mix-up of step 1. What these leave shows as one image that changes about as much as ordinary
-  images change from one to the next (top band 1.2 in mean luma, against at most 1.4).
+  wide culling brought into the eyes were of these (11 blended, 4 instanced, 3 without a box). The other 93 had a box;
+  of the 85 of them in one of those frames, 69 were the shadow-pass mix-up of step 1, and 16 were not traced. What
+  these leave shows as one image that changes about as much as ordinary images change from one to the next (top
+  band 1.2 in mean luma, against at most 1.4).
