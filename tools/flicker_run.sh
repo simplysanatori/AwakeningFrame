@@ -14,7 +14,7 @@
 #   --pose FILE     play this pose file (MOCK_XR_POSE=file: format, gaze columns optional) instead of a generated one
 #   --seconds S     images taken for S seconds (8)      --from S   from S seconds into the session (24)
 #   --dynres MODE   step (default: 1536 and 1728 px, a second each, LARECOMP_VR_DYNRES_STEP), pin (1536, as the headset's
-#                   Backdrop session sat), auto (the GPU decides: on this desktop it stays at full size)
+#                   Backdrop session sat), auto (the GPU decides: Backdrop went to 1536 within seconds here)
 #   --fps30         the game held at 30 fps at 120 Hz (LARECOMP_XR_FPS=30), as the pacer held it in the headset sessions
 #   --fov8          no LARECOMP_VR_FOVEATION_TEXEL=16 (on a GPU with 16 px shading-rate texels foveation is then off)
 #   --set VAR=VAL   one more environment variable for the game or the mock (repeatable)

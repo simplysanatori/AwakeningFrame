@@ -131,7 +131,9 @@ table's far side, its edge and the void are all in view. Images from 24 to 32 s 
 by about 18 s; the run checks it). It takes `~/.cache/af-bench-lock` around each program run only (about 45 s) and
 prints each run's numbers, then the mean and range. `--head still` (the default) is the run to trust: nothing but the
 gaze, the eye size and the game moves. `--head move` plays a head on a neck; its numbers carry what the rotation-only
-registration leaves (the eyes' few centimetres of travel), so compare it only with a `default` run of the same seeds.
+registration leaves (the eyes' few centimetres of travel), so compare it only with a `default` run of the same seeds
+and the same frame rate: the pacer can drop a moving run to 30 fps, which doubles the motion between images, so moving
+comparisons use `--fps30`.
 Output in `build/flicker/` (never commit it: the images are the game's).
 
 ## Log format for `xr_timing.log`
