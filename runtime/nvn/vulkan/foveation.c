@@ -81,6 +81,10 @@ static struct {
     bool vrs;           // shading-rate attachments (default); false: density maps (LARECOMP_VR_FOVEATION_MODE=fdm)
     bool max_combiner;  // fragmentShadingRateNonTrivialCombinerOps: a pipeline's rate and the attachment's can combine (MAX)
     float uniform;      // (debug) LARECOMP_VR_FOVEATION_UNIFORM=<density>: the whole map at one density
+    // (tests, off by default) LARECOMP_VR_FOVEATION_CAP=2: no rate coarser than 2x2 (High's and Medium's outer 4x4 / 4x2
+    // become 2x2); LARECOMP_VR_FOVEATION_RINGS=<f>: the rings' radii times f (wider full-rate and middle rings)
+    bool cap2;
+    float ring_scale;
     int level;
     float min_scale;    // passes smaller than this part of the eye size are left alone
     VkPhysicalDeviceFragmentDensityMapFeaturesEXT feat;
@@ -129,6 +133,9 @@ static void cfg(void) {
     if ((e = getenv("LARECOMP_VR_GAZE_MOCK_DROP")) && sscanf(e, "%f,%f", &F.drop_on, &F.drop_off) != 2) F.drop_on = F.drop_off = 0;
     F.vrs = !((e = getenv("LARECOMP_VR_FOVEATION_MODE")) && !strcmp(e, "fdm"));
     F.uniform = (e = getenv("LARECOMP_VR_FOVEATION_UNIFORM")) ? (float)atof(e) : 0;
+    F.cap2 = (e = getenv("LARECOMP_VR_FOVEATION_CAP")) && atoi(e) == 2;
+    F.ring_scale = (e = getenv("LARECOMP_VR_FOVEATION_RINGS")) && atof(e) > 0 ? (float)atof(e) : 1.0f;
+    if (F.cap2 || F.ring_scale != 1.0f) LOG("[fov] test: rates capped at 2x2 %d, rings x%.2f\n", F.cap2, F.ring_scale);
 }
 
 static const char *k_names[] = {"off", "low", "medium", "high"};
@@ -335,12 +342,13 @@ static void density(float r, float out[2]) {
     static const float k[4][4] = {  // r0, r1, edge x, edge y
         {0, 0, 1, 1}, {0.60f, 0.95f, 0.5f, 0.5f}, {0.45f, 0.80f, 0.25f, 0.5f}, {0.35f, 0.65f, 0.25f, 0.25f}};
     const float *p = k[F.level];
-    float s = 1.0f + 3.0f * (1.0f - F.ramp);
+    float s = (1.0f + 3.0f * (1.0f - F.ramp)) * F.ring_scale;
     if (F.uniform > 0) { out[0] = out[1] = fminf(F.uniform, 1.0f); return; }
     if (r < p[0] * s) out[0] = out[1] = 1.0f;
     else if (r < p[1] * s) out[0] = out[1] = 0.5f;
     else out[0] = p[2], out[1] = p[3];
     if (F.level == LV_LOW && r >= p[0] * s && r < p[1] * s) out[1] = 1.0f;  // (low: 2x1 in the ring)
+    if (F.cap2) out[0] = fmaxf(out[0], 0.5f), out[1] = fmaxf(out[1], 0.5f);
 }
 
 static bool slot_make(FovMap *m, FovSlot *s) {
@@ -431,14 +439,14 @@ static const void *vrs_pass(int eye, uint32_t w, uint32_t h, const float c[2][2]
             }
         {   // (fov_shade) the same rings, for the edge pass
             static const float k[4][4] = {{0, 0, 1, 1}, {0.60f, 0.95f, 0.5f, 0.5f}, {0.45f, 0.80f, 0.25f, 0.5f}, {0.35f, 0.65f, 0.25f, 0.25f}};
-            float s = 1.0f + 3.0f * (1.0f - F.ramp);
+            float s = (1.0f + 3.0f * (1.0f - F.ramp)) * F.ring_scale;
             FovShade *sh = &m->sh;
             memset(sh, 0, sizeof *sh);
             sh->w = w, sh->h = h, sh->nfoci = eye == 2 ? 2 : 1, sh->fw = fw, sh->fh = fh;
             memcpy(sh->c, c, sizeof sh->c);
             sh->r0 = k[F.level][0] * s, sh->r1 = k[F.level][1] * s;
             sh->mid[0] = 1, sh->mid[1] = F.level == LV_LOW ? 0 : 1;
-            sh->out[0] = k[F.level][2] >= 0.5f ? 1 : 2, sh->out[1] = k[F.level][3] >= 0.5f ? 1 : 2;
+            sh->out[0] = k[F.level][2] >= 0.5f || F.cap2 ? 1 : 2, sh->out[1] = k[F.level][3] >= 0.5f || F.cap2 ? 1 : 2;
             if (F.uniform > 0) {
                 int l = F.uniform >= 1 ? 0 : F.uniform >= 0.5f ? 1 : 2;
                 sh->r0 = sh->r1 = -1, sh->out[0] = sh->out[1] = l;
