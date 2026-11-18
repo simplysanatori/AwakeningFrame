@@ -167,12 +167,12 @@ void xr_release_completed(XrTime pdt) {
     if (g_xr.shown_any) reshow_release(&g_xr.shown, done, pdt, false);
     if (g_xr.pending.valid) reshow_release(&g_xr.pending, done, pdt, false);
     if (g_xr.pending.valid) {
-        // (its redraws read its eye images: released only once they are submitted, as the runtime asks; the recorder
-        // has them microseconds after the set's own, which takes the GPU milliseconds. LARECOMP_XR_REPROJ_JOINT=1:
-        // only once they are done too, the timing of redraws in the set's own submission, a comparison and a fallback
-        // should a runtime read a released image while they still read it)
+        // (its redraws read its eye images, and move them to a sampled layout and back: the set is released only once
+        // they are done too, so the runtime never has an image this side still touches. LARECOMP_XR_REPROJ_JOINT=0, a
+        // test: released once its own submission is done and the redraws are submitted, 1 to 4 ms sooner on the Steam
+        // Frame; only where a layout change of a colour image is no work for the driver, as on Turnip)
         static int joint = -1;
-        if (joint < 0) joint = getenv("LARECOMP_XR_REPROJ_JOINT") && atoi(getenv("LARECOMP_XR_REPROJ_JOINT")) > 0;
+        if (joint < 0) joint = !(getenv("LARECOMP_XR_REPROJ_JOINT") && atoi(getenv("LARECOMP_XR_REPROJ_JOINT")) == 0);
         uint64_t need = joint && g_xr.pending.reads > g_xr.pending.seq ? g_xr.pending.reads : g_xr.pending.seq;
         if (done >= need && rec_submitted() >= g_xr.pending.reads) {
             XrSet *p = &g_xr.pending;

@@ -14,8 +14,8 @@
 // vk_frame_end before the set goes to the XR thread): the set's own images finish as early as without them, and each
 // refresh's images are released (and shown) once their own submission is done; one not done by its refresh leaves the
 // newest finished image up. They read the set's XR images after the set's submission: the XR thread releases the set
-// only once the driver has those reads too (xr_loop.c xr_release_completed, rec_submitted), and with
-// LARECOMP_XR_REPROJ_JOINT=1 only once they are done (the timing they had inside the set's own submission).
+// only once they are done (xr_loop.c xr_release_completed), so the runtime never has an image they still touch; with
+// LARECOMP_XR_REPROJ_JOINT=0 (a test) already once the driver has those reads (rec_submitted).
 // Drawing them later, nearer each refresh, is not possible: the set's images go to the runtime at its first
 // refresh and the scene depth is drawn over by the next frame, and on the one queue a later submission waits behind
 // the next frame's queued work (docs/af/STEREO.md).

@@ -295,12 +295,12 @@ carry that pose:
   those of the set shown whose submission has finished (`xr_release_completed` releases each refresh's images once
   `vk_completed_seq` has passed it); it never waits for or records GPU work. A refresh whose own image is not finished
   shows the newest finished one (an image drawn for an earlier refresh, or the set's own), counted in the `[xr]` line.
-  The set's own images are released once their submission is done and the driver has its redraws (`rec_submitted`:
-  every read of them is submitted before the release, as the runtime asks). SteamVR shows a released image at once,
-  finished or not, and the redraws still read the set's images (and move them to a sampled layout and back) while the
-  compositor may show them; on Turnip those layouts should be the same memory, so that is expected to be harmless, but it
-  is the headset's to show. `LARECOMP_XR_REPROJ_JOINT=1` releases a set only once its redraws are done too (the
-  timing of the redraws inside the set's own submission): the comparison, and the fallback.
+  The set's own images are released only once its redraws are done too: they read the set's images and move them to
+  a sampled layout and back, and a released image must be left alone in the layout the runtime asks for.
+  `LARECOMP_XR_REPROJ_JOINT=0` (a test) releases the set once its own submission is done and the driver has its
+  redraws (`rec_submitted`), 1 to 4 ms sooner on the Steam Frame: the compositor may then show an image the redraws
+  still read. On Turnip a colour image's layouts are the same memory, so it is expected to be harmless there; on
+  other drivers it is not safe.
 - Why not later, with a fresher pose: on the one Turnip queue a pass submitted when its refresh comes runs after the
   next game frame's chunks already queued (on the Frame its main pass alone is about 4.5 ms an eye), so it could not
   be bounded under a refresh; and by then the set's XR images belong to the compositor (released at its first
@@ -380,7 +380,7 @@ default none are drawn.
 | `LARECOMP_XR_REPROJ=off\|fresh\|rot\|pos\|follow` | the refreshes that show a set again: as rendered (default), a fresh pose on the same images (a test), or drawn again for their own pose (above; the VR tab's Reprojection row) |
 | `LARECOMP_XR_REPROJ_SKIP=<px>`, `_ITER=<n>`, `_LOG=1` | no images below that much motion (0.25 px); the depth search's reads (3, at most 8); the `[reproj]` line (above) |
 | `LARECOMP_XR_REPROJ_MV=1`, `_RECT=1` | the redraw: both eyes in one multiview pass; only the eye's rendered size drawn, the layer naming that part (both off; above) |
-| `LARECOMP_XR_REPROJ_JOINT=1` | a set released only once its redraws are done too (their timing in the set's own submission; above) |
+| `LARECOMP_XR_REPROJ_JOINT=0` | a test: a set released before its redraws are done (above); default: only once they are |
 | `LARECOMP_GPU_OVERLAP=0\|1` | the CPU / GPU overlap (VR default on, flat off on Turnip; docs/af/PASSES.md) |
 | `LARECOMP_VR_FOVEATION=off\|low\|medium\|high` | eye-tracked foveation of the eye passes (above) |
 | `LARECOMP_VR_FOVEATION_CAP=2`, `LARECOMP_VR_FOVEATION_RINGS=<f>` | tests: no rate coarser than 2x2; the rings' radii times f (above) |
