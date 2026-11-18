@@ -106,9 +106,11 @@ take_lock() {
     done
 }
 
-# the login of the smoke tests (L+R at the title, A through the file menu), then the warp; frames are game frames
-LOGIN=$(for f in $(seq 300 60 780); do printf '%d:L:12,%d:R:12,%d:A:6,' $f $f $((f + 30)); done)
+# the login of the smoke tests (L+R at the title, A through the file menu), then the warp at 15 s; frames are game
+# frames, so they are halved when the game is held at 30 fps
 GFPS=60; [ $FPS30 = 1 ] && GFPS=30
+LOGIN=$(for f in $(seq $((300 * GFPS / 60)) $GFPS $((780 * GFPS / 60))); do printf '%d:L:12,%d:R:12,%d:A:6,' $f $f $((f + GFPS / 2)); done)
+WARP=$((900 * GFPS / 60))
 # the run ends (a window screenshot, then exit) 3 s after the images: the session time runs about with the game frames
 LAST=$(( (FROM + SECS + 3) * GFPS ))
 
@@ -120,7 +122,7 @@ game_run() {   # <out dir> <config scene> <edge> <pose file> -> exit status; the
     local env=(
         ENABLE_GAMESCOPE_WSI=0 SDL_VIDEODRIVER=offscreen LARECOMP_NO_LAUNCHER=1 LARECOMP_NO_AUDIO=1 LARECOMP_NO_UPDATE_CHECK=1
         LARECOMP_SETTINGS="$ROOT/settings.ini" LARECOMP_SAVE_DIR="$ROOT/save" LARECOMP_VR_RIG="$ROOT/vr_rig.ini" LARECOMP_VR_RIG_SAVE=0
-        LARECOMP_BLUR_REMOVAL=1 LARECOMP_CHEATS=hearts LARECOMP_INPUT="${LOGIN%,}" LARECOMP_WARP_AT="900:Field:Field_11C"
+        LARECOMP_BLUR_REMOVAL=1 LARECOMP_CHEATS=hearts LARECOMP_INPUT="${LOGIN%,}" LARECOMP_WARP_AT="$WARP:Field:Field_11C"
         LARECOMP_LOG_PACE=1 LARECOMP_WINDOW_SHOT=$LAST LARECOMP_SHOT_PATH="$ROOT/window_last.png" LARECOMP_EXIT_AFTER_SHOT=1
         XR_RUNTIME_JSON="$MOCK_JSON" LARECOMP_XR=1 LARECOMP_XR_HZ=120 MOCK_XR_HZ=120 MOCK_XR_SECONDS=0
         # the headset's eyes: 1728 x 1728, an asymmetric fov mirrored for the right eye (assumed Frame values: the logs
