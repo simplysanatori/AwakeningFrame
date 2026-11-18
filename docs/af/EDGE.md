@@ -106,6 +106,7 @@ everywhere: the overworld, interiors, dungeons, side views.
 | `LARECOMP_VR_EDGE_WIDTH=<units>` | width of the fade past it (12) |
 | `LARECOMP_VR_EDGE_FIT=0` | overworld: the fixed circle about the anchor (as before), no fit, no fade to the culled floor |
 | `LARECOMP_VR_EDGE_SMOOTH=0` | foveation's blocks left as they are |
+| `LARECOMP_VR_EDGE_SMOOTH=all` | (a test) with Table Edge off too: the fade's main pass with every pixel kept whole, only to smooth foveation's blocks (one full-size pass per eye, plus the block-centre images) |
 | `LARECOMP_VR_EDGE_DEBUG=6` | the factor in red, geometry in green, over the dimmed eye (unsmoothed, no fit's floor fade) |
 
 ## The Mysterious Woods' fog: the dome and the edge curtain

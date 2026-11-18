@@ -45,6 +45,7 @@ static struct {
     float room_margin;         // fade in a room: the radius reaches at least this past the room's farthest corner
     float pivot_default;
     bool smooth_off;           // LARECOMP_VR_EDGE_SMOOTH=0: the foveated passes' coarse blocks are left as they are
+    bool smooth_all;           // LARECOMP_VR_EDGE_SMOOTH=all: with Table Edge off too, the blocks smoothed (no fade)
     bool fit;                  // fade, overworld: fitted inside the floor the culling draws (LARECOMP_VR_EDGE_FIT=0: not)
 } cfg;
 
@@ -101,7 +102,8 @@ static void cfg_init(void) {
     cfg.radius = (e = getenv("LARECOMP_VR_EDGE_RADIUS")) && atof(e) > 0 ? (float)atof(e) : FADE_RADIUS;
     cfg.width = (e = getenv("LARECOMP_VR_EDGE_WIDTH")) && atof(e) > 0 ? (float)atof(e) : FADE_WIDTH;
     cfg.room_margin = FADE_ROOM_MARGIN;
-    cfg.smooth_off = (e = getenv("LARECOMP_VR_EDGE_SMOOTH")) && atoi(e) == 0;
+    cfg.smooth_off = (e = getenv("LARECOMP_VR_EDGE_SMOOTH")) && !strcmp(e, "0");
+    cfg.smooth_all = (e = getenv("LARECOMP_VR_EDGE_SMOOTH")) && !strcmp(e, "all");
     cfg.fit = !((e = getenv("LARECOMP_VR_EDGE_FIT")) && atoi(e) == 0);
     g_depth_quarter = (e = getenv("LARECOMP_VR_EDGE_DEPTH")) && !strcmp(e, "quarter");
     float s = (e = getenv("LARECOMP_VR_SCALE")) && atof(e) > 0 ? (float)atof(e) : 0.067f;
@@ -288,6 +290,7 @@ static const char *tint_fs =
 // most of the eye)
 #define FADE_FUNCS \
     "float fade_k(vec2 p, float d, bool geo) {\n" \
+    "  if (u.fl.z > 4.5) return 1.0;\n"  /* (smoothing only: Table Edge off, LARECOMP_VR_EDGE_SMOOTH=all) */ \
     "  vec2 q = qmap(p);\n" \
     "  vec2 nd = vec2(p.x * 2.0 - 1.0, 1.0 - 2.0 * q.y);\n" \
     "  vec2 xy = vec2((nd.x + u.proj.z) / u.proj.x, (nd.y + u.proj.w) / u.proj.y);\n" \
@@ -315,6 +318,7 @@ static const char *tint_fs =
     "  vec2 q = qmap(p);\n" \
     "  vec3 s = texture(ct, q * u.cc.xy).rgb;\n" \
     "  k = 0.0;\n" \
+    "  if (u.fl.z > 4.5) { k = 1.0; return s; }\n" \
     "  if (max(s.r, max(s.g, s.b)) <= 0.0) return s;\n" \
     "  float d = dsample(q);\n" \
     "  k = fade_k(p, d, is_geo(d));\n" \
@@ -810,11 +814,15 @@ static bool g_tint_restart;
 bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uint32_t w, uint32_t h) {
     EdgeMode mode = edge_mode();
     if (g_mode_changed) g_mode_changed = false, g_tint_restart = true;  // (a switch: the backdrop colours start from the scene again)
-    if (mode == EDGE_BLACK || eye < 0 || eye > 1 || !noted[eye].have) return false;
+    if (eye < 0 || eye > 1 || !noted[eye].have) return false;
+    // (LARECOMP_VR_EDGE_SMOOTH=all, a test) Table Edge off, but the foveated passes' blocks smoothed as Fade does: the
+    // fade's passes with every pixel kept whole (fl.z 5), in place of the present draw
+    bool smooth_only = mode == EDGE_BLACK && cfg.smooth_all && !cfg.smooth_off && noted[eye].vrs;
+    if (mode == EDGE_BLACK && !smooth_only) return false;
     // outdoors only: an interior or a dungeon (or the title) keeps its dark void and the game's own glow, drawn by the present as before
     extern int game_level_overworld(void);  // (widescreen.c) 1 the overworld, 0 another level, -1 not in play
     int ow = game_level_overworld();
-    if (mode == EDGE_FADE ? ow < 0 : !cfg.indoors && ow != 1) return false;  // (fade: everywhere in play)
+    if (mode == EDGE_FADE || smooth_only ? ow < 0 : !cfg.indoors && ow != 1) return false;  // (fade: everywhere in play)
     float fade_c[3] = {0}, fade_r = cfg.radius, fade_w = cfg.width;  // (fade) the table's centre, the clear radius, the width
     float drawn[4][2];
     bool fitted = false, cut = false;
@@ -876,7 +884,7 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
     u.proj[0] = P[0], u.proj[1] = P[5], u.proj[2] = P[2], u.proj[3] = P[6];
     u.zt[0] = P[10], u.zt[1] = P[11], u.zt[2] = in->zn, u.zt[3] = in->zf - in->zn;
     u.fl[0] = in->depth_minus1 ? 1.0f : 0.0f, u.fl[1] = in->origin_lower_left ? 1.0f : 0.0f;
-    u.fl[2] = mode == EDGE_FOG ? 1.0f : mode == EDGE_GRADIENT ? 2.0f : mode == EDGE_PASSTHROUGH ? 3.0f : 4.0f;
+    u.fl[2] = smooth_only ? 5.0f : mode == EDGE_FOG ? 1.0f : mode == EDGE_GRADIENT ? 2.0f : mode == EDGE_PASSTHROUGH ? 3.0f : 4.0f;
     u.fl[3] = (float)(g.frame++ % 64);
     u.up[0] = V[1], u.up[1] = V[5], u.up[2] = V[9];  // the world's up in eye space (the view's second column)
     float pd = in->pivot_dist > 0 ? in->pivot_dist : cfg.pivot_default;
@@ -958,7 +966,7 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
     vk_full_barrier(cb);  // (the scene and the eye output)
     static int bench = -1;  // (LARECOMP_VR_EDGE_BENCH: 1 no backdrop colours, 2 no mask, 4 no main pass: timing only)
     if (bench < 0) bench = getenv("LARECOMP_VR_EDGE_BENCH") ? atoi(getenv("LARECOMP_VR_EDGE_BENCH")) : 0;
-    bool fade = mode == EDGE_FADE;  // (fade: the main pass alone, no backdrop colours or mask)
+    bool fade = mode == EDGE_FADE || smooth_only;  // (fade: the main pass alone, no backdrop colours or mask)
     if (in->eye == 0 && !(bench & 1) && !fade) {
         VkDescriptorSet set = make_set(&u, in->depth, in->color, g.mask[0].view, g.tint[prev].view);
         begin(cb, g.tint[cur].view, VK_IMAGE_LAYOUT_GENERAL, 2, 1);
