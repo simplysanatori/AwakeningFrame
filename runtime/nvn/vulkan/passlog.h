@@ -21,11 +21,14 @@ static inline bool pl_any(void) { return pl_on() || cr_on(); }
 // a render pass begins (merged: a draw joined the open pass instead); load: per colour attachment 1 = CLEAR, 0 = LOAD
 void pl_pass(int eye, uint32_t view_mask, bool merged, int ncolor, NvnTexture *const *color, const int *load, NvnTexture *depth,
              uint32_t w, uint32_t h);
-void pl_pass_end(void);
+// held: 0 begun, 1 a held begin recorded for its clears, 2 not recorded (nothing in it), 3 not recorded (its clears
+// deferred: LARECOMP_VR_CLEAR_DEFER)
+void pl_pass_end(int held);
 // a draw in the open pass: its fragment hash and the textures its stages sample
 void pl_draw(uint64_t fs, int ntex, NvnTexture *const *tex);
-// a clear in the open pass (index -1: depth / stencil); whole: it covers the pass's area; draw: done with a pipeline
-void pl_clear(int index, bool depth, bool stencil, bool whole, bool draw);
+// a clear in the open pass (index -1: depth / stencil); whole: it covers the pass's area; draw: done with a pipeline;
+// fold: made the attachment's load op (LARECOMP_VR_CLEAR_FOLD)
+void pl_clear(int index, bool depth, bool stencil, bool whole, bool draw, bool fold);
 // a copy (kind: copy, blit, resolve, alias, snapshot) of src into dst; whole: dst is overwritten whole; layer: the layer
 // of a layered destination (a multiview run copies both, one call each: layer 1 is the same copy's second half)
 void pl_copy(const char *kind, int eye, NvnTexture *src, NvnTexture *dst, int sw, int sh, int dw, int dh, bool whole, int layer);

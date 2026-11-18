@@ -25,5 +25,7 @@ DietAct vr_diet_draw(uint64_t fs_hash, int eye, NvnTexture *rt, bool fixed, int 
 // VR_COPY_ALIAS: LARECOMP_VR_COPY_ALIAS (the flat mode's depth copy aliases, exec.c copy_opt, in multiview runs).
 // VR_PRESENT_COPY: LARECOMP_VR_PRESENT_COPY (the window image's copy into the presented texture is left out on frames
 // that present the HUD clone).
-enum { VR_CLEAR_FOLD = 1, VR_COPY_ALIAS = 2, VR_PRESENT_COPY = 4 };
+// VR_CLEAR_DEFER: LARECOMP_VR_CLEAR_DEFER (a pass with only clears in it waits: its clears become the next pass's load ops
+// on the same attachments; needs, and turns on, VR_CLEAR_FOLD).
+enum { VR_CLEAR_FOLD = 1, VR_COPY_ALIAS = 2, VR_PRESENT_COPY = 4, VR_CLEAR_DEFER = 8 };
 bool vr_saving(int what);

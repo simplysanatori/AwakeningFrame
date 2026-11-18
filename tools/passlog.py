@@ -115,7 +115,7 @@ def audit(tex, ev, frame, md, counts_only):
     ew, eh = eye_size(tex)
     full = lambda t: t in tex and tex[t]["w"] == ew and tex[t]["h"] == eh
     passes, cur = [], None
-    copies, disp, clears = [], [], []
+    copies, disp, clears, notes = [], [], [], []
     for k in ks:
         f, e, kind, rest = ev[k]
         w = rest.split()
@@ -126,31 +126,45 @@ def audit(tex, ev, frame, md, counts_only):
             passes.append(cur)
         elif kind == "E" and cur:
             cur["draws_logged"] = int(w[1].split("=")[1])
+            cur["rec"] = not (len(w) > 3 and w[3] == "rec=0")
+        elif kind == "N":
+            notes.append(rest)
         elif kind == "D" and cur:
             cur["draws"] += 1
             cur["fs"][w[0][3:11]] = cur["fs"].get(w[0][3:11], 0) + 1
             for t in w[1][2:].split(","):
                 if t != "": cur["samp"].add(t)
         elif kind == "K" and cur:
-            cur["clears"].append((w[0], w[1] == "whole=1", w[2] == "draw=1", int(w[3].split("=")[1])))
+            cur["clears"].append((w[0], w[1] == "whole=1", w[2] == "draw=1", int(w[3].split("=")[1]), len(w) > 4 and w[4] == "fold=1"))
         elif kind == "X":
-            if "ly=1" in w: continue
+            if "ly=1" in w:  # (the second layer of a multiview copy: the same copy, twice the bytes)
+                if copies and copies[-1]["dst"] == w[1].split(">")[1]: copies[-1]["layers"] = 2
+                continue
             s, d = w[1].split(">")
             nk, use = next_use(ev, k, d, tex) if w[0] != "snapshot" else (None, "(feedback snapshot: read by the draw that needs it)")
             where = ""
             if nk is not None:
                 df = ev[nk][0] - f
                 where = "same frame" if df == 0 else "next frame" if df == 1 else "%d frames later" % df
-            copies.append({"kind": w[0], "eye": e, "src": s, "dst": d, "size": w[2], "whole": "whole=1" in w, "use": use, "where": where,
+            copies.append({"kind": w[0], "eye": e, "src": s, "dst": d, "size": w[2], "whole": "whole=1" in w, "use": use, "where": where, "layers": 1,
                            "full": full(d) or (w[0] == "snapshot" and full(s))})
         elif kind == "C":
             disp.append({"cs": w[0][3:], "grid": w[1], "tex": w[2][2:]})
-    n = {"passes": len(passes), "multiview": sum(p["mv"] for p in passes), "empty": sum(1 for p in passes if not p["draws"]),
-         "clear only": sum(1 for p in passes if not p["draws"] and p["clears"]), "draws": sum(p["draws"] for p in passes),
-         "clears": sum(len(p["clears"]) for p in passes), "copies": len(copies), "full-size copies": sum(c["full"] for c in copies),
+    work = [c for c in copies if c["kind"] != "alias"]  # (an alias copies nothing)
+    made = sum(1 for x in notes if x.startswith("deferred clear made"))
+    rp = [p for p in passes if p.get("rec", True)]
+    n = {"passes": len(rp) + made, "passes not recorded": len(passes) - len(rp), "multiview": sum(p["mv"] for p in rp)
+         + sum(1 for x in notes if x.startswith("deferred clear made") and "vm=0" not in x.split()),
+         "empty": sum(1 for p in rp if not p["draws"]) + made, "clear only": sum(1 for p in rp if not p["draws"] and p["clears"]) + made,
+         "draws": sum(p["draws"] for p in passes),
+         "clears": sum(len(p["clears"]) for p in passes), "clears as load ops": sum(sum(1 for c in p["clears"] if c[4]) for p in rp)  # (a deferred pass's clears: by their notes)
+         + sum(1 for x in notes if x.startswith("deferred clear folded")),
+         "copies": len(work), "full-size copies": sum(c["full"] for c in work),
+         "full-size layer copies": sum(c["layers"] for c in work if c["full"]), "aliases": len(copies) - len(work),
+         "present copies left out": sum(1 for x in notes if x.startswith("present copy left out")),
          "dispatches": len(disp),
-         "full-size reads": sum(sum(1 for t in p["samp"] if full(t)) for p in passes) + sum(1 for c in copies if full(c["src"])),
-         "full-size passes": sum(1 for p in passes if p["att"] and any(full(a[1].split(":")[0]) for a in p["att"]))}
+         "full-size reads": sum(sum(1 for t in p["samp"] if full(t)) for p in passes) + sum(1 for c in work if full(c["src"])),
+         "full-size passes": sum(1 for p in rp if p["att"] and any(full(a[1].split(":")[0]) for a in p["att"]))}
     if counts_only:
         print("frame %d: " % frame + ", ".join("%s %d" % kv for kv in n.items()))
         return n
@@ -160,10 +174,10 @@ def audit(tex, ev, frame, md, counts_only):
     print("|---|---|---|---|---|---|---|---|---|")
     for p in passes:
         att = "; ".join("%s %s %s" % (s, tname(tex, v.split(":")[0]), {"L": "LOAD", "C": "CLEAR"}[v.split(":")[1]]) for s, v in p["att"])
-        cl = ", ".join("%s%s%s" % (c[0], " whole" if c[1] else " part", " draw" if c[2] else "") for c in p["clears"]) or "-"
+        cl = ", ".join("%s%s%s%s" % (c[0], " whole" if c[1] else " part", " draw" if c[2] else "", " (load op)" if c[4] else "") for c in p["clears"]) or "-"
         fs = ", ".join("%s x%d" % kv for kv in list(p["fs"].items())[:4]) + (" ..." if len(p["fs"]) > 4 else "")
         sm = ", ".join(tname(tex, t) for t in sorted(p["samp"])[:5]) + (" ..." if len(p["samp"]) > 5 else "")
-        print("| %d | %d | %s | %s | %s | %d | %s | %s | %s |" % (p["seq"], p["eye"], p["size"], "yes" if p["mv"] else "no", att, p["draws"], cl,
+        print("| %d%s | %d | %s | %s | %s | %d | %s | %s | %s |" % (p["seq"], "" if p.get("rec", True) else " (not recorded)", p["eye"], p["size"], "yes" if p["mv"] else "no", att, p["draws"], cl,
                                                               fs or "-", sm or "-"))
     print("\n| copy | eye | source | destination | size | next use of the destination | when |")
     print("|---|---|---|---|---|---|---|")

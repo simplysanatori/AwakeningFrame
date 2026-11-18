@@ -181,11 +181,11 @@ void pl_pass(int eye, uint32_t view_mask, bool merged, int ncolor, NvnTexture *c
     pl_open = true, pl_draws = pl_clears = 0;
 }
 
-void pl_pass_end(void) {
+void pl_pass_end(int held) {
     ncr_load = 0;
     if (!pl_open) return;
     pl_open = false;
-    if (pl_on()) LOG(PLF "E %d draws=%d clears=%d\n", PLA, pl_seq - 1, pl_draws, pl_clears);
+    if (pl_on()) LOG(PLF "E %d draws=%d clears=%d rec=%d\n", PLA, pl_seq - 1, pl_draws, pl_clears, held != 2 && held != 3);
 }
 
 void pl_draw(uint64_t fs, int ntex, NvnTexture *const *tex) {
@@ -204,11 +204,11 @@ void pl_draw(uint64_t fs, int ntex, NvnTexture *const *tex) {
     LOG(PLF "D fs=%016llx t=%s\n", PLA, (unsigned long long)fs, t[0] ? t : "-");
 }
 
-void pl_clear(int index, bool depth, bool stencil, bool whole, bool draw) {
+void pl_clear(int index, bool depth, bool stencil, bool whole, bool draw, bool fold) {
     if (!pl_on()) return;
     pl_clears++;
-    LOG(PLF "K %s%s%s whole=%d draw=%d after=%d\n", PLA, index >= 0 ? "c" : "", index >= 0 ? (char[2]){(char)('0' + index), 0} : "",
-        index < 0 ? (depth && stencil ? "ds" : depth ? "d" : "s") : "", whole, draw, pl_draws);
+    LOG(PLF "K %s%s%s whole=%d draw=%d after=%d fold=%d\n", PLA, index >= 0 ? "c" : "", index >= 0 ? (char[2]){(char)('0' + index), 0} : "",
+        index < 0 ? (depth && stencil ? "ds" : depth ? "d" : "s") : "", whole, draw, pl_draws, fold);
 }
 
 void pl_copy(const char *kind, int eye, NvnTexture *src, NvnTexture *dst, int sw, int sh, int dw, int dh, bool whole, int layer) {

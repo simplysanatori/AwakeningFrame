@@ -738,10 +738,29 @@ VkRenderingAttachmentInfo *rec_held_attachment(int slot) {
     if (!held.on) return NULL;
     VkRenderingAttachmentInfo *a = slot >= 0 && slot < (int)held.ri.colorAttachmentCount ? &held.ca[slot] : slot == 8 && held.hd ? &held.d
                                  : slot == 9 && held.hs ? &held.s : NULL;
-    if (a && a->imageView && a->loadOp != VK_ATTACHMENT_LOAD_OP_CLEAR) held_n[2]++;
     return a && a->imageView ? a : NULL;
 }
 void rec_held_stats(uint64_t n[3]) { memcpy(n, held_n, sizeof held_n); }
+bool rec_held_take(VkRenderingInfo *ri, VkRenderingAttachmentInfo ca[8], VkRenderingAttachmentInfo *d, VkRenderingAttachmentInfo *s) {
+    if (!held.on) return false;
+    held.on = false;
+    held_n[1]++;
+    *ri = held.ri;
+    ri->pNext = NULL;
+    for (uint32_t i = 0; i < held.ri.colorAttachmentCount; i++) ca[i] = held.ca[i];
+    ri->pColorAttachments = ri->colorAttachmentCount ? ca : NULL;
+    if (held.hd) *d = held.d;
+    if (held.hs) *s = held.s;
+    ri->pDepthAttachment = held.hd ? d : NULL;
+    ri->pStencilAttachment = held.hs ? s : NULL;
+    return true;
+}
+int rec_held_state(void) {
+    if (!held.on) return 0;
+    bool cleared = (held.hd && held.d.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) || (held.hs && held.s.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR);
+    for (uint32_t i = 0; i < held.ri.colorAttachmentCount; i++) cleared |= held.ca[i].imageView && held.ca[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
+    return cleared ? 1 : 2;
+}
 
 CMD_ARGS(CmdEndRendering, char pad_;)
 static void CmdEndRendering_run(const void *p) { vkCmdEndRendering(((const CmdEndRenderingArgs *)p)->cb); }

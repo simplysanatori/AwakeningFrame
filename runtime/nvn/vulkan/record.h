@@ -106,6 +106,9 @@ void rec_CmdEndRendering(VkCommandBuffer cb);
 void rec_CmdBeginRenderingHeld(VkCommandBuffer cb, const VkRenderingInfo *ri);
 VkRenderingAttachmentInfo *rec_held_attachment(int slot);
 void rec_held_stats(uint64_t n[3]);
+int rec_held_state(void);
+// (LARECOMP_VR_CLEAR_DEFER) the held begin, taken back: nothing of it is recorded (its end must not be either); false: none
+bool rec_held_take(VkRenderingInfo *ri, VkRenderingAttachmentInfo ca[8], VkRenderingAttachmentInfo *d, VkRenderingAttachmentInfo *s);  // 0: no begin held; 1: held, recorded at the end for its clears; 2: held, not recorded at all
 void rec_CmdPipelineBarrier2(VkCommandBuffer cb, const VkDependencyInfo *di);
 void rec_CmdSetViewport(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkViewport *v);
 void rec_CmdSetScissor(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkRect2D *r);

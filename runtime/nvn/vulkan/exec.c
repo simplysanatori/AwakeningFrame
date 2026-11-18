@@ -1339,6 +1339,8 @@ static void builds_check(void) {
     pthread_mutex_unlock(&builds_lock);
 }
 
+static uint64_t stat_clear_folded;  // (LARECOMP_VR_CLEAR_FOLD) clears made load ops
+static uint64_t stat_pclr[4];  // (LARECOMP_VR_CLEAR_DEFER) deferred, folded into a pass, made as their own pass, dropped
 const char *renderer_stats(void) {
     skip_log();
     builds_check();
@@ -1370,8 +1372,15 @@ const char *renderer_stats(void) {
             if (n++ % 10 == 0) {
                 rec_held_stats(c);
                 LOG("[diet] clear fold: %llu passes begun, %llu empty passes not recorded, %llu clears made load ops\n",
-                    (unsigned long long)(c[0] - prev[0]), (unsigned long long)(c[1] - prev[1]), (unsigned long long)(c[2] - prev[2]));
+                    (unsigned long long)(c[0] - prev[0]), (unsigned long long)(c[1] - prev[1]), (unsigned long long)stat_clear_folded);
                 memcpy(prev, c, sizeof c);
+                stat_clear_folded = 0;
+                if (vr_saving(VR_CLEAR_DEFER))
+                    LOG("[diet] clear defer: %llu clears of passes with nothing else deferred: %llu became a later pass's load op, %llu were "
+                        "made as their own pass, %llu dropped (cleared again, the pass cleared itself, or the image re-made)\n",
+                        (unsigned long long)stat_pclr[0], (unsigned long long)stat_pclr[1], (unsigned long long)stat_pclr[2],
+                        (unsigned long long)stat_pclr[3]);
+                memset(stat_pclr, 0, sizeof stat_pclr);
             }
         }
     }
@@ -1690,16 +1699,120 @@ static inline bool ss_need(uint32_t bit, bool same) {
     return true;
 }
 
+// ---- (LARECOMP_VR_CLEAR_DEFER) clears of a pass with nothing else in it wait for the next pass on the same attachment,
+// and become its load op there: one pass instead of two. A pass that cleared and drew nothing (the held begin of
+// LARECOMP_VR_CLEAR_FOLD, which this needs, taken back at its end) leaves an entry per cleared attachment: its view,
+// view mask and area, and the clear value. The next pass with that attachment, the same view and view mask (a
+// multiview clear covers both layers, a single-layer pass one) and the same area takes the clear as its load op
+// (a CLEAR load op of its own replaces it). Anything else that may touch the texture makes the clear first, as the
+// pass it was: a draw or dispatch sampling it, a copy from or into it, an upload, a read-back, the eye composite (the
+// eye post hook and the Surroundings capture read images directly), and the end of each list run (the present, the
+// eye images). A texture re-made or freed in between drops its entry (its contents are gone anyway).
+static __typeof__(st.rt) pass_rt;  // (VR pass diet, merge: the open pass's attachments as bound)
+typedef struct { NvnTexture *t; TexBackend *b; VkImage img; VkImageView view; uint32_t vm, w, h; int slot; VkClearValue cv; } PClear;
+static PClear pclr[16];
+static int npclr;
+static bool pclr_take(void);
+static int npclr_take_state(void) {  // (the pass log) 0 recorded, 1 recorded for its clears, 2 not recorded, 3 its clears deferred
+    int h = rec_held_state();
+    return h == 1 && vr_saving(VR_CLEAR_DEFER) ? 3 : h;
+}
+static void pclr_make(int i) {  // (outside any pass) entry i as the pass it was, then gone
+    PClear p = pclr[i];
+    pclr[i] = pclr[--npclr];
+    if (!p.t->backend || p.t->backend != p.b || p.b->image != p.img) { stat_pclr[3]++; return; }  // (re-made: nothing to clear)
+    VkCommandBuffer cb = vk_cmd();
+    vk_barrier_ex(cb, true);
+    VkRenderingAttachmentInfo a = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = p.view, .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                   .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .clearValue = p.cv};
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {p.w, p.h}}, .layerCount = 1, .viewMask = p.vm,
+                          .colorAttachmentCount = p.slot < 8 ? 1 : 0, .pColorAttachments = p.slot < 8 ? &a : NULL,
+                          .pDepthAttachment = p.slot == 8 ? &a : NULL, .pStencilAttachment = p.slot == 9 ? &a : NULL};
+    rec_CmdBeginRendering(cb, &ri);
+    rec_CmdEndRendering(cb);
+    vk_barrier_ex(cb, true);
+    stat_pclr[2]++;
+    if (pl_any()) pl_note("deferred clear made %06x slot %d vm=%u", (unsigned)((uintptr_t)p.t & 0xffffff), p.slot, p.vm);
+}
 static void vk_end_pass_at(int line);
+static void pclr_flush_tex(NvnTexture *t) {  // t is about to be read or written outside a pass's attachments
+    if (!npclr || !t) return;
+    for (int i = npclr - 1; i >= 0; i--)
+        if (pclr[i].t == t) {
+            vk_end_pass_at(1);
+            st.rt_dirty = true;
+            pclr_make(i);
+        }
+}
+static void pclr_flush_all(void) {
+    if (!npclr) return;
+    vk_end_pass_at(1);
+    st.rt_dirty = true;
+    while (npclr) pclr_make(npclr - 1);
+}
+static void pclr_flush_program(ShaderInfo *vi, ShaderInfo *fi);  // (below the texture lookups)
+void vk_pclr_texture_destroyed(NvnTexture *t) {
+    for (int i = npclr - 1; i >= 0; i--) if (pclr[i].t == t) pclr[i] = pclr[--npclr], stat_pclr[3]++;
+}
+// (begin_pass) attachment t of the new pass, as `a` (slot as in PClear): its deferred clear becomes the load op, or is made first
+static void pclr_attach(NvnTexture *t, int slot, VkRenderingAttachmentInfo *a, uint32_t vm, uint32_t w, uint32_t h) {
+    for (int i = npclr - 1; i >= 0; i--) {
+        PClear *p = &pclr[i];
+        if (p->t != t) continue;
+        bool same = p->slot == slot && p->view == a->imageView && p->vm == vm && p->w == w && p->h == h && p->b == t->backend &&
+                    p->b->image == p->img;
+        if (same && a->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD) {
+            a->loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, a->clearValue = p->cv;
+            pclr[i] = pclr[--npclr];
+            stat_pclr[1]++;
+            if (pl_any()) pl_note("deferred clear folded %06x slot %d", (unsigned)((uintptr_t)t & 0xffffff), slot);
+        } else if (same && a->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
+            pclr[i] = pclr[--npclr];  // (the pass clears the whole area itself)
+            stat_pclr[3]++;
+        } else if (p->slot == slot) {
+            pclr_make(i);  // (another view, mask or area of it: the clear as it was, first)
+        }
+    }
+}
+static void pclr_make_tex(NvnTexture *t) {  // (outside a pass) t's deferred clears, as they were
+    for (int i = npclr - 1; i >= 0; i--) if (pclr[i].t == t) pclr_make(i);
+}
+// (vk_end_pass) a held begin with clears and nothing else: taken back, its clears deferred. false: nothing taken
+static bool pclr_take(void) {
+    if (!vr_saving(VR_CLEAR_DEFER) || rec_held_state() != 1) return false;
+    VkRenderingInfo ri;
+    VkRenderingAttachmentInfo ca[8], d, sa;
+    if (!rec_held_take(&ri, ca, &d, &sa)) return false;
+    if (ri.renderArea.offset.x || ri.renderArea.offset.y || ri.layerCount != 1) {  // (not expected: as it was)
+        rec_CmdBeginRendering(vk_cmd(), &ri);
+        rec_CmdEndRendering(vk_cmd());
+        return true;
+    }
+    for (int k = 0; k < (int)ri.colorAttachmentCount + 2; k++) {
+        int slot = k < (int)ri.colorAttachmentCount ? k : k == (int)ri.colorAttachmentCount ? 8 : 9;
+        const VkRenderingAttachmentInfo *a = slot < 8 ? &ri.pColorAttachments[slot] : slot == 8 ? ri.pDepthAttachment : ri.pStencilAttachment;
+        NvnTexture *t = slot < 8 ? pass_rt.color[slot] : pass_rt.depth;
+        if (!a || !a->imageView || a->loadOp != VK_ATTACHMENT_LOAD_OP_CLEAR || !t || !t->backend) continue;
+        PClear e = {t, t->backend, ((TexBackend *)t->backend)->image, a->imageView, ri.viewMask, ri.renderArea.extent.width,
+                    ri.renderArea.extent.height, slot, a->clearValue};
+        int j = 0;
+        while (j < npclr && !(pclr[j].t == t && pclr[j].slot == slot && pclr[j].view == e.view && pclr[j].vm == e.vm && pclr[j].w == e.w &&
+                              pclr[j].h == e.h)) j++;
+        if (j < npclr) { pclr[j] = e; stat_pclr[3]++; continue; }  // (cleared again, nothing in between: the later one)
+        if (npclr == (int)(sizeof pclr / sizeof pclr[0])) pclr_make(0);
+        pclr[npclr++] = e;
+        stat_pclr[0]++;
+    }
+    return true;
+}
 void vk_end_pass(void) { vk_end_pass_at(0); }
 #define vk_end_pass() vk_end_pass_at(__LINE__)
-static __typeof__(st.rt) pass_rt;  // (VR pass diet, merge: the open pass's attachments as bound)
 static void vk_end_pass_at(int line) {
     if (!in_pass) return;
     if (prof && line < 4096) prof_end_line[line]++;
-    rec_CmdEndRendering(vk_cmd());
+    if (pl_any()) pl_pass_end(npclr_take_state());  // (before the end: whether the held begin is recorded)
+    if (!pclr_take()) rec_CmdEndRendering(vk_cmd());
     in_pass = false;
-    if (pl_any()) pl_pass_end();
     if (g_debug_frame && pass_rt.ncolor && pass_rt.color[0] && pass_rt.color[0]->backend) {
         char path[256];
         static uint64_t debug_pass_frame = ~0ull;
@@ -1903,6 +2016,14 @@ static void begin_pass(void) {
         }
     }
     pass_w = minw; pass_h = minh;
+    if (npclr && !placed) {  // (LARECOMP_VR_CLEAR_DEFER) deferred clears of these attachments: load ops, or made first
+        for (int i = 0; i < st.rt.ncolor && i < 8; i++)
+            if (st.rt.color[i] && ca[i].imageView) pclr_attach(st.rt.color[i], i, &ca[i], pass_view_mask, minw, minh);
+        if (has_d) pclr_attach(st.rt.depth, 8, &da, pass_view_mask, minw, minh);
+        if (has_s) pclr_attach(st.rt.depth, 9, &sa, pass_view_mask, minw, minh);
+        for (int i = 0; i < st.rt.ncolor && i < 8 && npclr; i++) pclr_make_tex(st.rt.color[i]);  // (left: in another slot)
+        if (npclr) pclr_make_tex(st.rt.depth);
+    }
     if (pl_any()) {  // (LARECOMP_PASSLOG / LARECOMP_COPY_READERS)
         int load[8] = {0};
         for (int i = 0; i < st.rt.ncolor && i < 8; i++) load[i] = !placed && ca[i].imageView && ca[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
@@ -2138,18 +2259,16 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
     if (!rect.extent.width || !rect.extent.height) return;
     if (index >= 0 && (index >= (int)pass_ncolor || pass_color[index] == VK_FORMAT_UNDEFINED)) return;
     bool simple = (index < 0 || (mask & 0xF) == 0xF) && (!stencil || (smask & 0xFF) == 0xFF);
+    bool whole = rect.offset.x <= 0 && rect.offset.y <= 0 && rect.offset.x + rect.extent.width >= pass_w &&
+                 rect.offset.y + rect.extent.height >= pass_h;
     if (pl_any()) {
-        bool whole = rect.offset.x <= 0 && rect.offset.y <= 0 && rect.offset.x + rect.extent.width >= pass_w &&
-                     rect.offset.y + rect.extent.height >= pass_h;
-        pl_clear(index, depth, stencil, whole, !simple);
         // (a whole clear of every aspect replaces the contents: LARECOMP_COPY_READERS counts it as an overwrite)
         NvnTexture *t = index >= 0 ? st.rt.color[index] : st.rt.depth;
         bool all = index >= 0 ? (mask & 0xF) == 0xF
                               : (!pass_depth || depth) && (!pass_stencil || (stencil && (smask & 0xFF) == 0xFF));
         if (whole && all) pl_overwrite(t, "clear");
     }
-    if (simple && vr_saving(VR_CLEAR_FOLD) && rect.offset.x <= 0 && rect.offset.y <= 0 && rect.offset.x + rect.extent.width >= pass_w &&
-        rect.offset.y + rect.extent.height >= pass_h) {
+    if (simple && whole && vr_saving(VR_CLEAR_FOLD)) {
         // (LARECOMP_VR_CLEAR_FOLD) the pass has not drawn yet: a clear of the whole area is the attachments' load op
         VkRenderingAttachmentInfo *ca = index >= 0 ? rec_held_attachment(index) : NULL;
         VkRenderingAttachmentInfo *da = index < 0 && depth && pass_depth ? rec_held_attachment(8) : NULL;
@@ -2159,9 +2278,12 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
             if (ca) ca->loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, memcpy(ca->clearValue.color.float32, color, 16);
             if (da) da->loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, da->clearValue.depthStencil.depth = dval;
             if (sa) sa->loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, sa->clearValue.depthStencil.stencil = sval;
+            stat_clear_folded++;
+            if (pl_any()) pl_clear(index, depth, stencil, whole, false, true);
             return;
         }
     }
+    if (pl_any()) pl_clear(index, depth, stencil, whole, !simple, false);
     if (simple) {
         VkClearAttachment a[2];
         uint32_t n = 0;
@@ -2996,6 +3118,12 @@ static NvnTexture *shader_texture_object(int stage, ShaderTexture *st_) {
     return ((NvnTexEntry *)st.tpool->entries)[tic].tex;
 }
 
+static void pclr_flush_program(ShaderInfo *vi, ShaderInfo *fi) {
+    ShaderInfo *in[2] = {vi, fi};
+    for (int sg = 0; sg < 2; sg++)
+        for (int i = 0; in[sg] && i < in[sg]->ntex && npclr; i++) pclr_flush_tex(shader_texture_object(sg, &in[sg]->tex[i]));
+}
+
 static bool is_attachment(NvnTexture *t) {
     if (!t) return false;
     if (t == st.rt.depth) return true;
@@ -3149,6 +3277,8 @@ static void alias_copy(CopyAlias *a, VkImageAspectFlags aspects, const char *why
     VkImageCopy c = {.srcSubresource = {aspects, 0, 0, nl}, .dstSubresource = {aspects, 0, 0, nl}, .extent = {d->width, d->height, 1}};
     rec_CmdCopyImage(cb, s->image, VK_IMAGE_LAYOUT_GENERAL, d->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
     if (aspects == d->aspect) stat_alias_copied++; else stat_alias_partial++;
+    if (pl_any()) pl_copy(aspects == d->aspect ? "deferred" : "stencil", g_eye, a->src, a->dst, (int)d->width, (int)d->height, (int)d->width,
+                          (int)d->height, aspects == d->aspect, 0);
     if (ct_on()) LOG("[ct] alias copy %p -> %p aspects %#x (%s)\n", (void *)a->src, (void *)a->dst, aspects, why);
 }
 
@@ -3184,6 +3314,7 @@ static void alias_before_write(NvnTexture *t, VkImageAspectFlags full, const cha
         vk_views_forget(s);
         vk_views_forget(d);
         stat_alias_renamed++;
+        if (pl_any()) pl_note("alias rename %06x>%06x", (unsigned)((uintptr_t)a->src & 0xffffff), (unsigned)((uintptr_t)a->dst & 0xffffff));
         if (ct_on()) LOG("[ct] alias rename %p -> %p (%s)\n", (void *)a->src, (void *)a->dst, why);
         alias_drop(rename);
     }
@@ -3224,6 +3355,7 @@ static bool alias_make(NvnTexture *src, NvnTexture *dst, TexBackend *s, TexBacke
 
 // textures.c: t is being freed - an alias source hands its contents over first
 void vk_alias_texture_destroyed(NvnTexture *t) {
+    vk_pclr_texture_destroyed(t);
     if (naliases) alias_before_write(t, 0, "freed");
 }
 void vk_alias_reset(void) { naliases = 0; }  // (reboot: every texture goes)
@@ -7013,6 +7145,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         }
     }
     st_cs_stores = cp->si->uses_gmem_store;
+    for (int i = 0; i < cp->si->ntex && npclr; i++) pclr_flush_tex(shader_texture_object(5, &cp->si->tex[i]));  // (CLEAR_DEFER)
     snap_apply(5, 0xFFFF);  // (overlap) every bound slot: the probe / copy decision per range, before gfast and the sets read the table
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
@@ -7225,6 +7358,7 @@ void vk_weather_pass(VkImageView color, VkFormat fmt, uint32_t w, uint32_t h, Vk
 
 // right after the scene composite (its pass still open): renderer.m's weather_encode, the same checks and frame
 static void weather_encode(void) {
+    pclr_flush_all();  // (LARECOMP_VR_CLEAR_DEFER: its passes read the scene's targets directly)
     static long off = -1;  // (LARECOMP_WEATHER_SKIP=1: the weather computed but not drawn)
     if (off < 0) off = getenv("LARECOMP_WEATHER_SKIP") ? atol(getenv("LARECOMP_WEATHER_SKIP")) : 0;
     uint64_t frame = renderer_exec_frame();
@@ -7304,6 +7438,7 @@ static int tex_class(NvnTexture *t) {  // (recolour.c's class of a texture the d
 }
 
 static void snow_cover_encode(void) {
+    pclr_flush_all();  // (LARECOMP_VR_CLEAR_DEFER: its passes read the scene's targets directly)
     static long off = -1;  // (LARECOMP_SNOW_SKIP=1: the cover not drawn)
     if (off < 0) off = getenv("LARECOMP_SNOW_SKIP") ? atol(getenv("LARECOMP_SNOW_SKIP")) : 0;
     SnowFrame sf;
@@ -7496,6 +7631,7 @@ static void clone_target(NvnTexture *dst, bool *ok, const NvnTexture *win, uint3
 }
 static void stereo_composite_ring(int eye);  // (below the ring draws' state)
 static void stereo_composite(void) {
+    pclr_flush_all();  // (LARECOMP_VR_CLEAR_DEFER: the eye post hook and the Surroundings capture read images directly)
     NvnTexture *win = st.rt.color[0];
     clone_target(&g_eye_out, &g_eye_out_ok, win, win->format, "stereo eye output");
     if (g_eye == 0) {  // the HUD clone: transparent under the HUD
@@ -8239,6 +8375,7 @@ static void draw_(CmdRec *r, bool indexed) {
     snow_cover_check(r, indexed, pr);  // (the snow on the ground: its stencil marks, the cover after the opaque draws)
     if (ring_route(r, indexed)) { SKIP(SK_RING); return; }  // (ring draws: a ring draw outside the eyes' colour passes)
     if (ct_on()) ct_draw(pr, "draw");
+    if (npclr) pclr_flush_program(pr->vi, pr->fi);  // (LARECOMP_VR_CLEAR_DEFER) a texture it samples gets its clear first
     alias_draw_check();
     resolve_feedback(pr);
     snap_reason = "draw-depthwrite";
@@ -8903,6 +9040,7 @@ static void copy_buffer_to_texture(uint64_t src, const TexRefRec *dst) {
     NvnTexture *t = (NvnTexture *)(uintptr_t)dst->tex;
     if (!t || !src) return;
     alias_before_write(t, 0, "upload");
+    pclr_flush_tex(t);
     vk_end_pass();
     const FormatInfo *fi;
     int32_t rg[6];
@@ -9095,6 +9233,7 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     NvnTexture *st_ = (NvnTexture *)(uintptr_t)src->tex, *dt = (NvnTexture *)(uintptr_t)dst->tex;
     if (!st_ || !dt) return;
     vk_end_pass();
+    if (npclr) pclr_flush_tex(st_), pclr_flush_tex(dt);  // (LARECOMP_VR_CLEAR_DEFER) either one's clear first
     if (dl_on == 2) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=2: each copy its own submission, waited on)
     gp_mark(vk_cmd(), "e%d copy texture %ux%u f%#x -> %ux%u f%#x (%06llx -> %06llx)", g_eye, st_->width, st_->height, st_->format,
             dt->width, dt->height, dt->format, (unsigned long long)((uintptr_t)st_ & 0xffffff), (unsigned long long)((uintptr_t)dt & 0xffffff));
@@ -10150,6 +10289,11 @@ static void exec_list(uint64_t handle, int depth) {
                 // the composite (menus) presents the window and keeps its copy (st_hud_alpha is false there).
                 static uint64_t n;
                 if (!n++) LOG("[diet] the window image's copy into the presented texture is left out while the HUD clone is presented\n");
+                NvnTexture *d_ = (NvnTexture *)(uintptr_t)dst->tex;  // (copy_texture's bookkeeping, as if it had been copied)
+                vk_tex(d_, true);
+                renderer_mark_gpu_owned(d_);
+                renderer_texture_first_write(d_);
+                renderer_texture_level_fresh(d_);
                 if (pl_any()) pl_note("present copy left out");
                 break;
             }
@@ -10457,6 +10601,7 @@ static void stereo_execute(uint64_t handle) {
     uint64_t t0 = plat_now_ns();
     uint32_t q = st_ts_begin();
     exec_list(handle, 0);
+    pclr_flush_all();  // (LARECOMP_VR_CLEAR_DEFER: nothing waits past a list run)
     vk_end_pass();
     st_ts_end(q, 0);
     if (g_mv_run) {
@@ -10492,6 +10637,7 @@ static void stereo_execute(uint64_t handle) {
     else vk_stereo_swap(true);
     q = st_ts_begin();
     exec_list(handle, 0);
+    pclr_flush_all();
     vk_end_pass();
     st_ts_end(q, 1);
     if (vk_mv_on()) mv_layer(0);
