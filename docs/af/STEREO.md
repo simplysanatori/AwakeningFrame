@@ -122,6 +122,11 @@ SMAA looks for edges by colour: the cut against the black void is often a satura
 the High preset's threshold of 0.1, so luma edges left it untouched (Field_16E, 2026-11-18). FXAA's luma is the usual
 weighted sum and finds that edge (0.08 is over its 0.031 floor) but blends it weakly.
 
+Under foveation the passes that draw the eye output shade 4 x 4 blocks in the outer ring, so an outline there,
+the table's cut included, is a stair of 4-pixel steps in the output itself. Neither FXAA nor SMAA undoes steps that
+large (Field_16E at 1728 px: SMAA blends the cut with foveation off, not with High). The edge pass's block smoothing
+does (Fade, or `LARECOMP_VR_EDGE_SMOOTH=all` with Table Edge off; EDGE.md).
+
 Each pass writes an RGBA8 image (gamma-encoded, like the eye output) and the eye's draw reads it instead of the
 output. The images are the flat post passes' (`post_image`), used one eye after the other in the same command buffer.
 With multiview the eye's layer is read through a 2D view of it. The HUD is a layer of its own and is untouched. The
@@ -135,7 +140,8 @@ dynamic resolution step down.
 
 Limits: Passthrough turns void pixels transparent after the anti-aliasing, so the ramp on the void's side of an outline
 is dropped and the geometry's side keeps its blend toward black (a dark rim against the room). In the foveated rings the
-edge pass's block smoothing replaces the anti-aliased colour with block-centre interpolation.
+edge pass's block smoothing replaces the anti-aliased colour with block-centre interpolation. The alpha Passthrough
+gives is 0 or 1 per pixel from the depth, so the outline against the room is not anti-aliased either way.
 
 ## Tiled lights (interiors and caves)
 
