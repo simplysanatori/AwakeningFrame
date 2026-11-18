@@ -2,6 +2,7 @@
 // hand-off of the presenting thread's sets (GalaxyFrame's showPendingVk / settleVk / finishFrameVk, reduced: LAS can't
 // draw a frame again at each refresh, so the loop only shows sets; see xr.h).
 #define _GNU_SOURCE  // (pthread_setname_np)
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -146,6 +147,51 @@ static void timing_line(uint64_t f, uint64_t t_wait0, uint64_t t_ret, const XrFr
             tm.tm_hour, tm.tm_min, tm.tm_sec, rt.tv_nsec / 1000000, (unsigned long long)f, (t_ret - b) / 1e6,
             time_ms(fs->predictedDisplayTime), fs->predictedDisplayPeriod / 1e6, (t_ret - t_wait0) / 1e6, (t_begin - b) / 1e6,
             (t_end - b) / 1e6, atomic_load(&g_gpu_us[0]) / 1000.0, atomic_load(&g_gpu_us[1]) / 1000.0, late);
+}
+
+// LARECOMP_XR_POSE_LOG=<file>: per refresh, the head (VIEW in LOCAL) and the eye gaze (relative to the head) at the
+// refresh's predicted display time, in the text format xrmock's MOCK_XR_POSE=file: and MOCK_XR_GAZE=file read
+// ("t x y z yaw pitch roll gaze_yaw gaze_pitch": seconds since xrBeginSession, metres, degrees; yaw unwrapped, nan when
+// there is no gaze), so a headset session can be replayed on the desktop (docs/af/TOOLING.md). Replayed as the mock's
+// STAGE, the mock's LOCAL becomes the recording's first pose, which is where the game measures from anyway.
+// Unset: one test per refresh, nothing else.
+static FILE *plog;
+static int plog_on = -1;
+static void pose_log(XrTime t) {
+    if (plog_on < 0) {
+        const char *e = getenv("LARECOMP_XR_POSE_LOG");
+        plog_on = e && *e;
+        if (plog_on && !(plog = fopen(e, "w"))) LOG("[xr] cannot write the pose log %s\n", e), plog_on = 0;
+        if (plog_on) setvbuf(plog, NULL, _IOLBF, 0);  // (whole lines: the game can leave by _exit)
+        if (plog_on)
+            fprintf(plog, "# LARECOMP_XR_POSE_LOG: t x y z yaw pitch roll gaze_yaw gaze_pitch (VIEW in LOCAL at each refresh's display "
+                          "time; seconds since xrBeginSession, metres, degrees; xrmock MOCK_XR_POSE=file:, MOCK_XR_GAZE=file)\n");
+    }
+    if (!plog_on) return;
+    XrSpaceLocation loc = {.type = XR_TYPE_SPACE_LOCATION};
+    const XrSpaceLocationFlags need = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+    if (XR_FAILED(p_xrLocateSpace(g_xr.view, g_xr.local, t, &loc)) || (loc.locationFlags & need) != need) return;
+    const XrQuaternionf q = loc.pose.orientation;
+    const float r2d = 57.2957795f;
+    // yaw about +y, then pitch about x, then roll about z (the mock's order): yaw and pitch from the forward vector,
+    // roll from what is left of q once yaw and pitch are taken out
+    float fx = -2 * (q.x * q.z + q.w * q.y), fy = -2 * (q.y * q.z - q.w * q.x), fz = -(1 - 2 * (q.x * q.x + q.y * q.y));
+    float yaw = atan2f(-fx, -fz), pitch = asinf(fminf(1.0f, fmaxf(-1.0f, fy)));
+    float cy = cosf(yaw * 0.5f), sy = sinf(yaw * 0.5f), cp = cosf(pitch * 0.5f), sp = sinf(pitch * 0.5f);
+    XrQuaternionf a = {sp * cy, sy * cp, -sy * sp, cy * cp};  // qy * qx; its conjugate times q is the roll about z
+    float rz = a.w * q.z - a.x * q.y + a.y * q.x - a.z * q.w, rw = a.w * q.w + a.x * q.x + a.y * q.y + a.z * q.z;
+    float roll = 2 * atan2f(rz, rw);
+    if (roll > 3.14159265f) roll -= 6.2831853f;  // (q and -q are one rotation)
+    if (roll < -3.14159265f) roll += 6.2831853f;
+    static float last_yaw;
+    static bool have;
+    float yd = yaw * r2d;
+    if (have) yd += 360.0f * roundf((last_yaw - yd) / 360.0f);  // (unwrapped: the mock interpolates linearly)
+    last_yaw = yd, have = true;
+    float d[3], gy = NAN, gp = NAN;
+    if (xr_input_gaze(g_xr.view, t, d)) gy = atan2f(-d[0], -d[2]) * r2d, gp = asinf(fminf(1.0f, fmaxf(-1.0f, d[1]))) * r2d;
+    fprintf(plog, "%.5f %.5f %.5f %.5f %.4f %.4f %.4f %.3f %.3f\n", time_ms(t) / 1e3, loc.pose.position.x, loc.pose.position.y,
+            loc.pose.position.z, yd, pitch * r2d, roll * r2d, gy, gp);
 }
 
 // The VR tab's Refresh Rate, between its two 90 Hz choices (30 FPS, 60 FPS test), while the game runs (runtime/vr_settings.c):
@@ -293,22 +339,27 @@ static void *xr_thread(void *arg) {
         {   // below 100 Hz (90): the game held in its 30 fps mode (pace.c pace_xr_lock); 120 Hz: 60 as the pacer decides.
             // LARECOMP_XR_FPS=60 (a test): below 100 Hz the pacer decides too, with a 16.67 ms game frame.
             // About 60 Hz (SteamVR throttling 120 Hz, framesToThrottle=1): 60 as the pacer decides, one refresh a frame
+            // LARECOMP_XR_FPS=30 (a test): at 100 Hz and up too the game held at 30 fps (4 refreshes a frame at 120), as the
+            // pacer holds it on the headset when the GPU frame does not fit 60; the pacer's 120 Hz budgets stay
             static int locked = -1;
-            static int test60 = -1;
+            static int test60 = -1, test30 = -1;
             if (test60 < 0) test60 = getenv("LARECOMP_XR_FPS") && atoi(getenv("LARECOMP_XR_FPS")) == 60;
+            if (test30 < 0) test30 = getenv("LARECOMP_XR_FPS") && atoi(getenv("LARECOMP_XR_FPS")) == 30;
             int fr = __atomic_exchange_n(&g_fps_req, -1, __ATOMIC_ACQ_REL);
             if (fr >= 0 && (fr == 60) != (test60 == 1)) test60 = fr == 60, LOG("[xr] game frame rate at 90 Hz: %s (VR settings)\n", test60 ? "60 fps (test)" : "30 fps");
             bool hz60 = g_xr.display_hz > 0 && g_xr.display_hz < 75;
-            int want = hz60 ? 1 : g_xr.display_hz < 100 ? (test60 ? 60 : 30) : 0;  // (1: 60 fps at 60 Hz)
+            int want = hz60 ? 1 : g_xr.display_hz < 100 ? (test60 ? 60 : 30) : test30 ? 31 : 0;  // (1: 60 fps at 60 Hz; 31: the 30 test)
             if (want != locked) {
-                pace_xr_lock(want == 30 ? 30 : 0);
+                pace_xr_lock(want == 30 || want == 31 ? 30 : 0);
                 pace_xr_frame_ms(want == 30 ? 0 : want == 60 ? 1e3 / 60 : (want == 1 ? 1e3 : 2e3) / g_xr.display_hz);
                 if (want == 60) LOG("[xr] test: 60 fps at %.0f Hz (uneven cadence)\n", g_xr.display_hz);
-                LOG("[xr] display at %.0f Hz: the game %s\n", g_xr.display_hz, want == 30 ? "held at 30 fps (3 refreshes a frame)" : want == 60 ? "at 60 fps (1 or 2 refreshes a frame)" : want == 1 ? "at 60 fps (1 refresh a frame)" : "at 60 fps (2 refreshes a frame)");
+                if (want == 31) LOG("[xr] test: the game held at 30 fps (LARECOMP_XR_FPS=30)\n");
+                LOG("[xr] display at %.0f Hz: the game %s\n", g_xr.display_hz, want == 30 ? "held at 30 fps (3 refreshes a frame)" : want == 31 ? "held at 30 fps (4 refreshes a frame)" : want == 60 ? "at 60 fps (1 or 2 refreshes a frame)" : want == 1 ? "at 60 fps (1 refresh a frame)" : "at 60 fps (2 refreshes a frame)");
                 locked = want;
             }
         }
         xr_input_frame();  // the controllers, once per refresh, just before the game's vsync
+        pose_log(fs.predictedDisplayTime);
         // The game's 60 Hz vsync from the display's refreshes: every second one at 120 Hz, two of three at 90 Hz (by
         // display time, so a missed refresh doesn't slow the game down). The frame starting now is shown two refreshes on.
         int64_t step = last_d ? fs.predictedDisplayTime - last_d : period;
@@ -339,6 +390,7 @@ static void *xr_thread(void *arg) {
         timing_line(frame_no++, t_wait0, now, &fs, t_begin, t_end, st.gpu_late != late_before);
         if (now - stats_at >= 5000000000ull) {
             if (tlog) fflush(tlog);
+            if (plog) fflush(plog);
             log_stats((now - stats_at) / 1e9);
             stats_at = now;
         }
@@ -388,6 +440,7 @@ void xr_shutdown(void) {
     done = true;
     xr_thread_stop();
     if (tlog) fclose(tlog), tlog = NULL;
+    if (plog) fclose(plog), plog = NULL, plog_on = 0;
     xr_drain_gpu("swapchain destruction");
     xr_chains_destroy();
     xr_session_destroy();

@@ -614,6 +614,181 @@ int mockvk_probe_collect(int* tag, int* w, int* h, float* out, int sub) {
     return 0;
 }
 
+// ---- whole-eye reduced copies (MOCK_XR_FLICK) ------------------------------
+// The whole image of a released eye, reduced on the GPU by 2^shift with exact 2x2 box steps (linear blits at 2:1, so
+// each step averages four pixels: no aliasing that would read as flicker), copied into a host buffer on the app's queue
+// behind its own work, with a fence, and collected later without waiting. Nothing on the CPU but the luma of the small
+// copy: the frame loop is not held up as by MOCK_XR_SHOT.
+#define FLICKS 16
+#define FLICK_LEVELS 4
+typedef struct {
+    int busy, tag, w, h, sw, sh, shift;
+    VkFormat fmt;
+    VkImage im[FLICK_LEVELS];
+    VkDeviceMemory imem[FLICK_LEVELS];
+    VkBuffer buf;
+    VkDeviceMemory mem;
+    void* map;
+    VkCommandPool pool;
+    VkCommandBuffer cb;
+    VkFence fence;
+} Flick;
+static Flick gFlick[FLICKS];
+
+static void flickFree(Flick* p) {
+    for (int i = 0; i < FLICK_LEVELS; i++) {
+        if (p->im[i]) DEV(vkDestroyImage)(gDevice, p->im[i], NULL), p->im[i] = VK_NULL_HANDLE;
+        if (p->imem[i]) DEV(vkFreeMemory)(gDevice, p->imem[i], NULL), p->imem[i] = VK_NULL_HANDLE;
+    }
+    if (p->buf) DEV(vkUnmapMemory)(gDevice, p->mem), DEV(vkDestroyBuffer)(gDevice, p->buf, NULL), DEV(vkFreeMemory)(gDevice, p->mem, NULL);
+    p->buf = VK_NULL_HANDLE, p->mem = VK_NULL_HANDLE, p->map = NULL;
+}
+
+// (the levels and the host buffer for a source of sw x sh in format fmt, made once per size)
+static int flickAlloc(Flick* p, int sw, int sh, VkFormat fmt, int shift) {
+    if (p->buf && p->sw == sw && p->sh == sh && p->fmt == fmt && p->shift == shift) return 0;
+    flickFree(p);
+    p->sw = sw, p->sh = sh, p->fmt = fmt, p->shift = shift;
+    int w = sw, h = sh;
+    for (int i = 0; i < shift; i++) {
+        w = w > 1 ? w / 2 : 1, h = h > 1 ? h / 2 : 1;
+        VkImageCreateInfo ic = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        ic.imageType = VK_IMAGE_TYPE_2D;
+        ic.format = fmt;
+        ic.extent = (VkExtent3D){(uint32_t)w, (uint32_t)h, 1};
+        ic.mipLevels = ic.arrayLayers = 1;
+        ic.samples = VK_SAMPLE_COUNT_1_BIT;
+        ic.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ic.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        if (DEV(vkCreateImage)(gDevice, &ic, NULL, &p->im[i]) != VK_SUCCESS) { p->im[i] = VK_NULL_HANDLE; flickFree(p); return -1; }
+        VkMemoryRequirements req;
+        DEV(vkGetImageMemoryRequirements)(gDevice, p->im[i], &req);
+        VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        ai.allocationSize = req.size;
+        ai.memoryTypeIndex = memType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (DEV(vkAllocateMemory)(gDevice, &ai, NULL, &p->imem[i]) != VK_SUCCESS) { p->imem[i] = VK_NULL_HANDLE; flickFree(p); return -1; }
+        DEV(vkBindImageMemory)(gDevice, p->im[i], p->imem[i], 0);
+    }
+    p->w = w, p->h = h;
+    VkBufferCreateInfo bc = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bc.size = (VkDeviceSize)w * (VkDeviceSize)h * 4;
+    bc.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (DEV(vkCreateBuffer)(gDevice, &bc, NULL, &p->buf) != VK_SUCCESS) { p->buf = VK_NULL_HANDLE; flickFree(p); return -1; }
+    VkMemoryRequirements req;
+    DEV(vkGetBufferMemoryRequirements)(gDevice, p->buf, &req);
+    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = req.size;
+    ai.memoryTypeIndex = memType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+    if (DEV(vkAllocateMemory)(gDevice, &ai, NULL, &p->mem) != VK_SUCCESS) { DEV(vkDestroyBuffer)(gDevice, p->buf, NULL); p->buf = VK_NULL_HANDLE; flickFree(p); return -1; }
+    DEV(vkBindBufferMemory)(gDevice, p->buf, p->mem, 0);
+    DEV(vkMapMemory)(gDevice, p->mem, 0, bc.size, 0, &p->map);
+    if (!p->pool) {
+        VkCommandPoolCreateInfo pci = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        pci.queueFamilyIndex = gQueueFamily;
+        pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        DEV(vkCreateCommandPool)(gDevice, &pci, NULL, &p->pool);
+        VkCommandBufferAllocateInfo cai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        cai.commandPool = p->pool;
+        cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cai.commandBufferCount = 1;
+        DEV(vkAllocateCommandBuffers)(gDevice, &cai, &p->cb);
+        VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        DEV(vkCreateFence)(gDevice, &fi, NULL, &p->fence);
+    }
+    return 0;
+}
+
+static void flickBarrier(VkCommandBuffer cb, VkImage im, VkImageLayout from, VkImageLayout to, VkAccessFlags src, VkAccessFlags dst, int layers,
+                         int mips) {
+    VkImageMemoryBarrier m = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    m.srcAccessMask = src, m.dstAccessMask = dst, m.oldLayout = from, m.newLayout = to;
+    m.srcQueueFamilyIndex = m.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    m.image = im;
+    m.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    m.subresourceRange.levelCount = (uint32_t)mips;
+    m.subresourceRange.layerCount = (uint32_t)layers;
+    DEV(vkCmdPipelineBarrier)(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &m);
+}
+
+int mockvk_flick_submit(void* images, int index, uint32_t layer, int shift, int tag) {
+    VkImages* r = (VkImages*)images;
+    if (!r || index < 0 || index >= r->count || !r->im[index] || !gQueue || r->depth) return -1;
+    if (r->format != VK_FORMAT_R8G8B8A8_SRGB && r->format != VK_FORMAT_R8G8B8A8_UNORM && r->format != VK_FORMAT_B8G8R8A8_SRGB &&
+        r->format != VK_FORMAT_B8G8R8A8_UNORM)
+        return -1;
+    if (shift < 1) shift = 1;
+    if (shift > FLICK_LEVELS) shift = FLICK_LEVELS;
+    if (layer >= (uint32_t)r->layers) layer = 0;
+    int k = 0;
+    while (k < FLICKS && gFlick[k].busy) k++;
+    if (k == FLICKS) return -1;
+    Flick* p = &gFlick[k];
+    if (flickAlloc(p, r->w, r->h, r->format, shift) < 0) return -1;
+    VkCommandBuffer cb = p->cb;
+    DEV(vkResetCommandBuffer)(cb, 0);
+    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    DEV(vkBeginCommandBuffer)(cb, &bi);
+    int mips = r->mips ? r->mips : 1;
+    flickBarrier(cb, r->im[index], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                 VK_ACCESS_TRANSFER_READ_BIT, r->layers, mips);
+    int w = r->w, h = r->h;
+    for (int i = 0; i < shift; i++) {
+        int nw = w > 1 ? w / 2 : 1, nh = h > 1 ? h / 2 : 1;
+        flickBarrier(cb, p->im[i], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, 1, 1);
+        VkImageBlit b;
+        memset(&b, 0, sizeof(b));
+        b.srcSubresource.aspectMask = b.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        b.srcSubresource.baseArrayLayer = i ? 0 : layer;
+        b.srcSubresource.layerCount = b.dstSubresource.layerCount = 1;
+        b.srcOffsets[1] = (VkOffset3D){nw * 2, nh * 2, 1};  // (whole 2x2 blocks: the blit's linear filter is then an exact box)
+        b.dstOffsets[1] = (VkOffset3D){nw, nh, 1};
+        DEV(vkCmdBlitImage)(cb, i ? p->im[i - 1] : r->im[index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, p->im[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b,
+                            VK_FILTER_LINEAR);
+        flickBarrier(cb, p->im[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                     VK_ACCESS_TRANSFER_READ_BIT, 1, 1);
+        w = nw, h = nh;
+    }
+    // the app's image back in the layout it was released in, before its next write
+    flickBarrier(cb, r->im[index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, r->layers, mips);
+    VkBufferImageCopy c;
+    memset(&c, 0, sizeof(c));
+    c.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    c.imageSubresource.layerCount = 1;
+    c.imageExtent = (VkExtent3D){(uint32_t)w, (uint32_t)h, 1};
+    DEV(vkCmdCopyImageToBuffer)(cb, p->im[shift - 1], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, p->buf, 1, &c);
+    DEV(vkEndCommandBuffer)(cb);
+    VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cb;
+    DEV(vkResetFences)(gDevice, 1, &p->fence);
+    if (DEV(vkQueueSubmit)(gQueue, 1, &si, p->fence) != VK_SUCCESS) return -1;
+    p->busy = 1, p->tag = tag, p->w = w, p->h = h;
+    return k;
+}
+
+// A finished reduced copy: its tag, size and luma bytes (Rec. 601 weights on the stored bytes) into out (w x h, which
+// must hold the source's size >> 1); bg >= 0: over a background of that luma by the image's alpha, as a compositor
+// blending a premultiplied layer over the room would show it. 1 when one was collected.
+int mockvk_flick_collect(int* tag, int* w, int* h, uint8_t* out, int bg) {
+    for (int k = 0; k < FLICKS; k++) {
+        Flick* p = &gFlick[k];
+        if (!p->busy || DEV(vkGetFenceStatus)(gDevice, p->fence) != VK_SUCCESS) continue;
+        int bgr = p->fmt == VK_FORMAT_B8G8R8A8_SRGB || p->fmt == VK_FORMAT_B8G8R8A8_UNORM;
+        const uint8_t* s = (const uint8_t*)p->map;
+        for (size_t i = 0, n = (size_t)p->w * (size_t)p->h; i < n; i++, s += 4) {
+            float rr = bgr ? s[2] : s[0], gg = s[1], bb = bgr ? s[0] : s[2];
+            float l = 0.299f * rr + 0.587f * gg + 0.114f * bb + (bg >= 0 ? (1.0f - s[3] / 255.0f) * (float)bg : 0.0f);
+            out[i] = (uint8_t)(l > 254.5f ? 255.0f : l + 0.5f);
+        }
+        *tag = p->tag, *w = p->w, *h = p->h;
+        p->busy = 0;
+        return 1;
+    }
+    return 0;
+}
+
 // ---- a compositor's share of the GPU (MOCK_XR_COMPOSITOR) ---------------------------------------------------------
 // SteamVR's compositor shares the GPU with the app: each refresh it needs about a millisecond of GPU (its timewarp of
 // the layers) finished before the vsync, from its own high-priority context. This models it: a second VkDevice (its

@@ -186,9 +186,10 @@ void edge_set_mode(int vrs) {
     "float dsample(vec2 q) { return texture(dt, q * u.cc.zw).r; }\n"                                                   \
     "bool is_geo(float d) { return d < 0.9999; }\n"                                                                  \
     "// the shading rate (log2 w, h) the foveated passes gave the 8 px texel holding colour pixel sp (foveation.c)\n" \
+    "#define VRS_T 8.0\n"  /* (fov_vrs_texel: compile() puts the test's 16 here) */                                \
     "ivec2 vrs_rate(vec2 sp) {\n"                                                                                     \
-    "  vec2 x = (floor(sp / 8.0) + 0.5) * 8.0;\n"                                                                     \
-    "  if (x.x > u.vb.x + 8.0 || x.y > u.vb.y + 8.0) return ivec2(2);\n"                                              \
+    "  vec2 x = (floor(sp / VRS_T) + 0.5) * VRS_T;\n"                                                                 \
+    "  if (x.x > u.vb.x + VRS_T || x.y > u.vb.y + VRS_T) return ivec2(2);\n"                                          \
     "  ivec2 r = ivec2(2);\n"                                                                                         \
     "  for (int f = 0; f < 2; f++) {\n"                                                                               \
     "    if (float(f) >= u.va.y) break;\n"                                                                            \
@@ -525,7 +526,18 @@ static VkPipeline make_pipe(VkShaderModule fs, VkFormat fmt) {
 }
 
 static VkShaderModule compile(const char *src, int stage, const char *name) {
+    // (LARECOMP_VR_FOVEATION_TEXEL=16, a desktop test: the foveated passes' texel in vrs_rate)
+    static const char k8[] = "#define VRS_T 8.0\n";
+    const char *at = fov_vrs_texel() != 8 ? strstr(src, k8) : NULL;
+    char *alt = NULL;
+    if (at) {
+        size_t n = strlen(src);
+        alt = malloc(n + 8);
+        snprintf(alt, n + 8, "%.*s#define VRS_T %d.0\n%s", (int)(at - src), src, fov_vrs_texel(), at + sizeof k8 - 1);
+        src = alt;
+    }
     VkShaderModule m = vk_compile_glsl(src, stage, name);
+    free(alt);
     if (!m) LOG("[edge] shader %s failed to compile\n", name);
     return m;
 }
@@ -885,6 +897,17 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
         if (mode == EDGE_FADE && fabsf(fade_r - said_r) > 0.5f && tn - said_t > 2.0 && (said_t = tn))
             LOG("[edge] fade: centre (%.1f %.1f %.1f), clear to %.1f units, black past %.1f%s\n", fade_c[0], fade_c[1], fade_c[2], fade_r,
                 fade_r + fade_w, fitted ? " (fitted inside the floor the culling draws)" : ""), said_r = fade_r;
+    }
+    {   // LARECOMP_VR_EDGE_LOG=1: one line per eye-0 pass with what the fade was drawn with (flicker hunts)
+        static int lg = -1;
+        if (lg < 0) lg = getenv("LARECOMP_VR_EDGE_LOG") && atoi(getenv("LARECOMP_VR_EDGE_LOG")) > 0;
+        float dq[4][2] = {{0}};  // (the fit's trapezoid; zeros when there was none: `drawn` is only filled for a fit)
+        if (fitted) memcpy(dq, drawn, sizeof dq);
+        if (lg && eye == 0 && mode == EDGE_FADE)
+            LOG("[edgelog] t=%.4f out %ux%u crop %.4f %.4f c %.2f %.2f r %.2f w %.2f fit %d cut %d dq %.1f,%.1f %.1f,%.1f %.1f,%.1f %.1f,%.1f vrs %d foci %.1f,%.1f %.1f,%.1f r0 %.3f r1 %.3f filled %.0fx%.0f\n",
+                plat_now_ns() / 1e9, w, h, in->color_crop[0], in->color_crop[1], fade_c[0], fade_c[2], fade_r, fade_w, fitted, cut,
+                dq[0][0], dq[0][1], dq[1][0], dq[1][1], dq[2][0], dq[2][1], dq[3][0], dq[3][1], (int)u.va[0],
+                u.vc[0], u.vc[1], u.vc[2], u.vc[3], u.va[2], u.va[3], u.vb[0], u.vb[1]);
     }
     u.mi[0] = cfg.desat, u.mi[1] = cfg.bright, u.mi[2] = (float)cfg.debug, u.mi[3] = cfg.fixed_colours ? 1.0f : 0.0f;
 

@@ -43,3 +43,5 @@ const void *fov_pass(int eye, bool per_eye, uint32_t w, uint32_t h, float fx, fl
 // else `out`; past the filled part (x > fw + 8 or y > fh + 8) 4x4. Rates are log2 width, log2 height.
 typedef struct { uint32_t w, h; int nfoci; float c[2][2], fw, fh, r0, r1; int mid[2], out[2]; } FovShade;
 bool fov_shade(FovShade *out);
+// the shading-rate map's texel in pixels (8; LARECOMP_VR_FOVEATION_TEXEL=16, a desktop test)
+int fov_vrs_texel(void);

@@ -28,9 +28,14 @@
 //   MOCK_XR_EYE_SIZE=WxH     recommended per-eye size (1680x1760, the Frame's default at 120 Hz); max is 4096x4096
 //   MOCK_XR_IPD=<m>          eye separation (0.064)
 //   MOCK_XR_FOV=l,r,u,d      per-eye fov in degrees (-48,48,48,-48)
+//   MOCK_XR_FOV_RIGHT=l,r,u,d the right eye's own fov (default: MOCK_XR_FOV; "mirror": MOCK_XR_FOV mirrored, -r,-l,u,d,
+//                            as a headset whose eyes see further outward than inward)
+//   MOCK_XR_CANT=<deg>       each eye's view turned outward by this (canted displays; 0)
 //   MOCK_XR_POSE=<spec>      head pose in STAGE: sway (default: yaw +-17 deg at 0.5 Hz, 1.6 m up) |
 //                            static[:x,y,z,yaw[,pitch[,roll]]] (metres, degrees) | file:<path>
-//                            (lines "t x y z yaw pitch roll", t in seconds from xrBeginSession, linear, held at the ends)
+//                            (lines "t x y z yaw pitch roll [gaze_yaw gaze_pitch]", t in seconds from xrBeginSession,
+//                            linear, held at the ends; the gaze columns, relative to the head, are what MOCK_XR_GAZE=file
+//                            plays; the game's LARECOMP_XR_POSE_LOG writes this format, tools/xrmock/headpose.py makes it)
 //   MOCK_XR_SHOT=<spec>      write the submitted images to PNG for these frames (1-based, as in the trace):
 //                            "30", "10,20", "5-8", "every:60", "all"
 //                            (a dumped frame stalls the loop for ~0.5 s per image: copy and PNG on the CPU)
@@ -43,6 +48,11 @@
 //   MOCK_XR_SHIFT_REF=<s>    the reference image: each eye's first image this many seconds in (30)
 //   MOCK_XR_SHIFT_DUMP=<dir> also write the probed images (the centre 2/3, luma, half size) as PGM, for the
 //   MOCK_XR_SHIFT_DUMP_AT=a,b  display times a to b seconds
+//   MOCK_XR_FLICK=<dir>      every new eye image whole, reduced on the GPU, as PGM luma with an index of the poses it was
+//                            submitted with, without stalling the loop (tools/flicker.py); MOCK_XR_FLICK_AT=a,b display times
+//                            a to b s (all), MOCK_XR_FLICK_SHIFT=n reduced by 2^n (2: a quarter), MOCK_XR_FLICK_EYES=0|1|both,
+//                            MOCK_XR_FLICK_BG=<luma>: the image over a background of that luma by its alpha (a layer blended
+//                            over the room: Table Edge Passthrough's alpha shows)
 //   MOCK_XR_COMPOSITOR=lead[,from]  (MOCK_XR_COMPOSITOR_PRIO=realtime|high|medium|none: its priority) a compositor's GPU job (two eye-sized blits) on its own high-priority device, lead
 //                            ms before each vsync; the summary gives its latency and the refreshes it would have missed,
 //                            counted from `from` seconds on (MOCK_XR_COMPOSITOR_LOG=<file>: one line per refresh)
@@ -51,6 +61,10 @@
 //                            (the app released an image whose GPU work was unfinished).  Off unless set.
 //   MOCK_XR_AIM=<spec>       point a controller: "t0-t1:right|left:x,y,z;..." from t0 to t1 s after xrBeginSession that hand's
 //                            action spaces (aim, grip) turn so their -z points at STAGE point x,y,z (else straight ahead)
+//   MOCK_XR_GAZE=yaw,pitch[,ay,ap,hz[,jitter]]  the eye gaze (XR_EXT_eye_gaze_interaction's pose action space) relative to
+//                            the head, degrees: yaw / pitch, plus a Lissajous path of amplitudes ay / ap (hz in yaw, 0.7 hz in
+//                            pitch) and a fixation jitter of +-jitter degrees, new every 1/240 s (else the gaze is a hand pose)
+//                            | file (the gaze columns of the MOCK_XR_POSE file) | file:<path> (those of another pose file)
 //   MOCK_XR_EXTENSIONS=a,b   replace the extension list offered
 //   MOCK_XR_NO_LOCAL_FLOOR=1 refuse LOCAL_FLOOR spaces
 //
@@ -63,6 +77,7 @@
 // the runtime; the Vulkan version.
 #define _GNU_SOURCE
 #include <math.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -148,10 +163,24 @@ static Pose fromXr(XrPosef p) { return (Pose){{p.orientation.x, p.orientation.y,
 
 // ---- head pose script -----------------------------------------------------
 typedef struct { double t; float v[6]; } Key;  // x y z yaw pitch roll (radians)
-static Key gKeys[4096];
-static int gKeyCount = 0, gPoseMode = 0;  // 0 sway, 1 static/script
+static Key* gKeys;
+static int gKeyCount = 0, gKeyCap = 0, gPoseMode = 0;  // 0 sway, 1 static/script
+// the gaze columns of a pose file (yaw, pitch relative to the head, radians; MOCK_XR_GAZE=file)
+typedef struct { double t; float yaw, pitch; } GazeKey;
+static GazeKey* gGazeKeys;
+static int gGazeKeyCount = 0, gGazeKeyCap = 0;
 #define D2R 0.017453292519943295f
 
+// the last key at or before t (keys sorted by t; a recording has thousands of lines, so no linear walk per call)
+static int keyBefore(const void* keys, size_t stride, int n, double t) {
+    int lo = 0, hi = n - 1;
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        if (*(const double*)((const char*)keys + (size_t)mid * stride) <= t) lo = mid;
+        else hi = mid - 1;
+    }
+    return lo;
+}
 static Pose headPoseAt(double t) {  // in STAGE
     float v[6] = {0, 1.6f, 0, 0, 0, 0};
     if (gPoseMode == 0) {
@@ -161,16 +190,59 @@ static Pose headPoseAt(double t) {  // in STAGE
     } else if (t >= gKeys[gKeyCount - 1].t) {
         memcpy(v, gKeys[gKeyCount - 1].v, sizeof(v));
     } else {
-        int k = 0;
-        while (k + 2 < gKeyCount && gKeys[k + 1].t < t) k++;
+        int k = keyBefore(gKeys, sizeof(Key), gKeyCount, t);
+        if (k > gKeyCount - 2) k = gKeyCount - 2;
         double f = (t - gKeys[k].t) / (gKeys[k + 1].t - gKeys[k].t);
         for (int i = 0; i < 6; i++) v[i] = (float)(gKeys[k].v[i] + f * (gKeys[k + 1].v[i] - gKeys[k].v[i]));
     }
     return (Pose){qeuler(v[3], v[4], v[5]), {v[0], v[1], v[2]}};
 }
+// MOCK_XR_GAZE=file: the gaze at t from the file's gaze columns (linear, held at the ends); 0 when there are none
+static int gazeFileAt(double t, float* yaw, float* pitch) {
+    if (!gGazeKeyCount) return 0;
+    const GazeKey* g = gGazeKeys;
+    int n = gGazeKeyCount;
+    if (n == 1 || t <= g[0].t) { *yaw = g[0].yaw, *pitch = g[0].pitch; return 1; }
+    if (t >= g[n - 1].t) { *yaw = g[n - 1].yaw, *pitch = g[n - 1].pitch; return 1; }
+    int k = keyBefore(g, sizeof(GazeKey), n, t);
+    if (k > n - 2) k = n - 2;
+    float f = (float)((t - g[k].t) / (g[k + 1].t - g[k].t));
+    *yaw = g[k].yaw + f * (g[k + 1].yaw - g[k].yaw), *pitch = g[k].pitch + f * (g[k + 1].pitch - g[k].pitch);
+    return 1;
+}
+// Reads a pose file: lines "t x y z yaw pitch roll [gaze_yaw gaze_pitch]" (seconds, metres, degrees; '#' comments).
+// head: the head keys (else only the gaze columns are taken). The gaze columns are optional; "nan" there is no gaze.
+static int readPoseFile(const char* path, int head) {
+    FILE* f = fopen(path, "r");
+    if (!f) {
+        fprintf(stderr, "xrmock: cannot read pose script %s\n", path);
+        return -1;
+    }
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#') continue;
+        Key k;
+        float gy, gp;
+        int n = sscanf(line, "%lf %f %f %f %f %f %f %f %f", &k.t, &k.v[0], &k.v[1], &k.v[2], &k.v[3], &k.v[4], &k.v[5], &gy, &gp);
+        if (n < 7) continue;
+        if (head) {
+            for (int i = 3; i < 6; i++) k.v[i] *= D2R;
+            if (gKeyCount == gKeyCap) gKeyCap = gKeyCap ? gKeyCap * 2 : 4096, gKeys = (Key*)realloc(gKeys, sizeof(Key) * (size_t)gKeyCap);
+            gKeys[gKeyCount++] = k;
+        }
+        if (n == 9 && gy == gy && gp == gp) {  // (NaN: no gaze on that line)
+            if (gGazeKeyCount == gGazeKeyCap)
+                gGazeKeyCap = gGazeKeyCap ? gGazeKeyCap * 2 : 4096, gGazeKeys = (GazeKey*)realloc(gGazeKeys, sizeof(GazeKey) * (size_t)gGazeKeyCap);
+            gGazeKeys[gGazeKeyCount++] = (GazeKey){k.t, gy * D2R, gp * D2R};
+        }
+    }
+    fclose(f);
+    return 0;
+}
 static void loadPose(const char* spec) {
     if (!spec || !*spec || !strcmp(spec, "sway")) return;
     gPoseMode = 1;
+    gKeyCap = 4096, gKeys = (Key*)calloc((size_t)gKeyCap, sizeof(Key));
     gKeys[0] = (Key){0, {0, 1.6f, 0, 0, 0, 0}};
     gKeyCount = 1;
     if (!strncmp(spec, "static", 6)) {
@@ -181,22 +253,8 @@ static void loadPose(const char* spec) {
             memcpy(gKeys[0].v, a, sizeof(a));
         }
     } else if (!strncmp(spec, "file:", 5)) {
-        FILE* f = fopen(spec + 5, "r");
-        if (!f) {
-            fprintf(stderr, "xrmock: cannot read pose script %s\n", spec + 5);
-            return;
-        }
-        char line[256];
         gKeyCount = 0;
-        while (fgets(line, sizeof(line), f) && gKeyCount < 4096) {
-            if (line[0] == '#') continue;
-            Key k;
-            if (sscanf(line, "%lf %f %f %f %f %f %f", &k.t, &k.v[0], &k.v[1], &k.v[2], &k.v[3], &k.v[4], &k.v[5]) == 7) {
-                for (int i = 3; i < 6; i++) k.v[i] *= D2R;
-                gKeys[gKeyCount++] = k;
-            }
-        }
-        fclose(f);
+        readPoseFile(spec + 5, 1);
         if (!gKeyCount) gKeyCount = 1;
     }
 }
@@ -204,7 +262,8 @@ static void loadPose(const char* spec) {
 // ---- configuration --------------------------------------------------------
 static int gEyeW = 1680, gEyeH = 1760;
 static float gIpd = 0.064f;
-static XrFovf gFov = {-0.8377f, 0.8377f, 0.8377f, -0.8377f};
+static XrFovf gFov = {-0.8377f, 0.8377f, 0.8377f, -0.8377f}, gFovR = {-0.8377f, 0.8377f, 0.8377f, -0.8377f};
+static float gCant = 0;  // radians, outward
 static int gPipeline = 2;
 static double gDeadlineMs = -1;
 static int gMaxFrames = 0;
@@ -312,10 +371,13 @@ static XrResult XRAPI_CALL mGetSystemProps(XrInstance i, XrSystemId s, XrSystemP
 }
 
 // ---- spaces ---------------------------------------------------------------
-typedef struct { int used, kind; Pose offset; int hand; } Space;  // kind: reference type, or -1 action
+typedef struct { int used, kind; Pose offset; int hand; } Space;  // kind: reference type, or -1 action (hand 2: the eye gaze)
 static Space gSpaces[256];
 static int gSpaceCount = 0;
 static Pose gLocalOrigin, gLocalFloorOrigin;
+static int gGazeOn = -1;  // MOCK_XR_GAZE (gazeRel)
+static float gGaze[6];
+static int actionIsGaze(XrAction a);
 typedef struct { double t0, t1; int hand; XrVector3f at; } AimKey;  // MOCK_XR_AIM
 static AimKey gAim[32];
 static int gAimCount = -1;
@@ -367,6 +429,18 @@ static XrResult XRAPI_CALL mCreateActionSpace(XrSession s, const XrActionSpaceCr
     int hand = 1;
     for (int k = 0; k < gPathCount; k++)
         if (gPaths[k] == ci->subactionPath && strstr(gPathStr[k], "left")) hand = 0;
+    if (gGazeOn < 0) {
+        const char* g = getenv("MOCK_XR_GAZE");
+        memset(gGaze, 0, sizeof gGaze);
+        if (g && !strncmp(g, "file", 4)) {  // (the gaze columns of the pose file, or of the file named)
+            if (g[4] == ':') readPoseFile(g + 5, 0);
+            gGazeOn = gGazeKeyCount ? 2 : 0;
+            if (!gGazeKeyCount) fprintf(stderr, "xrmock: MOCK_XR_GAZE=%s: no gaze columns\n", g);
+        } else {
+            gGazeOn = g && sscanf(g, "%f,%f,%f,%f,%f,%f", &gGaze[0], &gGaze[1], &gGaze[2], &gGaze[3], &gGaze[4], &gGaze[5]) >= 2;
+        }
+    }
+    if (gGazeOn && actionIsGaze(ci->action)) hand = 2;
     gSpaces[gSpaceCount] = (Space){1, -1, fromXr(ci->poseInActionSpace), hand};
     *out = (XrSpace)(uintptr_t)(100 + gSpaceCount++);
     return XR_SUCCESS;
@@ -382,6 +456,19 @@ static XrResult XRAPI_CALL mDestroySpace(XrSpace sp) {
     s->used = 0;
     return XR_SUCCESS;
 }
+// MOCK_XR_GAZE: the gaze's orientation relative to the head at t (NULL spec: none)
+static Q gazeRel(double t) {
+    float fy, fp;
+    if (gGazeOn == 2 && gazeFileAt(t, &fy, &fp)) return qeuler(fy, fp, 0);
+    float yaw = gGaze[0] + gGaze[2] * (float)sin(t * 2 * 3.14159265358979 * gGaze[4]);
+    float pitch = gGaze[1] + gGaze[3] * (float)sin(t * 2 * 3.14159265358979 * 0.7 + 1.0);
+    if (gGaze[5] > 0) {  // (fixation jitter: two hashed uniforms per 1/240 s step)
+        uint32_t k = (uint32_t)(t * 240.0) * 2654435761u;
+        k ^= k >> 15, k *= 2246822519u, k ^= k >> 13;
+        yaw += gGaze[5] * ((float)(k & 0xffff) / 32767.5f - 1.0f), pitch += gGaze[5] * ((float)(k >> 16) / 32767.5f - 1.0f);
+    }
+    return qeuler(yaw * D2R, pitch * D2R, 0);
+}
 // Pose of a space in STAGE at time t (seconds from the session start).
 static Pose spaceInStage(const Space* s, double t) {
     Pose base;
@@ -390,6 +477,11 @@ static Pose spaceInStage(const Space* s, double t) {
     case XR_REFERENCE_SPACE_TYPE_LOCAL: base = gLocalOrigin; break;
     case XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR: base = gLocalFloorOrigin; break;
     case -1: {
+        if (s->hand == 2) {  // (the eye gaze, MOCK_XR_GAZE: from the head)
+            Pose h = headPoseAt(t);
+            base = (Pose){qmul(h.q, gazeRel(t)), h.p};
+            break;
+        }
         XrVector3f at = {s->hand ? 0.25f : -0.25f, 1.15f, -0.35f};
         base = (Pose){aimAt(s->hand, at, t), at};
         break;
@@ -481,9 +573,10 @@ static XrResult XRAPI_CALL mLocateViews(XrSession s, const XrViewLocateInfo* li,
     Pose head = headPoseAt(t);
     Pose inBase = pinv(spaceInStage(base, t));
     for (int e = 0; e < 2; e++) {
-        Pose eye = pcompose(head, (Pose){{0, 0, 0, 1}, {e ? gIpd * 0.5f : -gIpd * 0.5f, 0, 0}});
+        float ca = e ? -gCant : gCant;  // (yaw about +y: positive turns left, outward for the left eye)
+        Pose eye = pcompose(head, (Pose){{0, sinf(ca * 0.5f), 0, cosf(ca * 0.5f)}, {e ? gIpd * 0.5f : -gIpd * 0.5f, 0, 0}});
         v[e].pose = toXr(pcompose(inBase, eye));
-        v[e].fov = gFov;
+        v[e].fov = e ? gFovR : gFov;
         gLocates[gLocateNext].pose[e] = v[e].pose;
     }
     gLocates[gLocateNext].time = li->displayTime;
@@ -502,6 +595,7 @@ typedef struct {
     int lastReleased;       // image index, -1 none yet
     int everReleased;
     int releases, probed;   // MOCK_XR_SHIFT: images released so far, and the release last probed
+    int flicked;            // MOCK_XR_FLICK: the release last seen in a layer
 } Chain;
 static Chain gChains[MAXSC];
 static int gChainCount = 0;
@@ -741,6 +835,7 @@ static XrResult XRAPI_CALL mBeginSession(XrSession s, const XrSessionBeginInfo* 
     if (bi->primaryViewConfigurationType != XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO) return XR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED;
     gT0 = nowNs();
     initOrigins();
+    if (gShift) fprintf(gShift, "begin monotonic_ns=%lld\n", (long long)gT0);  // (lines up the app's own CLOCK_MONOTONIC logs with t)
     if (getenv("MOCK_XR_COMPOSITOR")) {  // "lead_ms[,from_s]": the compositor model (xrmock_vk.c)
         double lead = 4.0, from = 0.0;
         sscanf(getenv("MOCK_XR_COMPOSITOR"), "%lf,%lf", &lead, &from);
@@ -757,11 +852,13 @@ static XrResult XRAPI_CALL mBeginSession(XrSession s, const XrSessionBeginInfo* 
     trace("beginSession");
     return XR_SUCCESS;
 }
+static void flickStop(void);
 static XrResult XRAPI_CALL mEndSession(XrSession s) {
     (void)s;
     if (!gSessionRunning) return XR_ERROR_SESSION_NOT_RUNNING;
     if (gSessionState != XR_SESSION_STATE_STOPPING) xrmock_error("xrEndSession in state %d, not STOPPING", gSessionState);
     gSessionRunning = 0;
+    flickStop();
     summary();
     pushState(XR_SESSION_STATE_IDLE);
     pushState(XR_SESSION_STATE_EXITING);
@@ -1046,6 +1143,142 @@ static void shiftLayer(int frame, const XrCompositionLayerProjection* p, XrTime 
             frame, t, located ? (double)(located - gT0) / 1e6 : -1.0, rel[0], rel[1], lp, ly, tp, ty, qangle(lay.q, eye0.q), 1000.0f * sqrtf(dx * dx + dy * dy + dz * dz));
 }
 
+// ---- MOCK_XR_FLICK: runs of consecutive eye images, whole and reduced, with the poses they were submitted with ------
+// Every new eye image a projection layer names (each set the app releases, once) inside the display-time window is
+// reduced on the GPU (MOCK_XR_FLICK_SHIFT: by 2^n, 2 = a quarter of each side) and copied without stalling the loop
+// (mockvk_flick_submit); its luma is written as e<eye>_<seq>.pgm by a writer thread. The index file (index.txt in the
+// directory) has one "img" line per image: eye, its sequence number (the eye's new images counted from the session
+// start, so a gap is a dropped copy), frame, display time, locate time, the layer view's pose (position, quaternion)
+// and fov (radians); one "disp" line per refresh (which image of each eye it shows) and a "drop" line for each image
+// that could not be copied (no free slot). tools/flicker.py reads it.
+static const char* gFlickDir;
+static double gFlickFrom = 0, gFlickTo = 1e9;
+static int gFlickShift = 2, gFlickEyes = 3, gFlickSeq[2], gFlickTag, gFlickDrops, gFlickImgs, gFlickBg = -1;
+static FILE* gFlickIdx;
+#define FLICK_TAGS 64
+static struct { int used, eye, seq, frame; XrTime display, located; XrPosef pose; XrFovf fov; } gFlickMeta[FLICK_TAGS];
+// the writer thread: files are written off the frame loop (a page-cache write can still block now and then)
+typedef struct { char path[600]; uint8_t* data; int w, h; } FlickJob;
+#define FLICK_QUEUE 256
+static FlickJob gFlickQ[FLICK_QUEUE];
+static int gFlickQHead, gFlickQTail, gFlickQStop, gFlickThreadOn;
+static pthread_mutex_t gFlickMu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t gFlickCv = PTHREAD_COND_INITIALIZER;
+static pthread_t gFlickThread;
+static void* flickWriter(void* arg) {
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&gFlickMu);
+        while (gFlickQHead == gFlickQTail && !gFlickQStop) pthread_cond_wait(&gFlickCv, &gFlickMu);
+        if (gFlickQHead == gFlickQTail) {
+            pthread_mutex_unlock(&gFlickMu);
+            return NULL;
+        }
+        FlickJob j = gFlickQ[gFlickQHead % FLICK_QUEUE];
+        gFlickQHead++;
+        pthread_mutex_unlock(&gFlickMu);
+        FILE* f = fopen(j.path, "wb");
+        if (f) {
+            fprintf(f, "P5\n%d %d\n255\n", j.w, j.h);
+            fwrite(j.data, 1, (size_t)j.w * (size_t)j.h, f);
+            fclose(f);
+        }
+        free(j.data);
+    }
+}
+static void flickQueue(const char* path, uint8_t* data, int w, int h) {
+    pthread_mutex_lock(&gFlickMu);
+    if (gFlickQTail - gFlickQHead >= FLICK_QUEUE) {  // (the disk is behind: drop rather than hold up the loop)
+        pthread_mutex_unlock(&gFlickMu);
+        free(data);
+        gFlickDrops++;
+        return;
+    }
+    FlickJob* j = &gFlickQ[gFlickQTail % FLICK_QUEUE];
+    snprintf(j->path, sizeof(j->path), "%s", path);
+    j->data = data, j->w = w, j->h = h;
+    gFlickQTail++;
+    pthread_cond_signal(&gFlickCv);
+    pthread_mutex_unlock(&gFlickMu);
+}
+static void flickStop(void) {
+    if (!gFlickThreadOn) return;
+    pthread_mutex_lock(&gFlickMu);
+    gFlickQStop = 1;
+    gFlickDir = NULL;  // (no new run after the session's end)
+    pthread_cond_signal(&gFlickCv);
+    pthread_mutex_unlock(&gFlickMu);
+    pthread_join(gFlickThread, NULL);
+    gFlickThreadOn = 0;
+    fprintf(stderr, "xrmock: MOCK_XR_FLICK: %d images, %d dropped\n", gFlickImgs, gFlickDrops);
+    if (gFlickIdx) {
+        fprintf(gFlickIdx, "end images=%d drops=%d\n", gFlickImgs, gFlickDrops);
+        fclose(gFlickIdx), gFlickIdx = NULL;
+    }
+}
+static void flickCollect(void) {
+    int tag, w, h;
+    static uint8_t* buf;
+    static size_t cap;
+    for (;;) {
+        size_t need = (size_t)4096 * 4096 / 4;
+        if (cap < need) buf = (uint8_t*)realloc(buf, need), cap = need;
+        if (!mockvk_flick_collect(&tag, &w, &h, buf, gFlickBg)) break;
+        int k = tag % FLICK_TAGS;
+        if (!gFlickMeta[k].used) continue;
+        gFlickMeta[k].used = 0;
+        char path[600];
+        snprintf(path, sizeof(path), "%s/e%d_%06d.pgm", gFlickDir, gFlickMeta[k].eye, gFlickMeta[k].seq);
+        uint8_t* data = (uint8_t*)malloc((size_t)w * (size_t)h);
+        memcpy(data, buf, (size_t)w * (size_t)h);
+        flickQueue(path, data, w, h);
+        const XrPosef* p = &gFlickMeta[k].pose;
+        const XrFovf* f = &gFlickMeta[k].fov;
+        gFlickImgs++;
+        fprintf(gFlickIdx, "img eye=%d seq=%d frame=%d t=%.5f loc=%.5f w=%d h=%d pos=%.5f,%.5f,%.5f quat=%.6f,%.6f,%.6f,%.6f fov=%.6f,%.6f,%.6f,%.6f\n",
+                gFlickMeta[k].eye, gFlickMeta[k].seq, gFlickMeta[k].frame, (double)(gFlickMeta[k].display - gT0) / 1e9,
+                gFlickMeta[k].located ? (double)(gFlickMeta[k].located - gT0) / 1e9 : -1.0, w, h, p->position.x, p->position.y, p->position.z,
+                p->orientation.x, p->orientation.y, p->orientation.z, p->orientation.w, f->angleLeft, f->angleRight, f->angleUp, f->angleDown);
+    }
+}
+static void flickLayer(int frame, const XrCompositionLayerProjection* p, XrTime displayTime, XrTime located) {
+    if (!gFlickDir || p->viewCount != 2) return;
+    if (!gFlickThreadOn) {
+        char path[600];
+        snprintf(path, sizeof(path), "%s/index.txt", gFlickDir);
+        gFlickIdx = fopen(path, "w");
+        if (!gFlickIdx) {
+            fprintf(stderr, "xrmock: cannot write %s\n", path);
+            gFlickDir = NULL;
+            return;
+        }
+        setvbuf(gFlickIdx, NULL, _IOLBF, 0);  // (whole lines: an app may end with _exit, or be killed)
+        fprintf(gFlickIdx, "begin monotonic_ns=%lld shift=%d window=%.3f,%.3f\n", (long long)gT0, gFlickShift, gFlickFrom, gFlickTo);
+        pthread_create(&gFlickThread, NULL, flickWriter, NULL);
+        gFlickThreadOn = 1;
+        atexit(flickStop);
+    }
+    flickCollect();
+    double t = (double)(displayTime - gT0) / 1e9;
+    int in = t >= gFlickFrom && t <= gFlickTo;
+    for (int v = 0; v < 2; v++) {
+        Chain* c = chainOf(p->views[v].subImage.swapchain);
+        if (!c || c->releases == c->flicked || c->lastReleased < 0) continue;
+        c->flicked = c->releases;
+        int seq = ++gFlickSeq[v];
+        if (!in || !(gFlickEyes >> v & 1)) continue;
+        int k = gFlickTag % FLICK_TAGS;
+        if (gFlickMeta[k].used || mockvk_flick_submit(c->images, c->lastReleased, p->views[v].subImage.imageArrayIndex, gFlickShift, gFlickTag) < 0) {
+            gFlickDrops++;
+            fprintf(gFlickIdx, "drop eye=%d seq=%d frame=%d t=%.5f\n", v, seq, frame, t);
+            continue;
+        }
+        gFlickMeta[k] = (typeof(gFlickMeta[k])){1, v, seq, frame, displayTime, located, p->views[v].pose, p->views[v].fov};
+        gFlickTag++;
+    }
+    if (in) fprintf(gFlickIdx, "disp frame=%d t=%.5f seq0=%d seq1=%d\n", frame, t, gFlickSeq[0], gFlickSeq[1]);
+}
+
 // Checks a sub-image against its swapchain; returns the chain or NULL.
 static Chain* checkSub(const XrSwapchainSubImage* si, const char* what) {
     Chain* c = chainOf(si->swapchain);
@@ -1174,6 +1407,7 @@ static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
             const XrCompositionLayerProjection* p = (const XrCompositionLayerProjection*)l;
             checkPoses(p, ei->displayTime);
             shiftLayer(frame, p, ei->displayTime, gLastLocated);
+            flickLayer(frame, p, ei->displayTime, gLastLocated);
             snprintf(t, sizeof(t), " proj[flags=%llx", (unsigned long long)p->layerFlags);
             strcat(buf, t);
             for (uint32_t v = 0; v < p->viewCount; v++) {
@@ -1331,6 +1565,14 @@ static XrResult XRAPI_CALL mCreateAction(XrActionSet s, const XrActionCreateInfo
 static MAction* actionOf(XrAction h) {
     int k = (int)((uintptr_t)h - 200);
     return k >= 0 && k < gActionCount ? &gAct[k] : NULL;
+}
+static int actionIsGaze(XrAction h) {  // (bound to /user/eyes_ext/...: the eye gaze)
+    MAction* a = actionOf(h);
+    for (int k = 0; a && k < a->nbind; k++) {
+        const char* ps = pathStr(a->bind[k]);
+        if (ps && !strncmp(ps, "/user/eyes_ext/", 15)) return 1;
+    }
+    return 0;
 }
 static XrResult XRAPI_CALL mSuggest(XrInstance i, const XrInteractionProfileSuggestedBinding* b) {
     (void)i;
@@ -1508,6 +1750,11 @@ static void init(void) {
     if ((v = getenv("MOCK_XR_SHIFT"))) gShift = fopen(v, "w");
     if ((v = getenv("MOCK_XR_SHIFT_REF"))) gShiftRef = atof(v);
     if ((v = getenv("MOCK_XR_SHIFT_DUMP"))) gDumpDir = v;
+    if ((v = getenv("MOCK_XR_FLICK")) && *v) gFlickDir = v;
+    if ((v = getenv("MOCK_XR_FLICK_AT"))) sscanf(v, "%lf,%lf", &gFlickFrom, &gFlickTo);
+    if ((v = getenv("MOCK_XR_FLICK_SHIFT"))) gFlickShift = atoi(v) < 1 ? 1 : atoi(v) > 4 ? 4 : atoi(v);
+    if ((v = getenv("MOCK_XR_FLICK_BG"))) gFlickBg = atoi(v) < 0 ? -1 : atoi(v) > 255 ? 255 : atoi(v);
+    if ((v = getenv("MOCK_XR_FLICK_EYES"))) gFlickEyes = !strcmp(v, "0") ? 1 : !strcmp(v, "1") ? 2 : 3;
     if ((v = getenv("MOCK_XR_SHIFT_DUMP_AT"))) sscanf(v, "%lf,%lf", &gDumpFrom, &gDumpTo);
     if ((v = getenv("MOCK_XR_TIMING"))) {
         gTiming = fopen(v, "w");
@@ -1523,8 +1770,14 @@ static void init(void) {
     if ((v = getenv("MOCK_XR_IPD"))) gIpd = (float)atof(v);
     if ((v = getenv("MOCK_XR_FOV"))) {
         float l, r, u, d;
-        if (sscanf(v, "%f,%f,%f,%f", &l, &r, &u, &d) == 4) gFov = (XrFovf){l * D2R, r * D2R, u * D2R, d * D2R};
+        if (sscanf(v, "%f,%f,%f,%f", &l, &r, &u, &d) == 4) gFov = gFovR = (XrFovf){l * D2R, r * D2R, u * D2R, d * D2R};
     }
+    if ((v = getenv("MOCK_XR_FOV_RIGHT"))) {
+        float l, r, u, d;
+        if (!strcmp(v, "mirror")) gFovR = (XrFovf){-gFov.angleRight, -gFov.angleLeft, gFov.angleUp, gFov.angleDown};
+        else if (sscanf(v, "%f,%f,%f,%f", &l, &r, &u, &d) == 4) gFovR = (XrFovf){l * D2R, r * D2R, u * D2R, d * D2R};
+    }
+    if ((v = getenv("MOCK_XR_CANT"))) gCant = (float)atof(v) * D2R;
     if ((v = getenv("MOCK_XR_SHOT"))) snprintf(gShotSpec, sizeof(gShotSpec), "%s", v);
     if ((v = getenv("MOCK_XR_SHOT_DIR"))) gShotDir = v;
     if ((v = getenv("MOCK_XR_VK_MAX"))) {

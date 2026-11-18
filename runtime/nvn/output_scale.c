@@ -1286,6 +1286,27 @@ double output_scale_vr_factor(double now, double game_ms, double budget_ms, unsi
         if (vrd_on) LOG("[vrdyn] eye resolution %.0f-%.0f of %u (LARECOMP_VR_DYNRES)\n", pmin, pmax, eye_w);
     }
     if (!vrd_on || !eye_w) return 1.0;
+    {   // LARECOMP_VR_DYNRES_STEP=<s>[,px,px...] (a test, off by default): the eye size on a schedule instead of by GPU
+        // time - each size of the cycle (default: the floor, then the top) held s seconds - so a GPU fast enough never to
+        // leave full size still runs the eyes at a filled part below 1 and through the size changes the headset has
+        static int ns = -1;
+        static double step_s, sizes[16], since;
+        if (ns < 0) {
+            const char *e = getenv("LARECOMP_VR_DYNRES_STEP");
+            ns = 0;
+            if (e && (step_s = atof(e)) > 0) {
+                for (const char *c = strchr(e, ','); c && ns < 16; c = strchr(c + 1, ',')) sizes[ns++] = fmin(pmax, fmax(256, atof(c + 1)));
+                if (!ns) sizes[0] = pmin, sizes[1] = pmax, ns = 2;
+                since = now;
+                LOG("[vrdyn] test schedule: %d sizes, %.2f s each, from %.0f px (LARECOMP_VR_DYNRES_STEP)\n", ns, step_s, sizes[0]);
+            }
+        }
+        if (ns > 0) {
+            double np = sizes[(long)((now - since) / step_s) % ns];
+            if (np != p) LOG("[vrdyn] %.0f -> %.0f px (schedule)\n", p, np), p = np;
+            return p / eye_w;
+        }
+    }
     if (game_ms > 0 && nwin < 64) win[nwin++] = game_ms;
     if (now - t0 >= 0.5) {
         t0 = now;

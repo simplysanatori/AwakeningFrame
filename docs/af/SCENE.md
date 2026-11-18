@@ -113,3 +113,39 @@ with the head 45 degrees down. GPU = the pacer's GPU per game frame; CPU = the g
 - Backdrop keeps 60 FPS: the picture costs about 0.4 ms, the edge fill about 1.4 ms (both eyes); the capture frames
   (a few after each settle, move or turn) cost what Full costs. The edge fill also covers the cells Backdrop leaves
   out at depth jumps.
+
+## Open: headset flicker
+
+The owner's headset session (2026-11-06 19:36, Fade, dynamic resolution on with the 14.5 ms budget, eyes 1536 of 1728
+from the first seconds) showed what xrmock never did: Backdrop's fill came out as scattered fragments only, Backdrop,
+Low Quality and Full flickered, and the reach changed with head pose (buildings missing). Not reproduced at the time of these notes: the
+first run in the owner's conditions did not start. What the code shows so far, to check in that order:
+
+- **Captures flicker by design.** A capture turns the wide culling on for 8 eye outputs, and those outputs are shown:
+  the outer objects pop into the live picture and vanish again. Turns of 25 degrees trigger one, at most every second,
+  so looking around gives a pop every 1-2 s. Fix direction: keep the wide culling's extra draws out of the live eyes
+  on capture frames (draw them only into the capture), or capture only on settle and area changes, never on turns.
+- **Fill vs dynamic resolution (main suspect for the fragments).** The fill samples the capture's depth at
+  `grid * (ax, ay)` with the colour target's filled part, and this eye's scene depth at `gl_FragCoord / colour size`.
+  The depth image is `st_last_depth`, the latest twinned depth drawn into before the composite, a target with its
+  own size and its own filled part (`sx / ax`), which can differ from the colour output's. With dynres on,
+  any mismatch puts every grid point at a wrong depth, and the 8% jump test then throws out almost every cell:
+  fragments. Check: log the depth's size and filled part beside the colour's on each capture; use the depth's own
+  part in both samplers.
+- **Capture matrices.** `e->V / e->P` come from `stereo_eye_matrices` when the post hook runs. If they are not the
+  ones the output was drawn with (a later latch), the reprojection is off by the head motion. Still to log: each
+  capture's V/P against the frame's own.
+- **Real fov.** The headset log does not print the eyes' fov. A one-time `[xr] eye fov` line now prints them, and
+  xrmock gets `MOCK_XR_FOV_RIGHT` (`mirror`: an asymmetric fov mirrored for the right eye) and `MOCK_XR_CANT`
+  (canted views), to test with Frame-like values (assumed: -52 / 44 / 50 / -54 degrees for the left eye) until
+  the real ones are logged.
+- **Low / Full pose-dependent.** The fit clips the box by both eyes' frusta, so the culling tangent, and with it
+  what the game emits, follows the head; class 3 drops room geometry whose box misses the reach box, which follows
+  the table, so a building at the box edge comes and goes. Fix direction: fit the box without the eye clipping in
+  Low / Full (the tangent then stays at 20), don't drop level draws inside the resident 7 x 7, and give the box
+  hysteresis.
+- **Off / Backdrop reach.** One game-camera frustum fitted to the table and widened by the eyes' views, so the reach
+  depends on pose. `LARECOMP_VR_CULL_HOLD_ALL=1` holds the widening in every mode; its 60 FPS cost is not measured.
+
+The desktop reproduction (`tools/flicker_run.sh`, [TOOLING](TOOLING.md) "Flicker") runs these conditions under xrmock and
+measures the flicker.
