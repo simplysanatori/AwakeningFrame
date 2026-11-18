@@ -49,6 +49,7 @@ typedef struct {
     void (*frame)(double t, int n, Frame *f);  // this frame's work (t: seconds in, n: frame number)
     int (*check)(int holds, int backs, double held_s, double last_change_t, bool held_end, double secs);
     double vr_ms;  // the VR mode's 60 fps game frame (pace_xr_frame_ms: 16.67 for the 60 fps test at 90 Hz); 0: not VR
+    int vr_lock;   // the VR mode's lock at the start (pace_xr_lock: 30 at 90 Hz)
 } Case;
 
 static uint64_t rng = 9;
@@ -240,6 +241,50 @@ static int settles(int holds, int backs, double held_s, double lc, bool end, dou
     return holds <= 2 && backs <= 1 && end && lc < secs / 2;  // (at most one try at 60, then 30 for good)
 }
 
+// ---- the VR mode (runtime/xr: pace_xr_lock, pace_xr_frame_ms). The game's vsync is 60 Hz there too (two refreshes at
+// 120 Hz), and with the CPU / GPU overlap the game thread hardly waits for the GPU (wait 2 ms). vr_switch: the display's
+// rate changes at sw seconds from 90 Hz (the lock at 30, no 60 fps frame) to 120 Hz (16.67 ms, the pacer's choice), as
+// xr_loop.c tells the pacer; vr_sw_t / vr_back_t: when it did and when the game was first at 60 after (the game's own
+// hold, the lock's or the pacer's: -1 not yet), vr_reheld_s: the game's time at 30 after that.
+static double vr_sw_t = -1, vr_back_t = -1, vr_reheld_s;
+static void vr_switch(double t, double sw) {
+    static bool done;
+    if (t >= sw && !done) done = true, vr_sw_t = t, pace_xr_lock(0), pace_xr_frame_ms(2e3 / 120);
+}
+// Session 2026-11-18 04:07 on the Frame: 90 Hz (the game held at 30 for good) for 30 s with GPU 10-12 ms and late
+// frames now and then, then the display at 120 Hz. Its 33 ms frames counted as late, holds came and went under the lock
+// and backed off (8x there); at 120 Hz the hold then waited for the backed-off clear or enough way back (8 s / 20 s
+// here). At 120 Hz the game must be at 60 within a second or two and stay there (GPU 11 ms: 60 fits).
+static void vr_90_to_120(double t, int n, Frame *f) {
+    f->cpu = 4.5 + noise(1), f->gpu = 11 + noise(1), f->stall = 0, f->wait = 2;
+    if ((int)(t * 10) % 70 == 0) f->stall = 30;  // (a 30 ms stall every 7 s: a few frames late)
+    vr_switch(t, 30);
+}
+static int vr_at_60_soon(int holds, int backs, double held_s, double lc, bool end, double secs) {
+    return !end && vr_back_t >= 0 && vr_back_t - vr_sw_t < 1.5 && vr_reheld_s < 0.5;
+}
+// The 90 Hz lock's 33 ms frames are the lock's, not late: no hold, no backoff while locked (60 s, GPU 11 ms)
+static void vr_locked(double t, int n, Frame *f) { f->cpu = 4.5 + noise(1), f->gpu = 11 + noise(1), f->stall = 0, f->wait = 2; }
+// A hold at 120 Hz that backs off (GPU 20 ms, then 11 ms: back at 60, then 20 ms again within 20 s), then GPU 12 ms -
+// under the backed-off limit (84% of 16.67: 14.0 ms): back at 60, within the clear way's wait (2x: 4 s at 30)
+static void vr_backoff_release(double t, int n, Frame *f) {
+    f->cpu = 4.5 + noise(1), f->stall = 0, f->wait = 2;
+    f->gpu = (t < 4 ? 20 : t < 10 ? 11 : t < 16 ? 20 : 12) + noise(1);
+    zone = t < 4 ? 1 : t < 10 ? 2 : t < 16 ? 3 : 4;
+}
+static int vr_backoff_back(int holds, int backs, double held_s, double lc, bool end, double secs) {
+    return holds == 2 && backs == 2 && !end && lc >= 16 && lc < 22;
+}
+// A real overload at 120 Hz after the 90 Hz lock (GPU 17 ms: over the 16.67 ms frame): 60 gets its fresh try at the
+// switch, then held within a few seconds and for the rest, not 60 / 30 every second
+static void vr_overload_after_90(double t, int n, Frame *f) {
+    f->cpu = 4.5 + noise(1), f->gpu = 17 + noise(1), f->stall = 0, f->wait = 2;
+    vr_switch(t, 20);
+}
+static int vr_held_once(int holds, int backs, double held_s, double lc, bool end, double secs) {
+    return holds == 1 && backs == 0 && end && lc > 20 && lc < 25;
+}
+
 static int res_released(int holds, int backs, double held_s, double lc, bool end, double secs) {
     return holds == 2 && backs == 2 && !end && lc >= 25 && lc < 28;  // (back at 60 within a few seconds of the change)
 }
@@ -281,6 +326,13 @@ static const Case cases[] = {
     {"VR 60 fps test at 90 Hz: held at GPU 20 ms, then GPU 12 ms (VR limits, 16.67 ms game frame)", 30, user_release, released,
      1e3 / 60},
     {"VR 60 fps test at 90 Hz: GPU 11 ms, CPU 5 ms (fits 60)", 60, steady, never_held, 1e3 / 60},
+    {"VR 90 Hz (held at 30) for 30 s, then 120 Hz with GPU 11 ms: at 60 within a second or two", 60, vr_90_to_120,
+     vr_at_60_soon, 0, 30},
+    {"VR 90 Hz held at 30, GPU 11 ms: the lock's 33 ms frames start no hold", 60, vr_locked, never_held, 0, 30},
+    {"VR 120 Hz: a hold backing off (GPU 20 / 11 / 20 ms), then GPU 12 ms (under 14.0): back at 60", 40, vr_backoff_release,
+     vr_backoff_back, 2e3 / 120},
+    {"VR 90 Hz, then 120 Hz with GPU 17 ms (over the frame): held soon after the switch, for good", 60,
+     vr_overload_after_90, vr_held_once, 0, 30},
 };
 
 static int run(const Case *c) {
@@ -288,8 +340,9 @@ static int run(const Case *c) {
     game_mgr[0x4e3] = 1;  // (the game allows its 30 fps mode)
     pace_test_game_mgr = (uint64_t)(uintptr_t)game_mgr;
     rng = 9, zone = 0;
-    pace_xr_lock(0);
+    pace_xr_lock(c->vr_lock);
     pace_xr_frame_ms(c->vr_ms);
+    vr_sw_t = vr_back_t = -1, vr_reheld_s = 0;
     vsyncs();
     int holds = 0, backs = 0, n = 0;
     double start = t_ns / 1e9, held_since = -1, held_s = 0, last_change = 0;
@@ -316,6 +369,11 @@ static int run(const Case *c) {
         t_ns = last_shown = shown;
         vsyncs();
         pace_frame();
+        if (vr_sw_t >= 0 && t >= vr_sw_t) {  // (the VR cases: the game's own state after the display's change)
+            bool game_held = game_mgr[0x4e2] != 0;
+            if (!game_held && vr_back_t < 0) vr_back_t = t;
+            if (game_held && vr_back_t >= 0) vr_reheld_s += (t_ns - t0) / 1e9;
+        }
         bool now_held = pace_is_slow();
         if (now_held != was) {
             printf(" %s at %.1fs", now_held ? "held" : "back", t), last_change = t;
