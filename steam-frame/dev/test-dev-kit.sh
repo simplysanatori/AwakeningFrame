@@ -159,6 +159,54 @@ check "bench: GPU ms and FPS per spot" grep -q "| 60 | 60.0 | 4.50 |" "$T/res.md
 check "bench: the second program compared with the first" grep -q "(+2.50)" "$T/res.md"
 check "bench: peak memory in the results, the lock released" sh -c "grep -q 'MB peak RSS' '$T/res.md' && [ ! -e '$T/bench.lock' ]"
 check "bench: the Dev and released data folders untouched" test "$(sums "$F/.local/share/lasrecomp")" = "$REL2"
+# variants: a stand-in that takes its GPU time from $LARECOMP_FAKE_GPU, notes its cache folder and writes the settings it got
+mkdir -p "$F/bench-var"; cp "$F/bench-app/lasgame.so" "$F/bench-var/"; echo "0.1.1-dev-var" > "$F/bench-var/VERSION"
+cat > "$F/bench-var/lasrecomp" << 'EOT'
+#!/bin/bash
+R=$LARECOMP_DATA_ROOT
+if [ -e "$R/cache/marker" ]; then c=seen; else c=absent; touch "$R/cache/marker"; fi
+env | grep -E '^(LARECOMP_VR_GAZE_MOCK|LARECOMP_VR_DYNRES|MOCK_XR_EYE_SIZE|LARECOMP_FAKE_(GPU|X))=' | sort > "$R/env.txt"
+{
+echo "[info] cache marker $c"
+for w in ${LARECOMP_WARP_AT//,/ }; do s=${w##*:}
+    echo "[warp] jumping to X / $s"
+    for i in $(seq 60); do echo "[pace] period 16.67 blocked 1.00 busy 5.00 cost 5.00 ms (queue wait 0.10, cpu 3.20, render cpu 2.10, gpu ${LARECOMP_FAKE_GPU:-4.50}, gpu wait 0.2, submit 0.1, present 0.1, hooks 0.1, lock 0.0)"; done
+done
+} > "$R/lasrecomp.log"
+EOT
+chmod +x "$F/bench-var/lasrecomp"
+VB() { AFDEV_BENCH_ROOT=$T/scratch AF_BENCH_LOCK=$T/bench.lock AF_HEADSET_FLAG=$T/nohs FRAME_BENCH_ALLOW_RUNNING=1 "$KITD/frame-bench.sh" --dwell 1 --settle 0 "$@"; }
+VB --out "$T/v1.md" --variant base: --variant fast:LARECOMP_FAKE_GPU=3.00,LARECOMP_FAKE_X=1 "$F/bench-var" > "$T/v1.log" 2>&1
+check "bench variants: two variants of one app, exit 0" test $? -eq 0
+check "bench variants: a section for each run with its settings" sh -c "grep -c '^## 1-bench-var\.' '$T/v1.md' | grep -qx 2 && grep -q 'Variant fast: LARECOMP_FAKE_GPU=3.00, LARECOMP_FAKE_X=1' '$T/v1.md' && grep -q 'Variant base: no extra settings' '$T/v1.md'"
+check "bench variants: the comparison with the first run has the right difference" grep -q "3.00 (-1.50)" "$T/v1.md"
+check "bench variants: a table per spot, rows are the runs" test "$(grep -c '^### ' "$T/v1.md")" = 4 -a "$(grep -c '^| 1-bench-var.fast | 3.00 | -1.50 | ' "$T/v1.md")" = 4
+check "bench variants: the variant's variables reach the program, the lock is released" sh -c "grep -qx 'LARECOMP_FAKE_GPU=3.00' '$T/scratch/run-1-bench-var.fast/env.txt' && [ ! -e '$T/bench.lock' ]"
+check "bench variants: the second variant sees the cache the first one filled" sh -c "grep -q 'cache marker absent' '$T/v1.md.d/1-bench-var.base.log' && grep -q 'cache marker seen' '$T/v1.md.d/1-bench-var.fast.log'"
+check "bench variants: the shared cache is removed after the last variant" test ! -e "$T/scratch/cache-1-bench-var"
+VB --out "$T/v2.md" --warm --variant a:LARECOMP_FAKE_GPU=5.00 --variant b:LARECOMP_FAKE_GPU=6.00 "$F/bench-var" > "$T/v2.log" 2>&1
+check "bench variants: --warm fills the cache before the first variant (warm-up marked, not counted)" sh -c "grep -q 'warm-up, not counted' '$T/v2.md' && grep -q 'cache marker seen' '$T/v2.md.d/1-bench-var.a.log' && grep -q 'cache marker absent' '$T/v2.md.d/1-bench-var.warm.log'"
+VB --out "$T/v3.md" --variant 'bad:FAKE X=1' "$F/bench-var" > "$T/v3.log" 2>&1; r1=$?
+VB --out "$T/v3.md" --variant 'bad:LARECOMP_FAKE_X=a b' "$F/bench-var" > "$T/v3.log" 2>&1; r2=$?
+VB --out "$T/v3.md" --variant 'bad:LARECOMP_FAKE_X=$HOME' "$F/bench-var" > "$T/v3.log" 2>&1; r3=$?
+VB --out "$T/v3.md" --variant 'bad name:LARECOMP_FAKE_X=1' "$F/bench-var" > "$T/v3.log" 2>&1; r4=$?
+VB --out "$T/v3.md" --variant 'bad:x=1' "$F/bench-var" > "$T/v3.log" 2>&1; r5=$?
+VB --out "$T/v3.md" --variant 'bad:LD_PRELOAD=/x.so' "$F/bench-var" > "$T/v3.log" 2>&1; r6=$?
+check "bench variants: bad --variant values (and variables other than the game's and the mock's) are refused with exit 2" test "$r1$r2$r3$r4$r5$r6" = 222222
+VB --out "$T/v4.md" --spots mabe,forest --gaze 0,0 --eye 1728x1728 "$F/bench-var" > "$T/v4.log" 2>&1
+check "bench spots: only the chosen spots in the results" test "$(grep -c '^| .* | 60 | ' "$T/v4.md")" = 2 -a "$(grep -c 'MarinTarin\|Tail' "$T/v4.md")" = 0
+check "bench gaze and eye: LARECOMP_VR_GAZE_MOCK, MOCK_XR_EYE_SIZE and LARECOMP_VR_DYNRES=0 reach the program" test "$(cat "$T/scratch/run-1-bench-var/env.txt")" = "$(printf 'LARECOMP_VR_DYNRES=0\nLARECOMP_VR_GAZE_MOCK=0,0\nMOCK_XR_EYE_SIZE=1728x1728')"
+VB --plan --spots forest,cave --gaze 0.1,-0.2 --warm --variant a:LARECOMP_FAKE_GPU=1 --variant b: "$F/bench-var" "$F/bench-app" > "$T/v5.log" 2>&1
+check "bench plan: the chosen spots, the runs with settings, gaze and eye" test "$(grep -c '^  spot ' "$T/v5.log")" = 2 -a "$(grep -c '^  run: ' "$T/v5.log")" = 4 && grep -q 'variant a: LARECOMP_FAKE_GPU=1' "$T/v5.log" && grep -q 'mock gaze 0.1,-0.2' "$T/v5.log" && grep -q 'eye size 1680x1760' "$T/v5.log"
+check "bench plan: an estimated time (4 runs and 2 warm-ups of 77 s: about 8 minutes)" grep -q 'about 8 minutes' "$T/v5.log"
+VB --plan "$F/bench-app" > "$T/v6.log" 2>&1
+check "bench plan: without variants one run and its estimate" grep -q 'about 2 minutes' "$T/v6.log"
+VB --out "$T/v7.md" --gaze x "$F/bench-app" > "$T/v7.log" 2>&1; r1=$?
+VB --out "$T/v7.md" --eye 12 "$F/bench-app" > "$T/v7.log" 2>&1; r2=$?
+VB --out "$T/v7.md" --spots forest,moon "$F/bench-app" > "$T/v7.log" 2>&1; r3=$?
+check "bench: bad --gaze, --eye and --spots are refused with exit 2" test "$r1$r2$r3" = 222
+AF_HEADSET_FLAG=$T/headset-in-use AF_BENCH_LOCK=$T/bench.lock "$KITD/frame-bench.sh" --variant a:LARECOMP_FAKE_GPU=1 "$F/bench-var" > "$T/v8.log" 2>&1
+check "bench variants: exit 75 while the headset flag exists" test $? -eq 75
 echo
 if [ "$fails" = 0 ]; then echo "all passed"; else echo "$fails FAILED"; fi
 [ "$fails" = 0 ]

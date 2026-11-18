@@ -57,6 +57,26 @@ Cave room 04B (15 s each), and writes one file: GPU, render CPU and game CPU ms 
 difference of each later program to the first. It refuses while `~/.cache/headset-in-use` exists unless `--owner-ok`, runs one program at
 a time under `~/.cache/af-bench-lock`, stops each at a time limit, and leaves nothing running.
 
+Several settings in one sitting: `--variant NAME:VAR=value,VAR=value` (repeatable) adds one more run of each app folder with those
+variables set on top of the kit's `session.env` lines; the variant wins. `NAME:` alone adds no settings. The variables are the game's and the mock's (`LARECOMP_*`, `MOCK_XR_*`, `AF_*`,
+`MESA_*`, `TU_DEBUG`); values have no spaces, `$`,
+backticks, `;` or quotes. The runs go app 1 with each variant, then app 2 with each variant. Each run has its own section with its
+settings, a table compares every run with the first, and a small table per spot lists GPU ms, the difference to the first run, FPS and
+render CPU ms. The variants of one app share one shader cache (removed after the last one), so later variants do not pay first-visit
+shader compiles. The first variant does, unless you add `--warm`: one extra run before it, not counted, fills the cache (it uses the
+first variant's settings, so a variant that changes shaders can still pay a little). `--cache DIR` uses that folder for everything.
+
+`--spots mabe,forest,house,cave` picks the spots (default all four). `--gaze TX,TY` sets the mock eye gaze in tangents
+(`LARECOMP_VR_GAZE_MOCK`; `0,0` is centred). `--eye WxH` pins the eye size and turns dynamic resolution off (default: `FRAME_BENCH_EYE`,
+else 1680x1760). `--plan` lists the runs with their settings, the spots, the gaze and eye size, and "about N minutes" (each run is
+75 s of start-up plus the dwell at each spot; a warm-up counts as a run). The refusal, the lock (held for the whole sitting), the time
+limit and the clean-up are the same as for one run.
+
+```sh
+steam-frame/dev/frame-bench.sh --warm --spots mabe,forest --gaze 0,0 --eye 1680x1760 \
+  --variant base: --variant noedge:LARECOMP_VR_EDGE=off --variant noscene:LARECOMP_VR_SCENE=off ~/Games/AwakeningFrame-dev/app-<commit>
+```
+
 ## Checks
 `steam-frame/dev/test-dev-kit.sh` runs the install, setup, log collection, shortcut and bench refusals against a scratch folder that
 stands in for the headset (a fake `ssh`, `FRAME_SSH`). It connects to nothing.
