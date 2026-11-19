@@ -45,7 +45,8 @@
 //                            image with the quad layers over it in order, each where its pose puts it (nearest sample)
 //   MOCK_XR_SHOT_DIR=<dir>   where (default .): f<frame>_proj<layer>_eye<0|1>.png, f<frame>_quad<layer>.png
 //   MOCK_XR_SHOT_REQ=<file>  a shot the app asks for: when <file> exists (its first line a path prefix), the projection
-//                            layer's eye images of the MOCK_XR_SHOT_REQ_DELAY'th frame ended after it (4) are written to
+//                            layer's eye images of the MOCK_XR_SHOT_REQ_DELAY'th frame ended after it (4; the first with a
+//                            projection layer from there) are written to
 //                            <prefix>_eye<0|1>.png and the file is removed (the game's LARECOMP_STEREO_DUMP_XR: the eye
 //                            images as the headset gets them, Table Edge applied, at its own dump frames)
 //   MOCK_XR_SHIFT=<file>     per refresh, the projection layer's pose against the head's at the display time; per new
@@ -1546,6 +1547,7 @@ static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
         }
     }
     if (want && getenv("MOCK_XR_SHOT_VIEW")) compositeView(frame, ei);
+    if (req[0] && !nproj) gShotReqWait = 0;  // (a frame without a projection layer, a dark one: the next frame's then)
     // (MOCK_XR_SHIFT) every ended frame, with or without a projection layer ("disp" only comes with one): its layers
     if (gShift) fprintf(gShift, "end frame=%d t=%.4f proj=%d quads=%d\n", frame, (double)(ei->displayTime - gT0) / 1e9, nproj, nquad);
     double margin = (double)(gBeginRec.predicted - end) / 1e6;
