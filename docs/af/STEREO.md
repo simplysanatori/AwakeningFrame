@@ -373,18 +373,17 @@ above). The images get half the light. The VR tab's Motion Clarity row (Picture)
   a hitch does not let a set replace the one before it is lit). The prediction is also on the lit refreshes' phase
   (`g_xr.bfi_phase`, first taken from the lead, then the latest flash on it): every second refresh, the same one each
   frame. A grid line off the phase moves the prediction one refresh later: those sets' poses are predicted a refresh
-  further ahead than needed and they wait a refresh longer. The phase moves only up: a lead that grows onto the other
-  phase moves it one refresh later at once (counted; one gap of three refreshes between two flashes), so the sets are
-  not late on every refresh after a slowdown. A lead that shrinks onto the other phase keeps it. That is for good: a
-  set held a refresh longer holds the next one's present (`xr_set_begin` waits for it), whose own lead then grows to
-  match, so the phase stays on the latest lead the sets have needed and the extra refresh does not go by itself. The
-  cost is latency: on the mock 41.5 to 44 ms from the latch to the display with every present waiting about 7 ms,
-  against 27.7 ms with it off (it settles there after the first slow set and stays; the flashes stay two refreshes
-  apart). `LARECOMP_XR_BFI_PHASE=follow` (a test) takes the lead less that wait and moves the phase both ways once the
-  lead has been off it for 32 sets (half a second): 33 to 35.5 ms, but a move to an earlier lead puts one set's refresh
-  right after a flash, and that set is lit a refresh late or not at all (on the mock with a recorded head: 13 gaps of
-  three or four refreshes in 37 s and 3 sets never lit, against 1 gap with the default). A set is never lit sooner than
-  two refreshes after the last flash.
+  further ahead than needed and they wait a refresh longer, and so does the next set's present (`xr_set_begin`). The
+  lead here is less that wait: without it the extra refresh grows the next lead to match and never goes (on the mock
+  every present then waited about 7 ms, 41.5 to 44 ms from the latch to the display against 27.7 off, and in Mabe
+  Village the waits grew until the pacer held 30). A lead that grows onto the other phase moves the phase one refresh
+  later at once (counted; one gap of three refreshes between two flashes), so the sets are not late on every refresh
+  after a slowdown. A lead that shrinks onto the other phase moves it only after 32 sets there
+  (`LARECOMP_XR_BFI_PHASE_DOWN=<sets>`, a test; 0: never): the move puts one set's refresh right after a flash, so that
+  set is lit a refresh late or not at all. A lead that sits on the edge between two refreshes moves it up and down
+  every few seconds, each time with one irregular gap (on the mock, 30 s to the end: 6 gaps of three or four
+  refreshes in 37 s on a steady turn, 12 with a recorded head; 33.2 to 35.5 ms from the latch to the display). A set
+  is never lit sooner than two refreshes after the last flash.
 - **A late set** (its GPU work not done by the refresh its poses were located for) is lit on the next refresh of the
   phase, two refreshes after its poses; the lit refresh it missed stays dark: one flash skipped, three dark refreshes.
   Lighting the set before again there would show its image on two flashes 16.7 ms apart: the double image, once.
@@ -445,7 +444,7 @@ and the phase moves.
 | `LARECOMP_XR_REPROJ_MV=1`, `_RECT=1` | the redraw: both eyes in one multiview pass; only the eye's rendered size drawn, the layer naming that part (both off; above) |
 | `LARECOMP_XR_REPROJ_JOINT=0` | a test: a set released before its redraws are done (above); default: only once they are |
 | `LARECOMP_XR_BFI=0\|1` | Motion Clarity: each set on one refresh, black on the other, at 120 Hz with the game at 60 (off; above; the VR tab's Motion Clarity row) |
-| `LARECOMP_XR_BFI_LATE=relight`, `LARECOMP_XR_BFI_ROOM=0`, `LARECOMP_XR_BFI_GAIN=<g>`, `LARECOMP_XR_BFI_PHASE=follow` | tests: a late set's missed flash lit with the set before; Passthrough's dark refreshes opaque; the eyes' brightness lift; the phase following the lead less the present's wait, both ways (off; above) |
+| `LARECOMP_XR_BFI_LATE=relight`, `LARECOMP_XR_BFI_ROOM=0`, `LARECOMP_XR_BFI_GAIN=<g>`, `LARECOMP_XR_BFI_PHASE_DOWN=<sets>` | tests: a late set's missed flash lit with the set before; Passthrough's dark refreshes opaque; the eyes' brightness lift; the sets a lead stays below the phase before it moves (off; off; off; 32, 0: never; above) |
 | `LARECOMP_GPU_OVERLAP=0\|1` | the CPU / GPU overlap (VR default on, flat off on Turnip; docs/af/PASSES.md) |
 | `LARECOMP_VR_FOVEATION=off\|low\|medium\|high` | eye-tracked foveation of the eye passes (above) |
 | `LARECOMP_VR_FOVEATION_CAP=2`, `LARECOMP_VR_FOVEATION_RINGS=<f>` | tests: no rate coarser than 2x2; the rings' radii times f (above) |
