@@ -41,7 +41,7 @@ static struct {  // (XR thread; the presenting thread's fields under g_xr.mu)
     // first lit refresh after it), replaced before they were lit; lit refreshes with no new set: left dark (a flash
     // skipped), the set before lit again (the late test, and a second in a row: a stall); flashes 1, 2, 3, 4, 5+ refreshes
     // after the one before; the lit refreshes' phase moved (a lead grown by one)
-    uint64_t bfi_lit, bfi_dark, bfi_ib, bfi_on, bfi_late, bfi_unlit, bfi_skip, bfi_relit, bfi_stall, bfi_gap[5], bfi_rephase;
+    uint64_t bfi_lit, bfi_dark, bfi_ib, bfi_again, bfi_on, bfi_late, bfi_unlit, bfi_skip, bfi_relit, bfi_stall, bfi_gap[5], bfi_rephase;
 } st;
 
 // LARECOMP_XR_REPROJ=off|fresh|rot|pos|follow (xr.h; docs/af/STEREO.md "Re-shown refreshes"); the VR tab sets it live
@@ -195,7 +195,11 @@ static int64_t periods(int64_t d, int64_t per) { return d >= 0 ? (d + per / 2) /
 
 // (LARECOMP_XR_REPROJ) a finished set's first possible refresh, `pdt`: its lead, whole periods from its latch's vsync
 // target, into the last XR_LEADS; the prediction's lead is their latest (predict_time)
-static void lead_note(const XrSet *s, XrTime pdt) {
+// (LARECOMP_XR_INBETWEEN 1) also each in-between's, own false: the refresh it was finished for less its place after the
+// set's first. Its views are located as long after the set's as its refresh is after the set's first, so it needs the
+// same lead as the set; with only the set's, a set finished early (a light frame, or Motion Clarity's lead less the
+// waits) brings the lead down a refresh and every in-between is finished after its refresh, none shown
+static void lead_note(const XrSet *s, XrTime pdt, bool own) {
     int64_t per = atomic_load(&g_xr.grid_period);
     if (!s->vref || per <= 0) return;
     // (LARECOMP_XR_BFI, armed: less the time its present waited for the set before, held for its own refresh. Without
@@ -204,7 +208,7 @@ static void lead_note(const XrSet *s, XrTime pdt) {
     static int down = -1;
     if (down < 0) down = getenv("LARECOMP_XR_BFI_PHASE_DOWN") ? atoi(getenv("LARECOMP_XR_BFI_PHASE_DOWN")) : 32;
     bool bfi = xr_bfi_armed();
-    int64_t m = periods(pdt - s->vref - (bfi ? (int64_t)s->wait_ns : 0), per);
+    int64_t m = periods(pdt - s->vref - (bfi && own ? (int64_t)s->wait_ns : 0), per);
     if (m < -4 || m > 12) return;  // (a hitch or a load, not the pipeline)
     g_xr.leads[g_xr.lead_n++ % XR_LEADS] = (int8_t)m;
     if (g_xr.lead_n < XR_LEADS / 2) return;
@@ -238,6 +242,7 @@ static void reshow_release(XrSet *s, uint64_t done, XrTime pdt, bool all) {
         if (s->rs_ok[k] && pdt && s->grid0 && s->period > 0 && !all) {  // (how early: refreshes before the one it is for)
             int64_t d = s->grid0 + (k + 1) * s->period - pdt, m = d >= 0 ? (d + s->period / 2) / s->period : -((-d + s->period / 2) / s->period);
             st.rs_ahead[m >= 2 ? 0 : m == 1 ? 1 : m == 0 ? 2 : 3]++;
+            if (!s->own_hidden) lead_note(s, pdt - (k + 1) * s->period, false);
         }
     }
 }
@@ -269,7 +274,7 @@ void xr_release_completed(XrTime pdt) {
         uint64_t need = joint && g_xr.pending.reads > g_xr.pending.seq ? g_xr.pending.reads : g_xr.pending.seq;
         if (done >= need && rec_submitted() >= g_xr.pending.reads) {
             XrSet *p = &g_xr.pending;
-            if (pdt && !p->ready) p->ready = pdt, lead_note(p, pdt);
+            if (pdt && !p->ready) p->ready = pdt, lead_note(p, pdt, true);
             // (LARECOMP_XR_BFI: up to 8 refreshes, so a lead grown by a hitch does not let a set replace the one shown
             // before that one's lit refresh: it would never be lit. A set whose own images are never shown, xr_set_grid 2:
             // held for the refresh after grid0)
@@ -406,6 +411,16 @@ static bool inbetween_for(const XrSet *s, XrTime t) {
     int k = d <= 0 ? 0 : (int)((d + s->period / 2) / s->period);
     return k > 0 && k <= s->rs_n && s->rs_ok[k - 1] && s->rs_rel[k - 1];
 }
+// (LARECOMP_XR_INBETWEEN) the image end_frame shows set s with at refresh t: 0 its own, k its in-between k (the one
+// drawn for t, else the latest finished before it)
+static int image_for(const XrSet *s, XrTime t) {
+    if (!s->grid0 || s->period <= 0 || !s->rs_n) return 0;
+    int64_t d = t - s->grid0;
+    int k = d <= 0 ? 0 : (int)((d + s->period / 2) / s->period);
+    if (k > s->rs_n) k = s->rs_n;
+    while (k > 0 && !(s->rs_ok[k - 1] && s->rs_rel[k - 1])) k--;
+    return k;
+}
 static bool bfi_step(XrTime t, int64_t per, bool *first) {
     static int relight = -1;
     if (relight < 0) relight = getenv("LARECOMP_XR_BFI_LATE") && !strcmp(getenv("LARECOMP_XR_BFI_LATE"), "relight");
@@ -449,12 +464,20 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
     // steady as without it. first: the set's first refresh shown (with it: the one it is lit on)
     // (LARECOMP_XR_INBETWEEN) a refresh with an in-between drawn for it is lit too: what Motion Clarity leaves out is an
     // image shown again, and an in-between is a new one. Where they are made every refresh is lit; where one is missing
-    // the refresh is dark, as without them
+    // the refresh is dark, as without them. Nor is a refresh lit with the image lit on the one before: a set late for its
+    // flash, its in-between lit on the refresh after its own, would have that in-between again (prev; not while the watchdog lights every refresh)
     bool lit = true, first = new_set;
+    static struct { uint64_t serial; int k; bool lit; } prev;
     if (bfi.on && fs->shouldRender && g_xr.shown_any) {
+        const XrSet *s = &g_xr.shown;
+        int k = image_for(s, fs->predictedDisplayTime);
         lit = bfi_step(fs->predictedDisplayTime, xr_bfi_period(), &first);
-        if (!lit && inbetween_for(&g_xr.shown, fs->predictedDisplayTime)) lit = true, st.bfi_ib++;
+        if (!lit && inbetween_for(s, fs->predictedDisplayTime)) lit = true, st.bfi_ib++;
+        if (lit && !bfi.slow && prev.lit && prev.serial == s->serial && prev.k == k) lit = false, st.bfi_again++;
         lit ? st.bfi_lit++ : st.bfi_dark++;
+        prev.serial = s->serial, prev.k = k, prev.lit = lit;
+    } else {
+        prev.lit = false;
     }
     if (fs->shouldRender && g_xr.shown_any) {
         const XrSet *s = &g_xr.shown;
@@ -589,12 +612,12 @@ static void log_stats(double secs) {
     if (bfi_wanted()) {
         static const char *const k_state[] = {"off", "flashing", "waits for 120 Hz at 60 fps", "waits: the game at 30",
                                               "in-between frames made"};
-        LOG("[xr] motion clarity (%s): %llu refreshes lit (%llu of them by an in-between), %llu dark; sets lit on the refresh their poses were located for "
+        LOG("[xr] motion clarity (%s): %llu refreshes lit (%llu of them by an in-between), %llu dark (%llu of them the image lit before); sets lit on the refresh their poses were located for "
             "%llu, later %llu, never %llu; lit refreshes with no new set: %llu left dark (a flash skipped), %llu the set "
             "before again (%llu a stall); flashes 1 / 2 / 3 / 4 / 5+ refreshes after the one before: %llu / %llu / %llu / "
             "%llu / %llu; phase moved %llu (lead %d)\n",
             k_state[atomic_load(&g_bfi_state) % 5], (unsigned long long)st.bfi_lit, (unsigned long long)st.bfi_ib,
-            (unsigned long long)st.bfi_dark,
+            (unsigned long long)st.bfi_dark, (unsigned long long)st.bfi_again,
             (unsigned long long)st.bfi_on, (unsigned long long)st.bfi_late, (unsigned long long)st.bfi_unlit,
             (unsigned long long)st.bfi_skip, (unsigned long long)(st.bfi_relit + st.bfi_stall), (unsigned long long)st.bfi_stall,
             (unsigned long long)st.bfi_gap[0], (unsigned long long)st.bfi_gap[1], (unsigned long long)st.bfi_gap[2],

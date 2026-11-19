@@ -412,8 +412,13 @@ With Motion Clarity (below) on as well: a refresh with an in-between drawn for i
 are made they win, every refresh shows an image of its own and none is dark (`[xr] motion clarity: in-between frames
 made ...`, its 5 s line counts the refreshes lit by an in-between; the VR tab's row "In-between Frames fill the black
 refreshes here."), a refresh whose in-between is missing is dark rather than a repeat, and where they step aside
-Motion Clarity flashes as set. The sets' prediction, grid line and hold are Motion Clarity's (its lit phase): the
-set's own image is lit on its refresh and the in-between on the next.
+Motion Clarity flashes as set. Nor is a refresh lit with the image lit on the one before (`image_for`; the 5 s line's
+"dark (n of them the image lit before)"): a set late for its flash, its in-between lit on the refresh after its own,
+would have that in-between again. The sets' prediction, grid line and hold are Motion Clarity's (its lit phase): the
+set's own image is lit on its refresh and the in-between on the next. With `1` the prediction's lead also counts each
+in-between's (xr_loop.c `lead_note`): its views are located as long after the set's as its refresh is after the set's
+first, so it needs the set's lead; from the sets' alone (Motion Clarity takes the waits for a held set off theirs) the
+lead came down a refresh where the frame is light and no in-between was finished for its refresh.
 
 ## Motion Clarity (`LARECOMP_XR_BFI`, off by default)
 
