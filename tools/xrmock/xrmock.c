@@ -39,7 +39,8 @@
 //                            linear, held at the ends; the gaze columns, relative to the head, are what MOCK_XR_GAZE=file
 //                            plays; the game's LARECOMP_XR_POSE_LOG writes this format, tools/xrmock/headpose.py makes it)
 //   MOCK_XR_SHOT=<spec>      write the submitted images to PNG for these frames (1-based, as in the trace):
-//                            "30", "10,20", "5-8", "every:60", "all"
+//                            "30", "10,20", "5-8", "every:60", "all"; a frame without a projection layer (the app's
+//                            LARECOMP_XR_BFI dark refresh) is written again from the next frame with one, under that number
 //                            (a dumped frame stalls the loop for ~0.5 s per image: copy and PNG on the CPU)
 //   MOCK_XR_SHOT_VIEW=1      with MOCK_XR_SHOT: also f<frame>_view.png, what the left eye sees (half size): its projection
 //                            image with the quad layers over it in order, each where its pose puts it (nearest sample)
@@ -289,6 +290,7 @@ static char gShotSpec[256] = "";
 static const char* gShotReq;     // MOCK_XR_SHOT_REQ
 static char gShotReqPath[400];   // (the asked shot's prefix, while it waits)
 static int gShotReqWait = -1;    // (frames still to end before it is taken; -1: none asked)
+static int gShotCarry;           // (MOCK_XR_SHOT: a frame without a projection layer, a dark one: the next frame's too)
 
 static int shotWanted(int frame) {
     if (!gShotSpec[0]) return 0;
@@ -1464,7 +1466,7 @@ static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
         return XR_ERROR_CALL_ORDER_INVALID;
     }
     int64_t end = nowNs();
-    int frame = gBeginRec.id, want = shotWanted(frame);
+    int frame = gBeginRec.id, want = shotWanted(frame), wantEyes = want || gShotCarry;
     char req[400] = "";  // (MOCK_XR_SHOT_REQ: this frame's projection images to that prefix)
     if (gShotReq && gShotReqWait < 0) {
         FILE* f = fopen(gShotReq, "r");
@@ -1514,7 +1516,7 @@ static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
                 snprintf(t, sizeof(t), " sc%d:%dx%d%s", c ? chainId(pv->subImage.swapchain) : -1, pv->subImage.imageRect.extent.width, pv->subImage.imageRect.extent.height,
                          depth ? "+depth" : "");
                 strcat(buf, t);
-                if (want) {
+                if (wantEyes) {
                     snprintf(nm, sizeof(nm), "proj%u_eye%u", i, v);
                     shot(frame, c, &pv->subImage, nm);
                 }
@@ -1537,7 +1539,7 @@ static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
             snprintf(t, sizeof(t), " quad[sc%d:%dx%d eye=%d]", c ? chainId(q->subImage.swapchain) : -1, q->subImage.imageRect.extent.width, q->subImage.imageRect.extent.height,
                      (int)q->eyeVisibility);
             strcat(buf, t);
-            if (want) {
+            if (wantEyes) {
                 snprintf(nm, sizeof(nm), "quad%u", i);
                 shot(frame, c, &q->subImage, nm);
             }
@@ -1547,6 +1549,7 @@ static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
         }
     }
     if (want && getenv("MOCK_XR_SHOT_VIEW")) compositeView(frame, ei);
+    gShotCarry = wantEyes && !nproj;
     if (req[0] && !nproj) gShotReqWait = 0;  // (a frame without a projection layer, a dark one: the next frame's then)
     // (MOCK_XR_SHIFT) every ended frame, with or without a projection layer ("disp" only comes with one): its layers
     if (gShift) fprintf(gShift, "end frame=%d t=%.4f proj=%d quads=%d\n", frame, (double)(ei->displayTime - gT0) / 1e9, nproj, nquad);
