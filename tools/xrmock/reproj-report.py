@@ -14,6 +14,12 @@
 #                   rendered images (rendered images only, no depth or claim of the image under test is used)
 #   --motion follow as slide, by display time instead of the head's position: a still head while the table follows
 #                   Link (the world slides at a steady rate between game frames)
+#   (turn) consecutive refreshes: each refresh's image registered against the one shown on the refresh before (the same
+#                   image: no change), and the change of the content's error against the head from one refresh to the next
+#                   (what a compositor that shows each layer as it is turns into a double image; doubling.py's measure,
+#                   from the pixels instead of the layers' poses). Only the image before's claim is used, as the frame the
+#                   small change is taken in, so it also holds where the sets' own images are never shown
+#                   (LARECOMP_XR_INBETWEEN=2) and for a recorded head (rotation only: parallax counts as error)
 # A registration check, the same measure between consecutive rendered images against their claimed poses, gives the
 # floor of the measurement. Each refresh is also sorted by the display time its layer's pose was located for (the mock
 # matches it): this refresh's ("on time": within half a period), or another's (a set shown again, or a late set).
@@ -201,6 +207,21 @@ if motion == 'turn':
     print('a set\'s first refresh: content against the head at display (pinned) %s deg; against its layer pose %s deg' % (stats(first['pin']), stats(first['rep'])))
     print('other refreshes:        content against the head at display (pinned) %s deg; against its layer pose %s deg' % (stats(again['pin']), stats(again['rep'])))
     print('every refresh, pinned, by its pose\'s display time: %s deg' % split(rows))
+    dbl, prev, pairs = [], None, {}
+    for d in disps:
+        k = (int(d['sc0']), int(d['rel0']))
+        if k not in dumps or k not in imgs: prev = None; continue
+        T = qmat((d['tqx'], d['tqy'], d['tqz'], d['tqw']))
+        if prev:
+            pk, pT = prev
+            C = claimR(imgs[pk])
+            if k == pk: D = np.eye(3)
+            else:
+                if (pk, k) not in pairs: pairs[(pk, k)] = register_rot(image(pk), image(k), g, C.T @ claimR(imgs[k]))
+                D = pairs[(pk, k)]
+            dbl.append(deg(np.linalg.norm(rotvec((pT.T @ C).T @ (T.T @ C @ D)))))
+        prev = (k, T)
+    print('consecutive refreshes, from the pixels: the change of the content\'s error against the head (the double image) %s deg' % stats(dbl))
 else:
     fpx = g.fpx() / 2  # (dump pixels a radian)
     if motion == 'follow': pos = lambda d: np.array([d['t'], 0.0, 0.0])
