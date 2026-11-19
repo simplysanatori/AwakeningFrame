@@ -32,11 +32,12 @@
 // frame's refreshes; the render thread's time for the frame (from its views' latch to its set's submission: the waits
 // for the game's lists and the GPU in it, as the next frame waits behind them), its waits for the refreshes and the
 // replays against the same (the render thread's, the half second's median: a stall is not what an area costs; a half
-// second is in one area, begun again at a change). Over in two half seconds in a row: stepped aside, and the area (the level and the camera's
-// zone box) noted with the render thread's time measured there while they were made (the frame's own grows with them);
-// back there only once the estimate (that time, scaled by the frame's time since against its first without them) is
-// under 85% for two seconds and a hold has passed (3 s, doubled for each step aside within 10 s of the last return, 60 s
-// at most); in an area not noted, as soon as it fits. While they are made, dynamic resolution gives each image of the
+// second is in one area, begun again at a change). Over in two half seconds in a row: stepped aside, and the area (the
+// level and the camera's zone box) noted; back there only once the estimate is under 85% for two seconds and a hold has
+// passed: 3 s, doubled for each step aside within 10 s of the last return, 60 s at most. The estimate without them is
+// low where the frame's own render-thread time grows with them (the GPU and the queue busier: Mabe on the desktop), so
+// such an area gets a try at those growing intervals, each ending within a second; a stall that put them aside where
+// they fit (a load, another program) costs only the hold. In an area not noted they come back as soon as it fits. While they are made, dynamic resolution gives each image of the
 // frame its share of the frame's refreshes less the compositor's (inbetween_dynres_ms). Stepped aside is the same as
 // off: no logging, no grid, no replays; Reprojection (LARECOMP_XR_REPROJ) acts there as set, and nowhere else (exec.c
 // stereo_eyes). A frame also gets none when its log is not whole (an overflow, a freed texture), the storage its draws
@@ -150,11 +151,7 @@ static struct {
 } S = {.ratio_gpu = 1, .ratio_cpu = 1, .hold_ns = 3000000000ull, .lead_ms = 30};
 static struct { uint64_t sets, made, gone, no_times, no_log, no_storage, freed, scale, capture, failed, late, ahead, stale; double wait_ms, cpu_ms, acq_ms, lock_ms; } st;
 #define AREAS 64
-// The areas they stepped aside in (this session), with the render thread's time measured there while they were made
-// (the frame's own grows with them: the GPU and the queue are busier) and the frame's first measured without them: a
-// later estimate there scales the first by the frame's time then
-typedef struct { uint64_t area; double need_cpu, cpu_off; } NoFit;
-static NoFit g_no_fit[AREAS];
+static uint64_t g_no_fit[AREAS];  // the areas they stepped aside in (this session)
 static int g_no_fit_n;
 
 bool inbetween_logging(void) { return S.engaged; }
@@ -172,7 +169,7 @@ static uint64_t area_now(void) {
     return h | 1;
 }
 static int area_no_fit(uint64_t a) {  // (its index + 1; 0: not noted)
-    for (int i = 0; i < g_no_fit_n && i < AREAS; i++) if (g_no_fit[i].area == a) return i + 1;
+    for (int i = 0; i < g_no_fit_n && i < AREAS; i++) if (g_no_fit[i] == a) return i + 1;
     return 0;
 }
 
@@ -250,9 +247,7 @@ static void rule(uint64_t latch) {
             uint64_t hold = S.back_at && now - S.back_at < 10000000000ull ? S.hold_ns * 2 : 3000000000ull;
             S.hold_ns = hold > 60000000000ull ? 60000000000ull : hold;
             S.aside_until = now + S.hold_ns;
-            int i = area_no_fit(area);
-            i = i ? i - 1 : g_no_fit_n++ % AREAS;
-            g_no_fit[i].area = area, g_no_fit[i].need_cpu = need_cpu, g_no_fit[i].cpu_off = 0;
+            if (!area_no_fit(area)) g_no_fit[g_no_fit_n++ % AREAS] = area;
             note_change(false, need_gpu > budget ? "the GPU has no time for them here" : "the render thread has no time for them here",
                         gpu_f, nib * ib_gpu, cpu_f, ib_cpu, budget, refr);
             S.over = S.under = 0;
@@ -265,9 +260,6 @@ static void rule(uint64_t latch) {
         }
         S.over = S.under = 0;
     } else {
-        NoFit *a = &g_no_fit[area_no_fit(area) - 1];
-        if (!a->cpu_off) a->cpu_off = cpu_f;  // (the first half second without them here)
-        if (a->cpu_off > 0) need_cpu = a->need_cpu * cpu_f / a->cpu_off;
         S.under = need_gpu <= 0.85 * budget && need_cpu <= 0.85 * budget ? S.under + 1 : 0;
         if (S.under >= 4 && now >= S.aside_until) {
             S.back_at = now;

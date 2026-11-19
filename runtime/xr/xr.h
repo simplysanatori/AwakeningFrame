@@ -140,7 +140,8 @@ void xr_set_reproj_mode(int mode);  // (the VR tab; any thread: the next set)
 // the HUD and the laser stay). Off by default; elsewhere (90 Hz, the 30 FPS hold, other rates) it waits, as off.
 void xr_set_bfi(int on);  // (the VR tab; any thread: the next refresh)
 // 0 off, 1 flashing, 2 waiting for 120 Hz with the game at 60 (another rate, the 30 FPS lock), 3 waiting while the game
-// runs at 30 (the pacer's hold, or sets missing on most lit refreshes)
+// runs at 30 (the pacer's hold, or sets missing on most lit refreshes), 4 flashing where in-between frames are made
+// (LARECOMP_XR_INBETWEEN: the refreshes with one are lit too, so none is dark while they come)
 int xr_bfi_state(void);
 // LARECOMP_XR_BFI_GAIN=<g> (off): the eye images' brightness lift while it flashes (0: none; the present / edge pass's pf.z)
 float xr_bfi_gain(void);

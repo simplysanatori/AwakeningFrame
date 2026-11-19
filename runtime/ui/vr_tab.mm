@@ -141,11 +141,12 @@ extern "C" void vr_tab_draw(float scale) {
     if (opt_toggle("In-between Frames", &v.inbetween, false,
                    desc(VRO_INBETWEEN, "Draws the world again for where your head is on the refreshes between game frames, "
                                        "so it stays still and sharp when you move your head. Used only where the GPU has time "
-                                       "for it; elsewhere Reprojection acts. Costs GPU time.")))
+                                       "for it; elsewhere Reprojection or Motion Clarity acts. Costs GPU time.")))
         changed(VRO_INBETWEEN);
     snprintf(note, sizeof note, "%s%s",
              "Shows each game frame for one refresh and black for the next, so moving your head doesn't double the picture. "
-             "The picture is darker.", bfi == 2 ? " Waiting for 120 Hz at 60 FPS." : bfi == 3 ? " Waiting while the game runs at 30 FPS." : "");
+             "The picture is darker.", bfi == 2 ? " Waiting for 120 Hz at 60 FPS." : bfi == 3 ? " Waiting while the game runs at 30 FPS."
+             : bfi == 4 ? " In-between Frames fill the black refreshes here." : "");
     grey(VRO_BFI);
     if (opt_toggle("Motion Clarity", &v.bfi, false, desc(VRO_BFI, note)))
         changed(VRO_BFI);

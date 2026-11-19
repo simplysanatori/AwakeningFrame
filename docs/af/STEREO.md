@@ -393,10 +393,11 @@ a refresh, 1.5) are checked against the frame's refreshes, and the render thread
 set's submission: the waits for the game's lists and the GPU in it), the waits and the replays against the same (the render
 thread's times as the half second's median; a half second is in one area, begun again at a change).
 Over in two half seconds in a row: they step aside (an `[inbetween]` line at each change) and the area (the level and
-the camera's zone box) is noted with the render thread's time measured there while they were made (the frame's own
-grows with them); there they come back only once the estimate (that time, scaled by the frame's time since against its
-first without them) is under 85% for two seconds and a hold has passed (3 s, doubled for each step aside within 10 s of the last return,
-60 s at most); in an area not noted, as soon as it fits. While they are made, dynamic resolution gives each image of
+the camera's zone box) is noted; there they come back only once the estimate is under 85% for two seconds and a hold
+has passed (3 s, doubled for each step aside within 10 s of the last return, 60 s at most). Where the frame's own
+render-thread time grows with them (the GPU and the queue busier; Mabe on the desktop) the estimate without them is
+low: such an area gets a try at those growing intervals, each over within a second; a stall that put them aside where
+they fit costs only the hold. In an area not noted they come back as soon as it fits. While they are made, dynamic resolution gives each image of
 the frame its share of the refreshes less the compositor's. Stepped aside is the same as off: the frame is not logged,
 the sets are not on the grid, nothing is replayed, and Reprojection (`LARECOMP_XR_REPROJ`) acts as set; while they are
 made it does not run. A frame gets none when its log is not whole, the storage its draws read changed since, an object
@@ -405,6 +406,14 @@ is under way. With the 30 FPS hold at 120 Hz (four refreshes) `2` makes the in-b
 
 While logging, the ring and view culls of depth-only passes stay on (`ring_early`): a skipped draw's key is logged, so
 a replay's place in the log follows the frame's draws whichever of them its own views skip.
+
+With Motion Clarity (below) on as well: a refresh with an in-between drawn for it is lit (xr_loop.c `end_frame`,
+`inbetween_for`): what Motion Clarity leaves dark is an image shown again, and an in-between is a new one. So where they
+are made they win, every refresh shows an image of its own and none is dark (`[xr] motion clarity: in-between frames
+made ...`, its 5 s line counts the refreshes lit by an in-between; the VR tab's row "In-between Frames fill the black
+refreshes here."), a refresh whose in-between is missing is dark rather than a repeat, and where they step aside
+Motion Clarity flashes as set. The sets' prediction, grid line and hold are Motion Clarity's (its lit phase): the
+set's own image is lit on its refresh and the in-between on the next.
 
 ## Motion Clarity (`LARECOMP_XR_BFI`, off by default)
 
@@ -444,7 +453,8 @@ above). The images get half the light. The VR tab's Motion Clarity row (Picture)
   target's 30 (`pace_is_slow`, `pace_target_30`, noted with each set) show every refresh too (a 30 Hz flash is no use),
   and so do sets missing on 6 of the last 16 lit refreshes (a watchdog for a 30 FPS game the pacer does not report),
   until no more than one of the last 16 was. Each change is logged once (`[xr] motion clarity: ...`) and the VR tab's
-  row says "Waiting ...".
+  row says "Waiting ...". Where in-between frames are made (`LARECOMP_XR_INBETWEEN`, "In-between frames" above) the
+  refreshes with one are lit too.
 - **The other layers.** The HUD / menu panel and the controller laser are quad layers and stay on every refresh: the
   compositor places them for each refresh's own head pose, so they do not double, and their text keeps its brightness.
   Surroundings, the Table Edge's fade and the blink are in the eye images and flash with them. Table Edge Passthrough:
