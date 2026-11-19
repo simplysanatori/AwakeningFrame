@@ -102,6 +102,8 @@ typedef struct {
     uint32_t rs_w[XR_RESHOW_MAX], rs_h[XR_RESHOW_MAX];  // the part drawn (LARECOMP_XR_REPROJ_RECT: smaller than the image)
     XrView rs_views[XR_RESHOW_MAX][2];
     XrTime ready;           // (XR thread) the first refresh it was found finished at (it may wait for grid0 then)
+    uint64_t serial;        // counts xr_set_submit: the set the in-between images are for (xr_ib_ready finds it by it)
+    bool own_hidden;        // (xr_set_grid 2) grid0 is a refresh before its first: its own images are never shown there
 } XrSet;
 
 // xr_latch_views_id's latches: the poses each frame's eyes were rendered with, kept until a set names them
@@ -168,6 +170,23 @@ typedef struct {
     _Atomic int lead;
     int8_t leads[XR_LEADS];
     int lead_n;
+    _Atomic int grid;              // (LARECOMP_XR_INBETWEEN) sets on the display's grid as with those modes (xr_set_grid)
+    _Atomic uint64_t rs_fell;      // refreshes whose own drawn image was not finished in time (end_frame; xr_ib_fell)
+    // (LARECOMP_XR_INBETWEEN) the set submitted last, which the render thread draws in-between images for after it went to
+    // the XR thread (xr_ib_*: render thread only; the set itself is then g_xr.pending or g_xr.shown, found by serial)
+    struct {
+        uint64_t serial;
+        int pair, n;
+        XrTime grid0;
+        int64_t period;
+        uint64_t latch_ns;
+        XrSpace space;
+        bool own_hidden;
+        bool has[XR_RESHOW_MAX][2];
+        uint32_t img[XR_RESHOW_MAX][2];
+        XrView views[XR_RESHOW_MAX][2];
+    } ib;
+    uint64_t set_serial;
     int predict;                   // LARECOMP_XR_PREDICT: 1 measured (default), 0 vsync (the latest vsync's time)
     float quad_dist, quad_width;
 } XrCore;
@@ -200,6 +219,9 @@ bool xr_locate_in(XrTime t, XrSpace space, XrView views[2]);
 // xr_loop.c: the refreshes a game frame is shown on at the display's rate now (2 at 120 Hz, 4 in the 30 FPS hold; the
 // larger count at an uneven rate)
 int xr_refreshes_per_frame(void);
+// xr_loop.c: sets are located on the display's grid and held for their refresh (LARECOMP_XR_REPROJ rot / pos / follow,
+// or in-between images: xr_set_grid)
+bool xr_grid_mode(void);
 
 // record.c: the queue's external synchronisation
 void vk_queue_lock(void);

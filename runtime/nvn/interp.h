@@ -46,14 +46,24 @@ void interp_force_cut(void);              // the next frame is a cut (the backen
 // (its parity-double-buffered memory is being rewritten under the replays) or the render thread reached its present
 // over 100 ms late (a load, a hitch: Dusklight's epochs).
 bool interp_replays_allowed(uint64_t frame, uint64_t game_frame, uint64_t now);
+bool interp_storage_same(void);           // (its last check) the storage the frame's draws read is as the frame had it
 bool interp_prepare(float t);             // blends for an image at t (0 = previous frame, 1 = this one)
 bool interp_replay_lock(void);            // before replays: false when an object the frame used was freed
 void interp_replay_unlock(void);
 uint32_t interp_handles(const uint64_t **out);
+// (the VR mode's in-betweens, exec.c / inbetween.c) replays play the frame rotated out at its present (interp_handles,
+// interp_replay_lock and interp_replays_allowed then mean that frame), not this one; whether it was logged whole
+void interp_replay_last(bool on);
+bool interp_last_logged(void);
+// (stereo) a replay's place in the frame's draws: eye 1's run of a list starts where eye 0's did
+void interp_replay_mark(uint32_t m[3]);
+void interp_replay_rewind(const uint32_t m[3]);
 void interp_replay_begin(void);
 void interp_replay_end(void);
+void interp_replay_sleep_until(uint64_t t);  // (the VR mode's in-betweens) a wait for one, counted as replay time (the pacer)
 void interp_frame_rotate(void);           // after the present: this frame becomes the previous one
 uint64_t interp_frame_serial(void);       // counts interp_frame_rotate: which frame the replays' logs belong to
+uint64_t interp_replay_serial(void);      // that of the frame a replay plays (the one before, interp_replay_last)
 uint64_t interp_replay_salt(void);        // (renderer_exec_frame) a different "frame" for each replay
 
 // The game thread at each present: the emulated vsync this frame belongs to (its time on the game's timeline).
@@ -71,6 +81,7 @@ int interp_schedule(uint64_t s0, uint64_t s1, uint64_t now, uint64_t phase, uint
 
 // Stats (any thread) and the pacer: the render thread's time in replays (rqueue.c's waits take it out of busy time).
 void interp_replay_gpu(double ms);
+double interp_replay_gpu_take(void);     // (the VR mode's in-betweens) the replays' GPU ms finished since the last call
 void interp_compose_gpu(double ms);
 double interp_image_gpu_ms(void);  // an in-between's GPU time, replay and compose (moving average; -1: none yet)
 int interp_gpu_allowed(int mids, double interval_ms);  // (render thread, once a game frame) of mids in-betweens, how many fit

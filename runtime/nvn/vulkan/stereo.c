@@ -191,9 +191,43 @@ static void eye_proj(const float fov[4], const float like[16], float p[16]) {
     p[14] = -1;
 }
 
+// (the in-betweens, inbetween.c: a frame's lists run again for a later refresh) the latch of a replay takes these views,
+// located for that refresh, on the table as the frame drew it: no rig or anchor update (the table moves on game frames
+// only), and the game's culling fit is left alone (cam_override.c)
+static struct { bool on; XrEyeView ev[2]; uint64_t id; } g_rp;
+void stereo_replay_views(const XrEyeView ev[2], uint64_t id) {
+    g_rp.on = true, g_rp.id = id;
+    memcpy(g_rp.ev, ev, sizeof g_rp.ev);
+}
+void stereo_replay_views_off(void) { g_rp.on = false; }
+
+static bool eye_fn_replay(const CamLatch *l, float V[2][16], float P[2][16]) {
+    if (!g_rv.rig.ok || g_test > 0) { g_rv.ok = false; return false; }
+    if (!cfg.init) cfg_init();
+    const XrRigPose *rp = &g_rv.rig.rp;
+    for (int e = 0; e < 2; e++) {
+        float E[3];
+        eye_view(&g_rp.ev[e], rp, V[e], E);
+        eye_proj(g_rp.ev[e].fov, l->ref.P, P[e]);
+        if (cfg.near_ > 0) {
+            float f = l->far_, n = cfg.near_;
+            P[e][10] = -(f + n) / (f - n), P[e][11] = -2 * f * n / (f - n);
+        }
+    }
+    g_rv.ok = true, g_rv.id = g_rp.id;
+    memcpy(g_rv.ev, g_rp.ev, sizeof g_rv.ev);
+    fov_note_views((const float[2][4]){{g_rp.ev[0].orientation[0], g_rp.ev[0].orientation[1], g_rp.ev[0].orientation[2], g_rp.ev[0].orientation[3]},
+                                      {g_rp.ev[1].orientation[0], g_rp.ev[1].orientation[1], g_rp.ev[1].orientation[2], g_rp.ev[1].orientation[3]}},
+                   (const float[2][4]){{g_rp.ev[0].fov[0], g_rp.ev[0].fov[1], g_rp.ev[0].fov[2], g_rp.ev[0].fov[3]},
+                                      {g_rp.ev[1].fov[0], g_rp.ev[1].fov[1], g_rp.ev[1].fov[2], g_rp.ev[1].fov[3]}}, g_rp.id);
+    memcpy(g_rv.V, V, sizeof g_rv.V), memcpy(g_rv.P, P, sizeof g_rv.P);
+    return true;
+}
+
 static bool eye_fn(const CamLatch *l, const float pivot_in[3], float V[2][16], float P[2][16]) {
     XrEyeView ev[2];
     uint64_t vid;
+    if (g_rp.on) return eye_fn_replay(l, V, P);
     g_rv.ok = false;
     if (!xr_latch_views_id(ev, &vid)) return false;
     if (!cfg.init) cfg_init();

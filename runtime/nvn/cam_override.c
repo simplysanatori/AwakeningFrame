@@ -493,7 +493,9 @@ static bool eye_cams(void) {  // the latched frame's eye cameras (made once per 
             g_eye_ok = g_eye_ref[e].ok;
         }
 #ifndef CAM_STANDALONE
-        if (g_eye_ok && g_cull_fit) vr_cull_fit(&g_latch, pv, g_anchor_frame == g_latch.frame ? g_anchor : pv, &g_eye_ref[0], &g_eye_ref[1]);
+        // (not for a replay's latch, the VR in-betweens: the game's culling camera is fitted to the game's own frames)
+        extern bool g_interp_replaying;  // (interp.h)
+        if (g_eye_ok && g_cull_fit && !g_interp_replaying) vr_cull_fit(&g_latch, pv, g_anchor_frame == g_latch.frame ? g_anchor : pv, &g_eye_ref[0], &g_eye_ref[1]);
 #endif
     }
     return g_eye_ok;

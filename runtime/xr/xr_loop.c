@@ -63,6 +63,9 @@ int xr_reproj_mode(void) {
     reproj_init();
     return __atomic_load_n(&g_reproj, __ATOMIC_ACQUIRE);
 }
+bool xr_grid_mode(void) { return xr_reproj_mode() >= XR_REPROJ_ROT || atomic_load(&g_xr.grid) > 0; }
+void xr_set_grid(int mode) { atomic_store(&g_xr.grid, mode); }
+uint64_t xr_ib_fell(void) { return atomic_load(&g_xr.rs_fell); }
 void xr_set_reproj_mode(int mode) {
     if (mode < XR_REPROJ_OFF || mode > XR_REPROJ_FOLLOW) return;
     reproj_init();
@@ -119,6 +122,11 @@ void xr_set_submit(uint64_t seq) {
     s->alpha = edge_passthrough_wanted();  // (the mode its eye images were just drawn in)
     s->made_ns = plat_now_ns();
     s->valid = true;
+    s->serial = ++g_xr.set_serial;
+    // (LARECOMP_XR_INBETWEEN: the render thread's handle on this set once it is the XR thread's)
+    memset(&g_xr.ib, 0, sizeof g_xr.ib);
+    g_xr.ib.serial = s->serial, g_xr.ib.pair = s->pair, g_xr.ib.grid0 = s->grid0, g_xr.ib.period = s->period;
+    g_xr.ib.latch_ns = s->latch_ns, g_xr.ib.space = s->space, g_xr.ib.own_hidden = s->own_hidden;
     pthread_mutex_lock(&g_xr.mu);
     if (s->exec_eyes && s->rid[0] != s->rid[1]) st.eye_split++;
     g_xr.pending = *s;
@@ -177,7 +185,8 @@ void xr_release_completed(XrTime pdt) {
         if (done >= need && rec_submitted() >= g_xr.pending.reads) {
             XrSet *p = &g_xr.pending;
             if (pdt && !p->ready) p->ready = pdt, lead_note(p, pdt);
-            if (pdt && p->grid0 && p->period > 0 && xr_reproj_mode() >= XR_REPROJ_ROT && 2 * (p->grid0 - pdt) > p->period &&
+            // (a set whose own images are never shown, xr_set_grid 2: held for the refresh after grid0)
+            if (pdt && p->grid0 && p->period > 0 && xr_grid_mode() && 2 * (p->grid0 + (p->own_hidden ? p->period : 0) - pdt) > p->period &&
                 p->grid0 - pdt <= (XR_RESHOW_MAX + 1) * p->period) {
                 st.held++;
                 pthread_mutex_unlock(&g_xr.mu);
@@ -311,7 +320,7 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
                 int64_t d = fs->predictedDisplayTime - s->grid0;
                 k = d <= 0 ? 0 : (int)((d + s->period / 2) / s->period);
                 if (k > s->rs_n) k = s->rs_n, st.rs_past++;
-                if (k > 0 && s->rs_ok[k - 1] && !s->rs_rel[k - 1]) st.rs_fell++;  // (its submission not done yet)
+                if (k > 0 && s->rs_ok[k - 1] && !s->rs_rel[k - 1]) st.rs_fell++, atomic_fetch_add(&g_xr.rs_fell, 1);  // (its submission not done yet)
                 while (k > 0 && !(s->rs_ok[k - 1] && s->rs_rel[k - 1])) k--;
             }
             XrView fresh[2];

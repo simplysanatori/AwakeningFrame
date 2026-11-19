@@ -47,6 +47,7 @@ typedef struct {
     int aa;            // VRS_AA_*: the eyes' anti-aliasing
     int upscale;       // VRS_UP_*: the eyes' upscale when dynamic resolution renders them smaller
     int reproj;        // VRS_RS_*: the refreshes between game frames drawn again for the head's pose
+    bool inbetween;    // LARECOMP_XR_INBETWEEN: those refreshes from the game frame's lists run again (inbetween.c)
 } VrSettings;
 
 #define VR_DEFAULTS {.refresh = VRS_REFRESH_120, .layout = VRS_LAYOUT_SWITCH, .turn = VRS_TURN_SMOOTH, .follow = VRS_FOLLOW_SMOOTH, \
@@ -59,7 +60,7 @@ extern "C" {
 
 typedef enum {
     VRO_REFRESH, VRO_LAYOUT, VRO_TURN, VRO_FOLLOW, VRO_HEIGHT, VRO_DIST, VRO_SIZE, VRO_TILT, VRO_RECENTRE, VRO_EDGE, VRO_SCENE, VRO_FOVEATION, VRO_DYNRES,
-    VRO_HUD_DIST, VRO_HUD_WIDTH, VRO_POINTER_HAND, VRO_AA, VRO_UPSCALE, VRO_REPROJ, VRO_COUNT
+    VRO_HUD_DIST, VRO_HUD_WIDTH, VRO_POINTER_HAND, VRO_AA, VRO_UPSCALE, VRO_REPROJ, VRO_INBETWEEN, VRO_COUNT
 } VrOpt;
 
 // the choices' names for the menu, and their larecomp.ini words
@@ -90,7 +91,7 @@ void vr_settings_recentre(void);
 // (test hook, once per game frame: hle/warp.c) LARECOMP_VR_SET_AT=<frame>:<key>=<value>[,<frame>:<key>=<value>...]: at
 // that game frame, the change as the VR tab makes it (g_settings.vr, the ini saved, vr_settings_changed). Keys: the ini's
 // without vr_ (edge_style, surroundings, foveation, dynamic_resolution, follow, layout, turn, panel_distance, panel_width, refresh, fps,
-// antialias, upscaler, reprojection)
+// antialias, upscaler, reprojection, inbetween_frames)
 // and edge, dynres, label (Buttons Match Labels, 0 / 1); values as in the ini. Frames in increasing order.
 void vr_settings_test_tick(uint64_t frame);
 

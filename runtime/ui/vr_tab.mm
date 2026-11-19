@@ -132,6 +132,12 @@ extern "C" void vr_tab_draw(float scale) {
                                     "world stays still when you move your head. Full also follows your head's position, Full + "
                                     "Follow also the table following Link. Costs GPU time.")))
         changed(VRO_REPROJ);
+    grey(VRO_INBETWEEN);
+    if (opt_toggle("In-between Frames", &v.inbetween, false,
+                   desc(VRO_INBETWEEN, "Draws the world again for where your head is on the refreshes between game frames, "
+                                       "so it stays still and sharp when you move your head. Used only where the GPU has time "
+                                       "for it; elsewhere Reprojection acts. Costs GPU time.")))
+        changed(VRO_INBETWEEN);
 
     opt_section("Performance");
     grey(VRO_FOVEATION);

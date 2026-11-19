@@ -359,6 +359,53 @@ Outdoors, Link walking with Smooth follow and a still head: the re-shown refresh
 with `follow`. A still head: the drawn images are byte for byte the set's own (`LARECOMP_XR_REPROJ_SKIP=0`), and by
 default none are drawn.
 
+## In-between frames (`LARECOMP_XR_INBETWEEN`; `runtime/nvn/vulkan/inbetween.c`, off by default)
+
+The other way to give the re-shown refreshes images of their own: the game frame's command lists run again through
+the stereo executor for each, with views located for that refresh. Frame interpolation's log of the frame
+(`runtime/nvn/interp.c`: its draws and every uniform copy, the geometry it reads) is replayed after the frame's
+present (`interp_replay_last`: the frame rotated out), through `stereo_execute` (per-eye cameras or multiview; eye 1's
+run starts at eye 0's place in the log), then the eye post (Surroundings Backdrop, the Table Edge pass,
+anti-aliasing, the upscale) into the re-shown refreshes' swapchains, each in a submission of its own made after the set
+went to the XR thread (`xr_ib_*`, xr_vk.c: the images go to the set where it is then, pending or shown, and the XR
+thread picks them by display time as for Reprojection). The replay's latch takes the located views on the table as
+the frame drew it (stereo.c `stereo_replay_views`: no rig, follow or blink step, and the culling fit is left alone,
+cam_override.c); the culls run with the new views. Foveation follows the gaze at each in-between's own time. Moving
+things step at 60 (the frame's own uniforms); the HUD panel keeps the set's image. The render scale is the frame's
+(dynamic resolution has set the next frame's by then).
+
+What decides how much doubling is left is when the views are located. The doubling is the change of the pose
+prediction's error from one refresh to the next: an image predicted further ahead of its display next to one
+predicted less far ahead is a jump between them. So each refresh's image is predicted the same time ahead:
+
+- `1` (the VR tab's On): the set's own images stay its first refresh's. Its views are located for that refresh on the
+  display's grid and a set finished early is held for it (as for Reprojection rot / pos / follow); the in-between for
+  refresh k is located k periods after the set's own views were. They are then all predicted as far ahead as the
+  frame's own latch to display.
+- `2`: every refresh gets an in-between, the set's first too (its own images only where one is missing: its grid0 is
+  then a refresh before its first, never shown), each located a lead L before its display. L adapts each half second
+  (down 1 ms when the render thread came to over a tenth of them after their time: L is longer than the frame's latch
+  to its present; else up 1 ms when an image was not finished in time, the XR thread's count; else down 0.1 ms); `LARECOMP_XR_INBETWEEN_LEAD_MS=<ms>` fixes it. One image more a frame than `1`.
+
+Where they are made: only where they fit. Every half second the game frame's GPU time, the in-betweens' (measured while
+made; else the game frame's times their ratio to it, averaged over the half seconds measured) and the compositor's (`LARECOMP_XR_INBETWEEN_RESERVE_MS`
+a refresh, 1.5) are checked against the frame's refreshes, and the render thread's time for the frame (from its views' latch to its
+set's submission: the waits for the game's lists and the GPU in it), the waits and the replays against the same (the render
+thread's times as the half second's median; a half second is in one area, begun again at a change).
+Over in two half seconds in a row: they step aside (an `[inbetween]` line at each change) and the area (the level and
+the camera's zone box) is noted with the render thread's time measured there while they were made (the frame's own
+grows with them); there they come back only once the estimate (that time, scaled by the frame's time since against its
+first without them) is under 85% for two seconds and a hold has passed (3 s, doubled for each step aside within 10 s of the last return,
+60 s at most); in an area not noted, as soon as it fits. While they are made, dynamic resolution gives each image of
+the frame its share of the refreshes less the compositor's. Stepped aside is the same as off: the frame is not logged,
+the sets are not on the grid, nothing is replayed, and Reprojection (`LARECOMP_XR_REPROJ`) acts as set; while they are
+made it does not run. A frame gets none when its log is not whole, the storage its draws read changed since, an object
+it used was freed, the game thread is two frames on, its render scale's allocation changed, or a Surroundings capture
+is under way. With the 30 FPS hold at 120 Hz (four refreshes) `2` makes the in-betweens of `1`.
+
+While logging, the ring and view culls of depth-only passes stay on (`ring_early`): a skipped draw's key is logged, so
+a replay's place in the log follows the frame's draws whichever of them its own views skip.
+
 ## Switches and tests
 
 | Variable | Meaning |
@@ -381,6 +428,11 @@ default none are drawn.
 | `LARECOMP_XR_REPROJ_SKIP=<px>`, `_ITER=<n>`, `_LOG=1` | no images below that much motion (0.25 px); the depth search's reads (3, at most 8); the `[reproj]` line (above) |
 | `LARECOMP_XR_REPROJ_MV=1`, `_RECT=1` | the redraw: both eyes in one multiview pass; only the eye's rendered size drawn, the layer naming that part (both off; above) |
 | `LARECOMP_XR_REPROJ_JOINT=0` | a test: a set released before its redraws are done (above); default: only once they are |
+| `LARECOMP_XR_INBETWEEN=0\|1\|2` | in-between frames (above; the VR tab's In-between Frames row, On = 1): off (default), the refreshes after a set's first, every refresh |
+| `LARECOMP_XR_INBETWEEN_LEAD_MS=<ms>` | with `2`: L fixed (default: adapted, above) |
+| `LARECOMP_XR_INBETWEEN_RESERVE_MS=<ms>` | the compositor's GPU time a refresh in the fit (1.5) |
+| `LARECOMP_XR_INBETWEEN_TEST_MS=<ms>[,<from>,<to>]` | a test: ms added to the game frame's and each in-between's measured GPU time (from present `from` to `to`): stepping aside and back |
+| `LARECOMP_XR_INBETWEEN_LOG=1` | an `[inbetween]` line every 5 s: sets, in-betweens made, why none, late ones, times, the fit, L |
 | `LARECOMP_GPU_OVERLAP=0\|1` | the CPU / GPU overlap (VR default on, flat off on Turnip; docs/af/PASSES.md) |
 | `LARECOMP_VR_FOVEATION=off\|low\|medium\|high` | eye-tracked foveation of the eye passes (above) |
 | `LARECOMP_VR_FOVEATION_CAP=2`, `LARECOMP_VR_FOVEATION_RINGS=<f>` | tests: no rate coarser than 2x2; the rings' radii times f (above) |
