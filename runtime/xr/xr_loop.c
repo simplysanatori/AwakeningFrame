@@ -190,29 +190,33 @@ static int64_t periods(int64_t d, int64_t per) { return d >= 0 ? (d + per / 2) /
 static void lead_note(const XrSet *s, XrTime pdt) {
     int64_t per = atomic_load(&g_xr.grid_period);
     if (!s->vref || per <= 0) return;
-    // (LARECOMP_XR_BFI, armed: less the time its present waited for the set before, held for its own refresh. With it,
-    // a phase a refresh later than the sets need keeps every set waiting, the next present waits for that, and its lead
-    // grows to match: the extra refresh would never go)
+    // (LARECOMP_XR_BFI_PHASE=follow, a test: armed, less the time its present waited for the set before, held for its own
+    // refresh; see below)
+    static int follow = -1;
+    if (follow < 0) follow = getenv("LARECOMP_XR_BFI_PHASE") && !strcmp(getenv("LARECOMP_XR_BFI_PHASE"), "follow");
     bool bfi = xr_bfi_armed();
-    int64_t m = periods(pdt - s->vref - (bfi ? (int64_t)s->wait_ns : 0), per);
+    int64_t m = periods(pdt - s->vref - (bfi && follow ? (int64_t)s->wait_ns : 0), per);
     if (m < -4 || m > 12) return;  // (a hitch or a load, not the pipeline)
     g_xr.leads[g_xr.lead_n++ % XR_LEADS] = (int8_t)m;
     if (g_xr.lead_n < XR_LEADS / 2) return;
     int n = g_xr.lead_n < XR_LEADS ? g_xr.lead_n : XR_LEADS, lead = g_xr.leads[0];
     for (int i = 1; i < n; i++) if (g_xr.leads[i] > lead) lead = g_xr.leads[i];
-    atomic_store(&g_xr.lead, lead);
-    // (LARECOMP_XR_BFI) the predictions are moved later onto the lit refreshes' phase (predict_time); the phase is first
-    // taken from the lead. A lead off the phase (one slow set keeps it up for 8) has its sets' poses predicted a refresh
-    // further ahead than needed and their sets wait a refresh longer; only once it has stayed off for 32 sets (half a
-    // second) does the phase move, by one refresh. The move puts the next set's refresh a refresh nearer the flash
-    // before (a lead grown: three refreshes after it; shrunk: one, and that set is lit a refresh late or not at all)
+    int old = atomic_exchange(&g_xr.lead, lead);
+    // (LARECOMP_XR_BFI) the predictions are moved later onto the lit refreshes' phase (predict_time). The phase is first
+    // taken from the lead. A lead grown onto the other phase moves it one refresh later at once (one gap of three
+    // refreshes between two flashes), so the sets are not late on every refresh; a lead shrunk onto the other phase keeps
+    // it, its sets' poses predicted a refresh further ahead than needed. That is for good: a set held a refresh longer
+    // holds the next one's present, whose own lead then grows to match, so the phase follows the latest lead the sets
+    // have needed. follow (a test): the lead less that wait, and the phase following it both ways once it has been off it
+    // for 32 sets (half a second); a move to an earlier lead puts one set's refresh right after a flash, and that set is
+    // lit a refresh late or not at all
     int64_t ph = atomic_load(&g_xr.bfi_phase), bp = xr_bfi_period();
     if (!bfi) return;
     if (!ph) {
         atomic_store(&g_xr.bfi_phase, s->vref + lead * bp), g_xr.bfi_off = 0;
     } else if (!(periods(s->vref + lead * bp - ph, bp) & 1)) {
         g_xr.bfi_off = 0;
-    } else if (++g_xr.bfi_off >= 32) {
+    } else if (follow ? ++g_xr.bfi_off >= 32 : old != XR_LEAD_NONE && lead > old) {
         atomic_store(&g_xr.bfi_phase, ph + bp), g_xr.bfi_off = 0, st.bfi_rephase++;
     }
 }
