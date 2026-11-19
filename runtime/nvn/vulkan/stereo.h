@@ -28,6 +28,9 @@ void stereo_note_composite(int eye);
 // (exec.c vk_stereo_eyes, after drawing the eye outputs into the set's eye images) the set's projection layer gets the
 // poses of the latches those outputs were rendered with (xr_set_views). Returns its result (-1: no latch known).
 int stereo_set_views(void);
+// (exec.c and edge.c, each eye's present into its XR image) the brightness lift for the screen filter's pf.z while Motion
+// Clarity flashes (LARECOMP_XR_BFI_GAIN; 0: none)
+float stereo_eye_gain(void);
 // The view and projection (game units, the game's conventions: row-major, clip = P * V * x) eye `eye`'s current output
 // was rendered with. false: none (the game's own camera, or no output yet).
 bool stereo_eye_matrices(int eye, float V[16], float P[16]);
