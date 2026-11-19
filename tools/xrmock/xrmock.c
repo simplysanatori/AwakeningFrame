@@ -50,7 +50,8 @@
 //                            images as the headset gets them, Table Edge applied, at its own dump frames)
 //   MOCK_XR_SHIFT=<file>     per refresh, the projection layer's pose against the head's at the display time; per new
 //                            eye image, its content's shift against a reference image, measured without stalling the
-//                            loop (tools/xrmock/shift-report.py, step-report.py)
+//                            loop (tools/xrmock/shift-report.py, step-report.py); per ended frame an "end" line with its
+//                            projection and quad layer counts, a refresh without a projection layer too (bfi-report.py)
 //   MOCK_XR_SHIFT_REF=<s>    the reference image: each eye's first image this many seconds in (30)
 //   MOCK_XR_SHIFT_DUMP=<dir> also write the probed images (the centre 2/3, luma, half size) as PGM, for the
 //   MOCK_XR_SHIFT_DUMP_AT=a,b  display times a to b seconds (tools/xrmock/reproj-report.py: per refresh, the content
@@ -1477,9 +1478,11 @@ static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
     if (ei->environmentBlendMode != XR_ENVIRONMENT_BLEND_MODE_OPAQUE) xrmock_error("xrEndFrame blend mode %d not offered", (int)ei->environmentBlendMode);
     char buf[1024] = "";
     XrResult result = XR_SUCCESS;
+    int nproj = 0, nquad = 0;
     for (uint32_t i = 0; i < ei->layerCount; i++) {
         const XrCompositionLayerBaseHeader* l = ei->layers[i];
         char t[256], nm[64];
+        nproj += l->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION, nquad += l->type == XR_TYPE_COMPOSITION_LAYER_QUAD;
         if (!spaceOf(l->space)) {
             xrmock_error("layer %u: space handle invalid", i);
             result = XR_ERROR_HANDLE_INVALID;
@@ -1543,6 +1546,8 @@ static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
         }
     }
     if (want && getenv("MOCK_XR_SHOT_VIEW")) compositeView(frame, ei);
+    // (MOCK_XR_SHIFT) every ended frame, with or without a projection layer ("disp" only comes with one): its layers
+    if (gShift) fprintf(gShift, "end frame=%d t=%.4f proj=%d quads=%d\n", frame, (double)(ei->displayTime - gT0) / 1e9, nproj, nquad);
     double margin = (double)(gBeginRec.predicted - end) / 1e6;
     double deadline = gDeadlineMs >= 0 ? gDeadlineMs : (double)gPeriod / 2e6;
     int late = margin < deadline;
