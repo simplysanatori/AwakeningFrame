@@ -359,6 +359,69 @@ Outdoors, Link walking with Smooth follow and a still head: the re-shown refresh
 with `follow`. A still head: the drawn images are byte for byte the set's own (`LARECOMP_XR_REPROJ_SKIP=0`), and by
 default none are drawn.
 
+## Motion Clarity (`LARECOMP_XR_BFI`, off by default)
+
+Black frame insertion. At 120 Hz with the game at 60 FPS each set of eye images is shown on one refresh and the other
+refresh is black: the frame is ended without a projection layer. The eyes see each image once, as a 60 Hz flash, so a
+turn of the head cannot show the same image at two places (the second refresh's double image, "Re-shown refreshes"
+above). The images get half the light. The VR tab's Motion Clarity row (Picture), `LARECOMP_XR_BFI=0|1`; live.
+
+- **Which refresh is lit** (`xr_loop.c` `bfi_step`). A set is lit once, on the refresh its poses were located for. While it
+  is armed (below) the prediction is on the display's grid as in Reprojection's `rot` (`predict_time`: the latest vsync's
+  target plus the lead, the latest first refresh the last 8 sets could have had), the set's grid line is noted at
+  `xr_set_submit`, and a set finished early waits for it (`xr_release_completed`, up to 8 refreshes, so a lead grown by
+  a hitch does not let a set replace the one before it is lit). The prediction is also on the lit refreshes' phase
+  (`g_xr.bfi_phase`, first taken from the lead, then the latest flash on it): every second refresh, the same one each
+  frame. A grid line off the phase moves the prediction one refresh later: those sets' poses are predicted a refresh
+  further ahead than needed and they wait a refresh longer. The phase moves only up: a lead that grows onto the other
+  phase moves it one refresh later at once (counted; one gap of three refreshes between two flashes), so the sets are
+  not late on every refresh after a slowdown. A lead that shrinks onto the other phase keeps it. That is for good: a
+  set held a refresh longer holds the next one's present (`xr_set_begin` waits for it), whose own lead then grows to
+  match, so the phase stays on the latest lead the sets have needed and the extra refresh does not go by itself. The
+  cost is latency: on the mock 41.5 to 44 ms from the latch to the display with every present waiting about 7 ms,
+  against 27.7 ms with it off (it settles there after the first slow set and stays; the flashes stay two refreshes
+  apart). `LARECOMP_XR_BFI_PHASE=follow` (a test) takes the lead less that wait and moves the phase both ways once the
+  lead has been off it for 32 sets (half a second): 33 to 35.5 ms, but a move to an earlier lead puts one set's refresh
+  right after a flash, and that set is lit a refresh late or not at all (on the mock with a recorded head: 13 gaps of
+  three or four refreshes in 37 s and 3 sets never lit, against 1 gap with the default). A set is never lit sooner than
+  two refreshes after the last flash.
+- **A late set** (its GPU work not done by the refresh its poses were located for) is lit on the next refresh of the
+  phase, two refreshes after its poses; the lit refresh it missed stays dark: one flash skipped, three dark refreshes.
+  Lighting the set before again there would show its image on two flashes 16.7 ms apart: the double image, once.
+  `LARECOMP_XR_BFI_LATE=relight` (a test) does that instead. A second lit refresh in a row without a new set is a stall
+  (a load, a hitch): the set before is lit again from then on, so the view never goes black for longer than three
+  refreshes.
+- **When it waits.** Armed only at a rate that shows a 60 FPS frame on two refreshes evenly (120 Hz, 119.88): at 90 Hz,
+  in the 30 FPS lock (`LARECOMP_XR_FPS=30`), at 72, 80 or 144 Hz and at other PC headsets' rates it is not armed and every
+  refresh shows the set, as off (a change of rate disarms it once the display's filtered rate has followed: on the
+  mock about 20 refreshes at 90 Hz still flash, unevenly). Armed, it flashes only while the game gives 60: the pacer's 30 FPS hold and the FPS
+  target's 30 (`pace_is_slow`, `pace_target_30`, noted with each set) show every refresh too (a 30 Hz flash is no use),
+  and so do sets missing on 6 of the last 16 lit refreshes (a watchdog for a 30 FPS game the pacer does not report),
+  until no more than one of the last 16 was. Each change is logged once (`[xr] motion clarity: ...`) and the VR tab's
+  row says "Waiting ...".
+- **The other layers.** The HUD / menu panel and the controller laser are quad layers and stay on every refresh: the
+  compositor places them for each refresh's own head pose, so they do not double, and their text keeps its brightness.
+  Surroundings, the Table Edge's fade and the blink are in the eye images and flash with them. Table Edge Passthrough:
+  a dark refresh keeps `ALPHA_BLEND`, so it shows the room with nothing over it. The table is then on half the refreshes
+  and the room on all of them: the room shows through the table at about half strength, and the table looks
+  see-through. `LARECOMP_XR_BFI_ROOM=0` (a test) makes the dark refreshes opaque: black, the room flashing with the
+  table. Only the headset can say which looks better (the mock offers no `ALPHA_BLEND`).
+- **Reprojection.** While it is armed `xr_reproj_mode` is off: the refreshes a redraw would be for show nothing, so none
+  is made and its swapchains are never created (the VR tab's Reprojection row says "Off while Motion Clarity is on").
+  At 90 Hz, where Motion Clarity is not armed, Reprojection works as set.
+- **Brightness.** `LARECOMP_XR_BFI_GAIN=<g>` (off; 1 to 2) lifts the eye images while it flashes, in the screen filter
+  step of the eye present and the edge pass (`screen_filter.h`, pf.z): each pixel times g / (1 + (g - 1) m), m its
+  brightest channel (sRGB-encoded): g at black, falling to 1 at m = 1, the same factor for the three channels, so
+  nothing clips and the hue stays. Half the light is about 0.73 of the sRGB value in the mid tones, so g near 1.35 gives
+  the darks and mid tones back; the highlights stay where they were (they cannot go higher). The HUD panel is not lifted.
+- **Cost.** The dark refresh has no projection layer: the compositor's work for it is the quads alone. The game's own
+  GPU work is the same; the early sets' wait costs `xr_set_begin` waits, as in Reprojection's modes.
+
+The `[xr] motion clarity (...)` line (every 5 s while it is on) counts the refreshes lit and dark; the sets lit on the
+refresh their poses were located for, later, and never (replaced before their refresh); the lit refreshes without a new
+set, left dark or lit with the set before (and those of them in a stall); the gaps between flashes (1 to 5+ refreshes)
+and the phase moves.
+
 ## Switches and tests
 
 | Variable | Meaning |
@@ -381,6 +444,8 @@ default none are drawn.
 | `LARECOMP_XR_REPROJ_SKIP=<px>`, `_ITER=<n>`, `_LOG=1` | no images below that much motion (0.25 px); the depth search's reads (3, at most 8); the `[reproj]` line (above) |
 | `LARECOMP_XR_REPROJ_MV=1`, `_RECT=1` | the redraw: both eyes in one multiview pass; only the eye's rendered size drawn, the layer naming that part (both off; above) |
 | `LARECOMP_XR_REPROJ_JOINT=0` | a test: a set released before its redraws are done (above); default: only once they are |
+| `LARECOMP_XR_BFI=0\|1` | Motion Clarity: each set on one refresh, black on the other, at 120 Hz with the game at 60 (off; above; the VR tab's Motion Clarity row) |
+| `LARECOMP_XR_BFI_LATE=relight`, `LARECOMP_XR_BFI_ROOM=0`, `LARECOMP_XR_BFI_GAIN=<g>`, `LARECOMP_XR_BFI_PHASE=follow` | tests: a late set's missed flash lit with the set before; Passthrough's dark refreshes opaque; the eyes' brightness lift; the phase following the lead less the present's wait, both ways (off; above) |
 | `LARECOMP_GPU_OVERLAP=0\|1` | the CPU / GPU overlap (VR default on, flat off on Turnip; docs/af/PASSES.md) |
 | `LARECOMP_VR_FOVEATION=off\|low\|medium\|high` | eye-tracked foveation of the eye passes (above) |
 | `LARECOMP_VR_FOVEATION_CAP=2`, `LARECOMP_VR_FOVEATION_RINGS=<f>` | tests: no rate coarser than 2x2; the rings' radii times f (above) |

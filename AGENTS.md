@@ -150,7 +150,8 @@ Version 0.1.1 is a pre-release. The player-facing known issues are in
   120 Hz display shows each frame twice, so a tracked object judders. The rest is SteamVR re-showing a frame whose
   `xrEndFrame` missed vsync behind the game's GPU work ([STEREO](docs/af/STEREO.md) "Frame end"). Headroom
   (`LARECOMP_VR_HEADROOM`) cut it a lot; `AF_THROTTLE=1` tests whether SteamVR making the second refresh itself
-  removes the rest.
+  removes the rest. Motion Clarity (`LARECOMP_XR_BFI`, off) shows each frame on one refresh and black on the other, so
+  no image is shown twice ([STEREO](docs/af/STEREO.md) "Motion Clarity").
 - **Surroundings flicker** on the headset in Low Quality, Backdrop and Full ([SCENE](docs/af/SCENE.md)). It is
   experimental and off by default.
 - **Edge flicker.** The Fade and Passthrough edges can flicker ([EDGE](docs/af/EDGE.md)).
