@@ -359,12 +359,81 @@ Outdoors, Link walking with Smooth follow and a still head: the re-shown refresh
 with `follow`. A still head: the drawn images are byte for byte the set's own (`LARECOMP_XR_REPROJ_SKIP=0`), and by
 default none are drawn.
 
-## Motion Clarity (`LARECOMP_XR_BFI`, off by default)
+## In-between frames (`LARECOMP_XR_INBETWEEN`; `runtime/nvn/vulkan/inbetween.c`, off by default)
 
-Black frame insertion. At 120 Hz with the game at 60 FPS each set of eye images is shown on one refresh and the other
-refresh is black: the frame is ended without a projection layer. The eyes see each image once, as a 60 Hz flash, so a
-turn of the head cannot show the same image at two places (the second refresh's double image, "Re-shown refreshes"
-above). The images get half the light. The VR tab's Motion Clarity row (Picture), `LARECOMP_XR_BFI=0|1`; live.
+The other way to give the re-shown refreshes images of their own: the game frame's command lists run again through
+the stereo executor for each, with views located for that refresh. Frame interpolation's log of the frame
+(`runtime/nvn/interp.c`: its draws and every uniform copy, the geometry it reads) is replayed after the frame's
+present (`interp_replay_last`: the frame rotated out), through `stereo_execute` (per-eye cameras or multiview; eye 1's
+run starts at eye 0's place in the log), then the eye post (Surroundings Backdrop, the Table Edge pass,
+anti-aliasing, the upscale) into the re-shown refreshes' swapchains, each in a submission of its own made after the set
+went to the XR thread (`xr_ib_*`, xr_vk.c: the images go to the set where it is then, pending or shown, and the XR
+thread picks them by display time as for Reprojection). The replay's latch takes the located views on the table as
+the frame drew it (stereo.c `stereo_replay_views`: no rig, follow or blink step, and the culling fit is left alone,
+cam_override.c); the culls run with the new views. Foveation follows the gaze at each in-between's own time. Moving
+things step at 60 (the frame's own uniforms); the HUD panel keeps the set's image. The render scale is the frame's
+(dynamic resolution has set the next frame's by then).
+
+What decides how much doubling is left is when the views are located. The doubling is the change of the pose
+prediction's error from one refresh to the next: an image predicted further ahead of its display next to one
+predicted less far ahead is a jump between them. So each refresh's image is predicted the same time ahead:
+
+- `1` (the VR tab's On): the set's own images stay its first refresh's. Its views are located for that refresh on the
+  display's grid and a set finished early is held for it (as for Reprojection rot / pos / follow); the in-between for
+  refresh k is located k periods after the set's own views were. They are then all predicted as far ahead as the
+  frame's own latch to display.
+- `2`: every refresh gets an in-between, the set's first too (its own images only where one is missing: its grid0 is
+  then a refresh before its first, never shown), each located a lead L before its display. L adapts each half second
+  (down 1 ms when the render thread came to over a tenth of them after their time: L is longer than the frame's latch
+  to its present; else up 1 ms when an image was not finished in time, the XR thread's count; else down 0.1 ms); `LARECOMP_XR_INBETWEEN_LEAD_MS=<ms>` fixes it. One image more a frame than `1`.
+
+Executions of the eye passes per game frame: `1` two (the set and one in-between), `2` three (the set, never shown, and
+two). On is `1`: on the desktop at the house (xrmock, the owner's recorded head track, the double image measured from
+the pixels of consecutive refreshes, `tools/xrmock/reproj-report.py`) the double image is 0.74 deg rms off, 0.29 with
+`1` and 0.25 with `2`; on a steady 30 deg/s turn 0.25, 0.042 and 0.032. `2` takes off a further seventh for half as
+much again GPU and render-thread time, which the Steam Frame has nowhere (by estimate not even at the house at 1728).
+
+Where they are made: only where they fit. Every half second the game frame's GPU time, the in-betweens' (measured while
+made; else the game frame's times their ratio to it, averaged over the half seconds measured) and the compositor's (`LARECOMP_XR_INBETWEEN_RESERVE_MS`
+a refresh, 1.5) are checked against the frame's refreshes, and the render thread's time for the frame (from its views' latch to its
+set's submission: the waits for the game's lists and the GPU in it), the waits and the replays against the same (the render
+thread's times as the half second's median; a half second is in one area, begun again at a change).
+Over in two half seconds in a row: they step aside (an `[inbetween]` line at each change) and the area (the level and
+the camera's zone box) is noted; there they come back only once the estimate is under 85% for two seconds and a hold
+has passed (3 s, doubled for each step aside within 10 s of the last return, 60 s at most). Where the frame's own
+render-thread time grows with them (the GPU and the queue busier; Mabe on the desktop) the estimate without them is
+low: such an area gets a try at those growing intervals, each over within a second; a stall that put them aside where
+they fit costs only the hold. In an area not noted they come back as soon as it fits. While they are made, dynamic resolution gives each image of
+the frame its share of the refreshes less the compositor's. Stepped aside is the same as off: the frame is not logged,
+the sets are not on the grid, nothing is replayed, and Reprojection (`LARECOMP_XR_REPROJ`) acts as set; while they are
+made it does not run. A frame gets none when its log is not whole, the storage its draws read changed since, an object
+it used was freed, the game thread is two frames on, its render scale's allocation changed, or a Surroundings capture
+is under way. With the 30 FPS hold at 120 Hz (four refreshes), and while Black Frame Insertion is armed, `2` makes the
+in-betweens of `1`.
+
+While logging, the ring and view culls of depth-only passes stay on (`ring_early`): a skipped draw's key is logged, so
+a replay's place in the log follows the frame's draws whichever of them its own views skip.
+
+With Black Frame Insertion (below) on as well: a refresh with an in-between drawn for it is lit (xr_loop.c `end_frame`,
+`inbetween_for`): what Black Frame Insertion leaves dark is an image shown again, and an in-between is a new one. So
+where they are made they win, every refresh shows an image of its own and none is dark (`[xr] black frame insertion:
+in-between frames made ...`, its 5 s line counts the refreshes lit by an in-between; the VR tab's row "In-between Frames
+fill the black refreshes here."), a refresh whose in-between is missing is dark rather than a repeat, and where they
+step aside Black Frame Insertion flashes as set. Nor is a refresh lit with the image lit on the one before (`image_for`;
+the 5 s line's "dark (n of them the image lit before)"): a set late for its flash, its in-between lit on the refresh
+after its own, would have that in-between again. The sets' prediction, grid line and hold are Black Frame Insertion's
+(its lit phase): the set's own image is lit on its refresh and the in-between on the next. With `1` the prediction's
+lead also counts each in-between's (xr_loop.c `lead_note`): its views are located as long after the set's as its refresh
+is after the set's first, so it needs the set's lead; from the sets' alone (Black Frame Insertion takes the waits for a
+held set off theirs) the lead came down a refresh where the frame is light and no in-between was finished for its
+refresh.
+
+## Black Frame Insertion (`LARECOMP_XR_BFI`, off by default)
+
+At 120 Hz with the game at 60 FPS each set of eye images is shown on one refresh and the other refresh is black: the
+frame is ended without a projection layer. The eyes see each image once, as a 60 Hz flash, so a turn of the head cannot
+show the same image at two places (the second refresh's double image, "Re-shown refreshes" above). The images get half
+the light. The VR tab's Black Frame Insertion row (Picture), `LARECOMP_XR_BFI=0|1`; live.
 
 - **Which refresh is lit** (`xr_loop.c` `bfi_step`). A set is lit once, on the refresh its poses were located for. While it
   is armed (below) the prediction is on the display's grid as in Reprojection's `rot` (`predict_time`: the latest vsync's
@@ -396,8 +465,9 @@ above). The images get half the light. The VR tab's Motion Clarity row (Picture)
   mock about 20 refreshes at 90 Hz still flash, unevenly). Armed, it flashes only while the game gives 60: the pacer's 30 FPS hold and the FPS
   target's 30 (`pace_is_slow`, `pace_target_30`, noted with each set) show every refresh too (a 30 Hz flash is no use),
   and so do sets missing on 6 of the last 16 lit refreshes (a watchdog for a 30 FPS game the pacer does not report),
-  until no more than one of the last 16 was. Each change is logged once (`[xr] motion clarity: ...`) and the VR tab's
-  row says "Waiting ...".
+  until no more than one of the last 16 was. Each change is logged once (`[xr] black frame insertion: ...`) and the VR
+  tab's row says "Waiting ...". Where in-between frames are made (`LARECOMP_XR_INBETWEEN`, "In-between frames" above)
+  the refreshes with one are lit too.
 - **The other layers.** The HUD / menu panel and the controller laser are quad layers and stay on every refresh: the
   compositor places them for each refresh's own head pose, so they do not double, and their text keeps its brightness.
   Surroundings, the Table Edge's fade and the blink are in the eye images and flash with them. Table Edge Passthrough:
@@ -406,8 +476,8 @@ above). The images get half the light. The VR tab's Motion Clarity row (Picture)
   see-through. `LARECOMP_XR_BFI_ROOM=0` (a test) makes the dark refreshes opaque: black, the room flashing with the
   table. Only the headset can say which looks better (the mock offers no `ALPHA_BLEND`).
 - **Reprojection.** While it is armed `xr_reproj_mode` is off: the refreshes a redraw would be for show nothing, so none
-  is made and its swapchains are never created (the VR tab's Reprojection row says "Off while Motion Clarity is on").
-  At 90 Hz, where Motion Clarity is not armed, Reprojection works as set.
+  is made and its swapchains are never created (the VR tab's Reprojection row says "Off while Black Frame Insertion is
+  on"). At 90 Hz, where Black Frame Insertion is not armed, Reprojection works as set.
 - **Brightness.** `LARECOMP_XR_BFI_GAIN=<g>` (off; 1 to 2) lifts the eye images while it flashes, in the screen filter
   step of the eye present and the edge pass (`screen_filter.h`, pf.z): each pixel times g / (1 + (g - 1) m), m its
   brightest channel (sRGB-encoded): g at black, falling to 1 at m = 1, the same factor for the three channels, so
@@ -416,10 +486,10 @@ above). The images get half the light. The VR tab's Motion Clarity row (Picture)
 - **Cost.** The dark refresh has no projection layer: the compositor's work for it is the quads alone. The game's own
   GPU work is the same; the early sets' wait costs `xr_set_begin` waits, as in Reprojection's modes.
 
-The `[xr] motion clarity (...)` line (every 5 s while it is on) counts the refreshes lit and dark; the sets lit on the
-refresh their poses were located for, later, and never (replaced before their refresh); the lit refreshes without a new
-set, left dark or lit with the set before (and those of them in a stall); the gaps between flashes (1 to 5+ refreshes)
-and the phase moves.
+The `[xr] black frame insertion (...)` line (every 5 s while it is on) counts the refreshes lit and dark; the sets lit
+on the refresh their poses were located for, later, and never (replaced before their refresh); the lit refreshes without
+a new set, left dark or lit with the set before (and those of them in a stall); the gaps between flashes (1 to 5+
+refreshes) and the phase moves.
 
 ## Switches and tests
 
@@ -443,7 +513,12 @@ and the phase moves.
 | `LARECOMP_XR_REPROJ_SKIP=<px>`, `_ITER=<n>`, `_LOG=1` | no images below that much motion (0.25 px); the depth search's reads (3, at most 8); the `[reproj]` line (above) |
 | `LARECOMP_XR_REPROJ_MV=1`, `_RECT=1` | the redraw: both eyes in one multiview pass; only the eye's rendered size drawn, the layer naming that part (both off; above) |
 | `LARECOMP_XR_REPROJ_JOINT=0` | a test: a set released before its redraws are done (above); default: only once they are |
-| `LARECOMP_XR_BFI=0\|1` | Motion Clarity: each set on one refresh, black on the other, at 120 Hz with the game at 60 (off; above; the VR tab's Motion Clarity row) |
+| `LARECOMP_XR_INBETWEEN=0\|1\|2` | in-between frames (above; the VR tab's In-between Frames row, On = 1): off (default), the refreshes after a set's first, every refresh |
+| `LARECOMP_XR_INBETWEEN_LEAD_MS=<ms>` | with `2`: L fixed (default: adapted, above) |
+| `LARECOMP_XR_INBETWEEN_RESERVE_MS=<ms>` | the compositor's GPU time a refresh in the fit (1.5) |
+| `LARECOMP_XR_INBETWEEN_TEST_MS=<ms>[,<from>,<to>]` | a test: ms added to the game frame's and each in-between's measured GPU time (from present `from` to `to`): stepping aside and back |
+| `LARECOMP_XR_INBETWEEN_LOG=1` | an `[inbetween]` line every 5 s: sets, in-betweens made, why none, late ones, times, the fit, L |
+| `LARECOMP_XR_BFI=0\|1` | Black Frame Insertion: each set on one refresh, black on the other, at 120 Hz with the game at 60 (off; above; the VR tab's Black Frame Insertion row) |
 | `LARECOMP_XR_BFI_LATE=relight`, `LARECOMP_XR_BFI_ROOM=0`, `LARECOMP_XR_BFI_GAIN=<g>`, `LARECOMP_XR_BFI_PHASE_DOWN=<sets>` | tests: a late set's missed flash lit with the set before; Passthrough's dark refreshes opaque; the eyes' brightness lift; the sets a lead stays below the phase before it moves (off; off; off; 32, 0: never; above) |
 | `LARECOMP_GPU_OVERLAP=0\|1` | the CPU / GPU overlap (VR default on, flat off on Turnip; docs/af/PASSES.md) |
 | `LARECOMP_VR_FOVEATION=off\|low\|medium\|high` | eye-tracked foveation of the eye passes (above) |

@@ -6344,7 +6344,8 @@ static int iv_chunk_for(uint64_t size) {
 static void iv_note(uint64_t addr, uint64_t size) {  // (the frame: a copy for its in-betweens)
     static int on = -1;
     if (on < 0) on = !getenv("LARECOMP_INTERP_GEO_COPY") || atoi(getenv("LARECOMP_INTERP_GEO_COPY"));
-    if (!on || !g_interp_log || g_interp_replaying || !size || size > (1u << 20) || interp_wanted() != INTERP_ON) return;
+    // (the VR mode's in-betweens too: inbetween.c, a frame logged under the stereo executor)
+    if (!on || !g_interp_log || g_interp_replaying || !size || size > (1u << 20) || (interp_wanted() != INTERP_ON && g_eye < 0)) return;
     extern int nvn_pool_flags_at(uint64_t addr);
     if (size > 65536 && (nvn_pool_flags_at(addr) & 0x13) != 0x12) return;  // (big and cached: a static mesh)
     if (interp_frame_serial() != iv_serial) iv_serial = interp_frame_serial(), iv_n = 0;
@@ -6359,7 +6360,7 @@ static void iv_note(uint64_t addr, uint64_t size) {  // (the frame: a copy for i
     iv_log[iv_n++] = (IvRec){addr, size, o, ci};
 }
 static bool iv_find(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {  // (a replay: the frame's copy)
-    if (interp_frame_serial() != iv_serial) return false;
+    if (interp_replay_serial() != iv_serial) return false;
     for (uint32_t j = iv_rp; j < iv_n && j < iv_rp + 32; j++)
         if (iv_log[j].addr == addr && iv_log[j].size == size) {
             iv_rp = j + 1;
@@ -8405,12 +8406,28 @@ static bool diet_draw(Prog *pr, uint64_t last_hash) {
 // latch, whose address the stereo patch matches, widescreen's and the weather's), the weather's scene depth, the
 // latest twinned depth (stereo_composite), the interior backdrop seen, eye 1's counters and, while there is snow, the
 // pre-pass signatures (snow_cover_check: the colour pass gives ring level draws their snow by them). Frame
-// interpolation (logging or replay) takes the full path.
+// interpolation (logging or replay, the VR mode's in-betweens) notes a skipped draw's key: a replay's cursor stays with
+// the frame's draws whichever of them its own views skip (one the replay draws and the frame skipped has no logged
+// uniforms: guest memory as it is).
+// The draw's identity across frames (renderer.m's key)
+static uint64_t interp_key(CmdRec *r, bool indexed) {
+    static int kmask = -1;  // LARECOMP_INTERP_KEY=<mask> (renderer.m)
+    if (kmask < 0) kmask = getenv("LARECOMP_INTERP_KEY") ? atoi(getenv("LARECOMP_INTERP_KEY")) : 37;
+    uint64_t args[7];
+    memcpy(args, r->x, sizeof args);
+    if (indexed && !(kmask & 2)) args[3] = 0;
+    NvnTexture *kt = st.rt.ncolor ? st.rt.color[0] : st.rt.depth;
+    uint64_t key = (kmask & 1) ? hmix(1469598103934665603ull, args, sizeof args) : 1469598103934665603ull;
+    uint64_t ids[5] = {(kmask & 4) ? st.program->stages[0].code_addr : 0, (kmask & 4) ? st.program->stages[1].code_addr : 0,
+                       (kmask & 8) ? st.vbuf[0].addr : 0, (kmask & 16) ? (uint64_t)(uintptr_t)kt : 0,
+                       (kmask & 32) && kt ? (uint64_t)kt->format << 32 | (st.rt.ncolor ? 0 : 1u << 31) | (kt->height ? kt->width * 16 / kt->height : 0) : 0};
+    return hmix(key, ids, sizeof ids);
+}
 static bool ring_early(CmdRec *r, bool indexed) {
     extern bool vr_ring_on(void);
     static int log = -1;
     if (log < 0) log = getenv("LARECOMP_VR_RING_LOG") != NULL;
-    if (g_eye < 0 || g_interp_log || g_interp_replaying || !st.rt.depth) return false;
+    if (g_eye < 0 || !st.rt.depth) return false;
     if (!(vr_ring_on() || ring_phase(renderer_exec_frame()) != RP_NONE || seen_on())) return false;
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) return false;
     uint64_t t0 = log ? SDL_GetTicksNS() : 0;
@@ -8420,6 +8437,7 @@ static bool ring_early(CmdRec *r, bool indexed) {
     bool skip = c >= 4 ? seen_skip(tw ? 1 : 0, 0, c, st.rt.depth) : tw ? c >= 1 : (c == 1 || c == 3);
     ring_dump(r, indexed, tw ? 1 : 0, c);
     if (skip) {
+        if (g_interp_log) interp_draw(interp_key(r, indexed), true);
         if (tw) note_depth();
         if (g_eye == 1) eye1_skip_rt();  // (its counters)
         Range s5 = st.ubuf[0][5];
@@ -8567,19 +8585,7 @@ static void draw_(CmdRec *r, bool indexed) {
         else if (g_eye == 0 && st_hud_alpha && g_hud_win && st.rt.ncolor && st.rt.color[0] == g_hud_win) stereo_hud_redirect();
         if (eye1_skip_rt()) return;
     }
-    if (g_interp_log) {  // (frame interpolation, runtime/nvn/interp.c: the draw's identity across frames - renderer.m's key)
-        static int kmask = -1;  // LARECOMP_INTERP_KEY=<mask> (renderer.m)
-        if (kmask < 0) kmask = getenv("LARECOMP_INTERP_KEY") ? atoi(getenv("LARECOMP_INTERP_KEY")) : 37;
-        uint64_t args[7];
-        memcpy(args, r->x, sizeof args);
-        if (indexed && !(kmask & 2)) args[3] = 0;
-        NvnTexture *kt = st.rt.ncolor ? st.rt.color[0] : st.rt.depth;
-        uint64_t key = (kmask & 1) ? hmix(1469598103934665603ull, args, sizeof args) : 1469598103934665603ull;
-        uint64_t ids[5] = {(kmask & 4) ? st.program->stages[0].code_addr : 0, (kmask & 4) ? st.program->stages[1].code_addr : 0,
-                           (kmask & 8) ? st.vbuf[0].addr : 0, (kmask & 16) ? (uint64_t)(uintptr_t)kt : 0,
-                           (kmask & 32) && kt ? (uint64_t)kt->format << 32 | (st.rt.ncolor ? 0 : 1u << 31) | (kt->height ? kt->width * 16 / kt->height : 0) : 0};
-        interp_draw(hmix(key, ids, sizeof ids), st.rt.ncolor == 0);
-    }
+    if (g_interp_log) interp_draw(interp_key(r, indexed), st.rt.ncolor == 0);  // (frame interpolation, runtime/nvn/interp.c)
     snap_apply(0, pr->vi->ssbo_read);  // (overlap) the storage slots the shaders read: a copy where the CPU rewrites the range
     snap_apply(1, pr->fi->ssbo_read);
     {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
@@ -10904,7 +10910,9 @@ static void stereo_execute(uint64_t handle) {
     g_mv_run = mv_passes_on();  // (multiview: one run draws both eyes; eye 1 runs only for the passes that can't)
     mv_need_eye1 = false;
     uint64_t t0 = plat_now_ns();
-    uint32_t q = st_ts_begin();
+    // (a replay, inbetween.c: not the game frame's eye times; eye 1 replays the draws eye 0 did)
+    uint32_t q = g_interp_replaying ? ~0u : st_ts_begin(), rpm[3], ivm = iv_rp;
+    if (g_interp_replaying) interp_replay_mark(rpm);
     exec_list(handle, 0);
     pclr_flush_all();  // (LARECOMP_VR_CLEAR_DEFER: nothing waits past a list run)
     vk_end_pass();
@@ -10928,7 +10936,7 @@ static void stereo_execute(uint64_t handle) {
             mvs.bad_tex = bt, mvs.bad_cb = bc;  // (their logs stay limited)
         }
         if (!mv_need_eye1) {  // (both eyes drawn: eye 0's memory writes stand, the fences are done after this submission)
-            stereo_note_cpu(plat_now_ns() - t0, 0);
+            if (!g_interp_replaying) stereo_note_cpu(plat_now_ns() - t0, 0);
             goto done;
         }
     }
@@ -10936,19 +10944,24 @@ static void stereo_execute(uint64_t handle) {
     uint64_t t1 = plat_now_ns();
     st = start;
     st.rt_dirty = true;
+    // (frame interpolation, interp.c: a list's draws are logged once, by eye 0's run or the multiview run)
+    bool ip_log = g_interp_log;
+    if (!g_interp_replaying) g_interp_log = false;
     g_eye = 1;
     cam_override_set_eye(1);
     if (vk_mv_on()) vk_mv_latch(), mv_layer(1);  // (multiview storage: eye 1's layer of the twins)
     else vk_stereo_swap(true);
-    q = st_ts_begin();
+    if (g_interp_replaying) interp_replay_rewind(rpm), iv_rp = ivm;
+    q = g_interp_replaying ? ~0u : st_ts_begin();
     exec_list(handle, 0);
     pclr_flush_all();
     vk_end_pass();
     st_ts_end(q, 1);
     if (vk_mv_on()) mv_layer(0);
     else vk_stereo_swap(false);
+    g_interp_log = ip_log;
     if (st_cc_on && cam_override_active()) stereo_cc_list();
-    stereo_note_cpu(t1 - t0, plat_now_ns() - t1);
+    if (!g_interp_replaying) stereo_note_cpu(t1 - t0, plat_now_ns() - t1);
 done:
     g_mv_run = false;
     g_eye = -1;
@@ -11045,11 +11058,11 @@ static bool vr_eye_post(VkCommandBuffer cb, TexBackend *b, uint32_t ly, uint32_t
 // (device.c vk_frame_end, VR mode, between xr_set_begin and xr_set_submit, outside any rendering) each eye's output
 // into its eye swapchain image (the present shader: any size, the bytes as they are, the flat present's orientation).
 // The eyes this frame drew no composite into keep the last one. Returns the eyes drawn (bit mask).
-int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImageView *, VkFormat *, VkExtent2D *)) {
-    st_ts_resolve();
+// own: the set's (its views, its re-shown refreshes); not: an in-between's (stereo_inbetween), into images of their own
+static int stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImageView *, VkFormat *, VkExtent2D *), bool own,
+                       uint32_t filled[2][2]) {
     if (!g_eye_out_ok || !g_eye_out.backend) return 0;
     int drawn = 0, fresh = 0;
-    uint32_t filled[2][2] = {{0}};  // (each eye's rendered size as its XR image shows it: reproj.c)
     for (int eye = 0; eye < 2; eye++) {
         TexBackend *b = g_eye_out.backend;
         bool lay = vk_b_layered(b);  // (multiview storage: eye 1 is layer 1)
@@ -11122,11 +11135,46 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
         rec_CmdEndRendering(cb);
         drawn |= 1 << eye;
     }
-    if (drawn == 3) {
+    if (drawn == 3 && own) {
         stereo_set_views();  // (the layer: the poses these outputs were rendered with)
+        extern bool inbetween_takes_set(void);  // (LARECOMP_XR_INBETWEEN: the set's later refreshes are in-betweens)
         extern void reproj_eyes(bool new_outputs, const uint32_t filled[2][2]);  // (LARECOMP_XR_REPROJ: the set's re-shown refreshes)
-        reproj_eyes(fresh == 3, filled);
+        if (!inbetween_takes_set()) reproj_eyes(fresh == 3, filled);
     }
+    return drawn;
+}
+int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImageView *, VkFormat *, VkExtent2D *)) {
+    st_ts_resolve();
+    uint32_t filled[2][2] = {{0}};  // (each eye's rendered size as its XR image shows it: reproj.c)
+    return stereo_eyes(cb, eye_target, true, filled);
+}
+
+// In-between frames (inbetween.c, LARECOMP_XR_INBETWEEN): the frame presented last (interp.c interp_replay_last, its
+// logged uniforms) run again through the stereo executor with the views the caller set (stereo.c stereo_replay_views),
+// its eye outputs drawn into eye_target's images (with the eye post: the Backdrop, the Table Edge pass, anti-aliasing),
+// all in one submission (*seq), counted as a replay's (the game's GPU and render times leave it out). The caller holds
+// interp_replay_lock and has set the render scale the frame was drawn at. As renderer_interp_replay, the game's own
+// state is restored after it; the replay draws into the game's own targets, whose next frame draws them anew.
+// filled: each eye's rendered size in its image. Returns the eyes drawn (bit mask).
+int stereo_inbetween(bool (*eye_target)(int, VkImage *, VkImageView *, VkFormat *, VkExtent2D *), uint64_t *seq, uint32_t filled[2][2]) {
+    const uint64_t *h;
+    uint32_t n = interp_handles(&h);
+    __typeof__(st) st_end = st;
+    bool log = g_interp_log;
+    st = st_frame_begin;
+    g_interp_log = true;  // (the draws' keys: the replay's cursor)
+    iv_rp = 0;
+    interp_replay_begin();
+    for (uint32_t i = 0; i < n; i++) stereo_execute(h[i]);
+    vk_end_pass();
+    VkCommandBuffer cb = vk_cmd();
+    int drawn = stereo_eyes(cb, eye_target, false, filled);
+    *seq = vk_pending_seq();
+    renderer_submit();
+    interp_replay_end();
+    g_interp_log = log;
+    st = st_end;
+    st.rt_dirty = true;
     return drawn;
 }
 

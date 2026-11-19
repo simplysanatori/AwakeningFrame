@@ -41,7 +41,7 @@ static struct {  // (XR thread; the presenting thread's fields under g_xr.mu)
     // first lit refresh after it), replaced before they were lit; lit refreshes with no new set: left dark (a flash
     // skipped), the set before lit again (the late test, and a second in a row: a stall); flashes 1, 2, 3, 4, 5+ refreshes
     // after the one before; the lit refreshes' phase moved (a lead grown by one)
-    uint64_t bfi_lit, bfi_dark, bfi_on, bfi_late, bfi_unlit, bfi_skip, bfi_relit, bfi_stall, bfi_gap[5], bfi_rephase;
+    uint64_t bfi_lit, bfi_dark, bfi_ib, bfi_again, bfi_on, bfi_late, bfi_unlit, bfi_skip, bfi_relit, bfi_stall, bfi_gap[5], bfi_rephase;
 } st;
 
 // LARECOMP_XR_REPROJ=off|fresh|rot|pos|follow (xr.h; docs/af/STEREO.md "Re-shown refreshes"); the VR tab sets it live
@@ -67,21 +67,24 @@ static void reproj_init(void) {
 static _Atomic int g_bfi_armed;  // (xr_bfi_armed; the XR thread's)
 int xr_reproj_mode(void) {
     reproj_init();
-    // (Motion Clarity armed: the refreshes a redraw would be for show nothing, so none is made and their swapchains
-    // are never created)
+    // (Black Frame Insertion armed: the refreshes a redraw would be for show nothing, so none is made and their
+    // swapchains are never created)
     if (atomic_load(&g_bfi_armed)) return XR_REPROJ_OFF;
     return __atomic_load_n(&g_reproj, __ATOMIC_ACQUIRE);
 }
+bool xr_grid_mode(void) { return xr_reproj_mode() >= XR_REPROJ_ROT || atomic_load(&g_xr.grid) > 0; }
+void xr_set_grid(int mode) { atomic_store(&g_xr.grid, mode); }
+uint64_t xr_ib_fell(void) { return atomic_load(&g_xr.rs_fell); }
 void xr_set_reproj_mode(int mode) {
     if (mode < XR_REPROJ_OFF || mode > XR_REPROJ_FOLLOW) return;
     reproj_init();
     if (__atomic_exchange_n(&g_reproj, mode, __ATOMIC_ACQ_REL) != mode) LOG("[xr] re-shown refreshes: mode %d (VR settings)\n", mode);
 }
 
-// LARECOMP_XR_BFI=0|1, Motion Clarity (xr.h; docs/af/STEREO.md "Motion Clarity"); the VR tab sets it live. Armed (the XR
-// thread's, each refresh): wanted, at a rate that shows a 60 FPS frame on two refreshes. Flashing: armed, with the game at
-// 60 (not the pacer's 30 FPS hold or the FPS target's 30, noted by the presenting thread with each set: g_bfi_game30)
-// and sets coming for most lit refreshes (the watchdog, bfi_step).
+// LARECOMP_XR_BFI=0|1, Black Frame Insertion (xr.h; docs/af/STEREO.md "Black Frame Insertion"); the VR tab sets it
+// live. Armed (the XR thread's, each refresh): wanted, at a rate that shows a 60 FPS frame on two refreshes. Flashing:
+// armed, with the game at 60 (not the pacer's 30 FPS hold or the FPS target's 30, noted by the presenting thread with
+// each set: g_bfi_game30) and sets coming for most lit refreshes (the watchdog, bfi_step).
 static int g_bfi_want = -1;
 static _Atomic int g_bfi_game30, g_bfi_state;
 static void bfi_init(void) {
@@ -89,7 +92,7 @@ static void bfi_init(void) {
     const char *e = getenv("LARECOMP_XR_BFI");
     int on = e && atoi(e) != 0, expect = -1;
     if (__atomic_compare_exchange_n(&g_bfi_want, &expect, on, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) && on)
-        LOG("[xr] motion clarity: on (LARECOMP_XR_BFI)\n");
+        LOG("[xr] black frame insertion: on (LARECOMP_XR_BFI)\n");
 }
 static bool bfi_wanted(void) {
     bfi_init();
@@ -97,7 +100,7 @@ static bool bfi_wanted(void) {
 }
 void xr_set_bfi(int on) {
     bfi_init();
-    if (__atomic_exchange_n(&g_bfi_want, on ? 1 : 0, __ATOMIC_ACQ_REL) != (on ? 1 : 0)) LOG("[xr] motion clarity: %s (VR settings)\n", on ? "on" : "off");
+    if (__atomic_exchange_n(&g_bfi_want, on ? 1 : 0, __ATOMIC_ACQ_REL) != (on ? 1 : 0)) LOG("[xr] black frame insertion: %s (VR settings)\n", on ? "on" : "off");
 }
 bool xr_bfi_armed(void) { return atomic_load(&g_bfi_armed); }
 int xr_bfi_state(void) { return bfi_wanted() ? atomic_load(&g_bfi_state) : 0; }
@@ -165,8 +168,9 @@ void xr_set_submit(uint64_t seq) {
     s->made_ns = plat_now_ns();
     s->valid = true;
     if (bfi_wanted()) {
-        // (Motion Clarity) the refresh it is lit on: the one its poses were located for, on the display's grid when armed
-        // (predict_time). And whether the game runs at 30 now: the pacer's hold, or the FPS target's (pace.c)
+        // (Black Frame Insertion) the refresh it is lit on: the one its poses were located for, on the display's grid
+        // when armed (predict_time). And whether the game runs at 30 now: the pacer's hold, or the FPS target's
+        // (pace.c)
         int64_t g = atomic_load(&g_xr.grid_t), per = xr_bfi_period();
         if (xr_bfi_armed() && !s->grid0 && s->views_ok && s->vtime && g && per > 0) {
             int64_t d = s->vtime - g, n = d >= 0 ? (d + per / 2) / per : -((-d + per / 2) / per);
@@ -175,6 +179,11 @@ void xr_set_submit(uint64_t seq) {
         extern bool pace_target_30(void);
         atomic_store(&g_bfi_game30, pace_is_slow() || pace_target_30());
     }
+    s->serial = ++g_xr.set_serial;
+    // (LARECOMP_XR_INBETWEEN: the render thread's handle on this set once it is the XR thread's)
+    memset(&g_xr.ib, 0, sizeof g_xr.ib);
+    g_xr.ib.serial = s->serial, g_xr.ib.pair = s->pair, g_xr.ib.grid0 = s->grid0, g_xr.ib.period = s->period;
+    g_xr.ib.latch_ns = s->latch_ns, g_xr.ib.space = s->space, g_xr.ib.own_hidden = s->own_hidden;
     pthread_mutex_lock(&g_xr.mu);
     if (s->exec_eyes && s->rid[0] != s->rid[1]) st.eye_split++;
     g_xr.pending = *s;
@@ -187,7 +196,12 @@ static int64_t periods(int64_t d, int64_t per) { return d >= 0 ? (d + per / 2) /
 
 // (LARECOMP_XR_REPROJ) a finished set's first possible refresh, `pdt`: its lead, whole periods from its latch's vsync
 // target, into the last XR_LEADS; the prediction's lead is their latest (predict_time)
-static void lead_note(const XrSet *s, XrTime pdt) {
+// (LARECOMP_XR_INBETWEEN 1, while made; not Reprojection's redraws) also each in-between's, own false: the refresh it
+// was finished for less its place after the set's first. Its views are located as long after the set's as its refresh
+// is after the set's first, so it needs the same lead as the set; with only the set's, a set finished early (a light
+// frame, or Black Frame Insertion's lead less the waits) brings the lead down a refresh and every in-between is
+// finished after its refresh, none shown
+static void lead_note(const XrSet *s, XrTime pdt, bool own) {
     int64_t per = atomic_load(&g_xr.grid_period);
     if (!s->vref || per <= 0) return;
     // (LARECOMP_XR_BFI, armed: less the time its present waited for the set before, held for its own refresh. Without
@@ -196,7 +210,7 @@ static void lead_note(const XrSet *s, XrTime pdt) {
     static int down = -1;
     if (down < 0) down = getenv("LARECOMP_XR_BFI_PHASE_DOWN") ? atoi(getenv("LARECOMP_XR_BFI_PHASE_DOWN")) : 32;
     bool bfi = xr_bfi_armed();
-    int64_t m = periods(pdt - s->vref - (bfi ? (int64_t)s->wait_ns : 0), per);
+    int64_t m = periods(pdt - s->vref - (bfi && own ? (int64_t)s->wait_ns : 0), per);
     if (m < -4 || m > 12) return;  // (a hitch or a load, not the pipeline)
     g_xr.leads[g_xr.lead_n++ % XR_LEADS] = (int8_t)m;
     if (g_xr.lead_n < XR_LEADS / 2) return;
@@ -210,7 +224,7 @@ static void lead_note(const XrSet *s, XrTime pdt) {
     // then each set is held a refresh longer than it needs and its present waits for the one before, and the move puts
     // one set's refresh right after a flash, so that set is lit a refresh late or not at all
     int64_t ph = atomic_load(&g_xr.bfi_phase), bp = xr_bfi_period();
-    if (!bfi) return;
+    if (!bfi || !own) return;  // (the phase follows the sets: an in-between's lead counts at the next set's)
     if (!ph) {
         atomic_store(&g_xr.bfi_phase, s->vref + lead * bp), g_xr.bfi_off = 0;
     } else if (!(periods(s->vref + lead * bp - ph, bp) & 1)) {
@@ -230,6 +244,7 @@ static void reshow_release(XrSet *s, uint64_t done, XrTime pdt, bool all) {
         if (s->rs_ok[k] && pdt && s->grid0 && s->period > 0 && !all) {  // (how early: refreshes before the one it is for)
             int64_t d = s->grid0 + (k + 1) * s->period - pdt, m = d >= 0 ? (d + s->period / 2) / s->period : -((-d + s->period / 2) / s->period);
             st.rs_ahead[m >= 2 ? 0 : m == 1 ? 1 : m == 0 ? 2 : 3]++;
+            if (atomic_load(&g_xr.grid) > 0 && !s->own_hidden) lead_note(s, pdt - (k + 1) * s->period, false);
         }
     }
 }
@@ -261,11 +276,13 @@ void xr_release_completed(XrTime pdt) {
         uint64_t need = joint && g_xr.pending.reads > g_xr.pending.seq ? g_xr.pending.reads : g_xr.pending.seq;
         if (done >= need && rec_submitted() >= g_xr.pending.reads) {
             XrSet *p = &g_xr.pending;
-            if (pdt && !p->ready) p->ready = pdt, lead_note(p, pdt);
+            if (pdt && !p->ready) p->ready = pdt, lead_note(p, pdt, true);
             // (LARECOMP_XR_BFI: up to 8 refreshes, so a lead grown by a hitch does not let a set replace the one shown
-            // before that one's lit refresh: it would never be lit)
+            // before that one's lit refresh: it would never be lit. A set whose own images are never shown, xr_set_grid 2:
+            // held for the refresh after grid0)
             bool bfi_hold = xr_bfi_armed();
-            if (pdt && p->grid0 && p->period > 0 && (xr_reproj_mode() >= XR_REPROJ_ROT || bfi_hold) && 2 * (p->grid0 - pdt) > p->period &&
+            if (pdt && p->grid0 && p->period > 0 && (xr_grid_mode() || bfi_hold) &&
+                2 * (p->grid0 + (p->own_hidden ? p->period : 0) - pdt) > p->period &&
                 p->grid0 - pdt <= (bfi_hold ? 8 : XR_RESHOW_MAX + 1) * p->period) {
                 st.held++;
                 pthread_mutex_unlock(&g_xr.mu);
@@ -389,6 +406,23 @@ void xr_set_game_fps(int fps) { __atomic_store_n(&g_fps_req, fps == 60 ? 60 : 0,
 // (LARECOMP_XR_BFI_LATE=relight, a test, does that). A second such refresh in a row is a stall (a load, a hitch), not a
 // late set: the set before is lit again then, so the view does not go black. Sets missing on most lit refreshes (the
 // game at 30 for a reason the pacer does not say) light every refresh until they come again (the watchdog).
+// (LARECOMP_XR_INBETWEEN) whether set s has an image drawn for refresh t, finished (end_frame picks it)
+static bool inbetween_for(const XrSet *s, XrTime t) {
+    if (!s->grid0 || s->period <= 0 || !s->rs_n) return false;
+    int64_t d = t - s->grid0;
+    int k = d <= 0 ? 0 : (int)((d + s->period / 2) / s->period);
+    return k > 0 && k <= s->rs_n && s->rs_ok[k - 1] && s->rs_rel[k - 1];
+}
+// (LARECOMP_XR_INBETWEEN) the image end_frame shows set s with at refresh t: 0 its own, k its in-between k (the one
+// drawn for t, else the latest finished before it)
+static int image_for(const XrSet *s, XrTime t) {
+    if (!s->grid0 || s->period <= 0 || !s->rs_n) return 0;
+    int64_t d = t - s->grid0;
+    int k = d <= 0 ? 0 : (int)((d + s->period / 2) / s->period);
+    if (k > s->rs_n) k = s->rs_n;
+    while (k > 0 && !(s->rs_ok[k - 1] && s->rs_rel[k - 1])) k--;
+    return k;
+}
 static bool bfi_step(XrTime t, int64_t per, bool *first) {
     static int relight = -1;
     if (relight < 0) relight = getenv("LARECOMP_XR_BFI_LATE") && !strcmp(getenv("LARECOMP_XR_BFI_LATE"), "relight");
@@ -430,10 +464,23 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
     // (LARECOMP_XR_BFI) a dark refresh has no projection layer; the HUD / menu panel and the laser stay on every refresh:
     // quads the compositor places for each refresh's own head pose do not double, and their text stays as bright and
     // steady as without it. first: the set's first refresh shown (with it: the one it is lit on)
+    // (LARECOMP_XR_INBETWEEN) a refresh with an in-between drawn for it is lit too: what Black Frame Insertion leaves
+    // out is an image shown again, and an in-between is a new one. Where they are made every refresh is lit; where one
+    // is missing the refresh is dark, as without them. Nor is a refresh lit with the image lit on the one before: a set
+    // late for its flash, its in-between lit on the refresh after its own, would have that in-between again (prev; not
+    // while the watchdog lights every refresh)
     bool lit = true, first = new_set;
+    static struct { uint64_t serial; int k; bool lit; } prev;
     if (bfi.on && fs->shouldRender && g_xr.shown_any) {
+        const XrSet *s = &g_xr.shown;
+        int k = image_for(s, fs->predictedDisplayTime);
         lit = bfi_step(fs->predictedDisplayTime, xr_bfi_period(), &first);
+        if (!lit && inbetween_for(s, fs->predictedDisplayTime)) lit = true, st.bfi_ib++;
+        if (lit && !bfi.slow && prev.lit && prev.serial == s->serial && prev.k == k) lit = false, st.bfi_again++;
         lit ? st.bfi_lit++ : st.bfi_dark++;
+        prev.serial = s->serial, prev.k = k, prev.lit = lit;
+    } else {
+        prev.lit = false;
     }
     if (fs->shouldRender && g_xr.shown_any) {
         const XrSet *s = &g_xr.shown;
@@ -448,7 +495,7 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
                 int64_t d = fs->predictedDisplayTime - s->grid0;
                 k = d <= 0 ? 0 : (int)((d + s->period / 2) / s->period);
                 if (k > s->rs_n) k = s->rs_n, st.rs_past++;
-                if (k > 0 && s->rs_ok[k - 1] && !s->rs_rel[k - 1]) st.rs_fell++;  // (its submission not done yet)
+                if (k > 0 && s->rs_ok[k - 1] && !s->rs_rel[k - 1]) st.rs_fell++, atomic_fetch_add(&g_xr.rs_fell, 1);  // (its submission not done yet)
                 while (k > 0 && !(s->rs_ok[k - 1] && s->rs_rel[k - 1])) k--;
             }
             XrView fresh[2];
@@ -566,12 +613,14 @@ static void log_stats(double secs) {
             atomic_load(&g_xr.lead), (unsigned long long)st.rs_ahead[0], (unsigned long long)st.rs_ahead[1],
             (unsigned long long)st.rs_ahead[2], (unsigned long long)st.rs_ahead[3]);
     if (bfi_wanted()) {
-        static const char *const k_state[] = {"off", "flashing", "waits for 120 Hz at 60 fps", "waits: the game at 30"};
-        LOG("[xr] motion clarity (%s): %llu refreshes lit, %llu dark; sets lit on the refresh their poses were located for "
+        static const char *const k_state[] = {"off", "flashing", "waits for 120 Hz at 60 fps", "waits: the game at 30",
+                                              "in-between frames made"};
+        LOG("[xr] black frame insertion (%s): %llu refreshes lit (%llu of them by an in-between), %llu dark (%llu of them the image lit before); sets lit on the refresh their poses were located for "
             "%llu, later %llu, never %llu; lit refreshes with no new set: %llu left dark (a flash skipped), %llu the set "
             "before again (%llu a stall); flashes 1 / 2 / 3 / 4 / 5+ refreshes after the one before: %llu / %llu / %llu / "
             "%llu / %llu; phase moved %llu (lead %d)\n",
-            k_state[atomic_load(&g_bfi_state) & 3], (unsigned long long)st.bfi_lit, (unsigned long long)st.bfi_dark,
+            k_state[atomic_load(&g_bfi_state) % 5], (unsigned long long)st.bfi_lit, (unsigned long long)st.bfi_ib,
+            (unsigned long long)st.bfi_dark, (unsigned long long)st.bfi_again,
             (unsigned long long)st.bfi_on, (unsigned long long)st.bfi_late, (unsigned long long)st.bfi_unlit,
             (unsigned long long)st.bfi_skip, (unsigned long long)(st.bfi_relit + st.bfi_stall), (unsigned long long)st.bfi_stall,
             (unsigned long long)st.bfi_gap[0], (unsigned long long)st.bfi_gap[1], (unsigned long long)st.bfi_gap[2],
@@ -663,21 +712,22 @@ static void *xr_thread(void *arg) {
                 locked_key = key;
             }
         }
-        {   // Motion Clarity (LARECOMP_XR_BFI): armed at 120 Hz with a 60 FPS game, flashing while the game gives 60;
-            // otherwise every refresh shows the set, as off (said once a change)
+        {   // Black Frame Insertion (LARECOMP_XR_BFI): armed at 120 Hz with a 60 FPS game, flashing while the game gives
+            // 60; otherwise every refresh shows the set, as off (said once a change)
             bool want = bfi_wanted(), armed = want && bfi_rate, on = armed && !atomic_load(&g_bfi_game30);
             atomic_store(&g_bfi_armed, armed);
             if (!armed) atomic_store(&g_xr.bfi_phase, 0);
             if (on != bfi.on) bfi = (typeof(bfi)){.on = on};
-            int state = !want ? 0 : !armed ? 2 : !on || bfi.slow ? 3 : 1;
+            int state = !want ? 0 : !armed ? 2 : !on || bfi.slow ? 3 : atomic_load(&g_xr.grid) > 0 ? 4 : 1;
             static int logged;
             if (state != logged) {
-                if (state == 1) LOG("[xr] motion clarity: flashing (each set on one refresh of two at %.0f Hz)\n", g_xr.display_hz);
-                else if (state == 2) LOG("[xr] motion clarity: waits for 120 Hz with the game at 60 fps (display at %.0f Hz%s): every refresh shows the set\n",
+                if (state == 1) LOG("[xr] black frame insertion: flashing (each set on one refresh of two at %.0f Hz)\n", g_xr.display_hz);
+                else if (state == 2) LOG("[xr] black frame insertion: waits for 120 Hz with the game at 60 fps (display at %.0f Hz%s): every refresh shows the set\n",
                                          g_xr.display_hz, g_xr.display_hz > 118 && g_xr.display_hz < 122 ? ", the game held at 30" : "");
-                else if (state == 3) LOG("[xr] motion clarity: waits while the game runs at 30 fps (%s): every refresh shows the set\n",
+                else if (state == 3) LOG("[xr] black frame insertion: waits while the game runs at 30 fps (%s): every refresh shows the set\n",
                                          on ? "no new set on most lit refreshes" : "held by the pacer or the FPS target");
-                else if (logged) LOG("[xr] motion clarity: off\n");
+                else if (state == 4) LOG("[xr] black frame insertion: in-between frames made: a refresh with one is lit, one without is dark\n");
+                else if (logged) LOG("[xr] black frame insertion: off\n");
                 logged = state;
             }
             atomic_store(&g_bfi_state, state);

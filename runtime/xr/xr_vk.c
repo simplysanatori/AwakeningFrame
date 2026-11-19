@@ -284,7 +284,7 @@ static XrTime predict_time(XrTime *ref) {
     int64_t g = atomic_load(&g_xr.grid_t), gp = atomic_load(&g_xr.grid_period);
     bool bfi = xr_bfi_armed();
     if (bfi) gp = xr_bfi_period();
-    if (g && gp > 0 && (xr_reproj_mode() >= XR_REPROJ_ROT || bfi)) {
+    if (g && gp > 0 && (xr_grid_mode() || bfi)) {
         int lead = atomic_load(&g_xr.lead);
         if (lead != XR_LEAD_NONE) {
             p = t + lead * gp;
@@ -439,7 +439,7 @@ int64_t xr_latch_time(uint64_t id) {
 // image for each refresh by its display time (xr_loop.c end_frame), so a set first shown late, or shown longer because
 // the next one is late, still gets the image nearest its time.
 int xr_reshow_times(int64_t times[4]) {
-    if (!g_xr.in_set || xr_reproj_mode() < XR_REPROJ_ROT) return 0;
+    if (!g_xr.in_set || !xr_grid_mode()) return 0;
     XrSet *s = &g_xr.building;
     int64_t g = atomic_load(&g_xr.grid_t), per = atomic_load(&g_xr.grid_period);
     if (!s->views_ok || !s->vtime || !g || per <= 0) return 0;
@@ -449,6 +449,12 @@ int xr_reshow_times(int64_t times[4]) {
     int k = xr_refreshes_per_frame();
     if (k > XR_RESHOW_MAX + 1) k = XR_RESHOW_MAX + 1;
     if (k < 1) k = 1;
+    // (xr_set_grid 2: every refresh an in-between, the set's own images only in their place when one is missing; its
+    // grid0 a refresh before its first, never shown, so that refresh k is due at grid0 + k periods as for the others.
+    // LARECOMP_XR_BFI armed: the in-betweens of 1, the set's own lit on its refresh. Its lit phase, hold and lead are
+    // for the sets' own refreshes; with the own image hidden half the sets were lit a refresh late on the desktop)
+    s->own_hidden = atomic_load(&g_xr.grid) == 2 && k <= XR_RESHOW_MAX && !xr_bfi_armed();
+    if (s->own_hidden) s->grid0 -= per, k++;
     for (int i = 0; i < k; i++) times[i] = s->grid0 + i * per;
     return k;
 }
@@ -462,10 +468,9 @@ bool xr_reshow_views(int k, XrEyeView out[2]) {
     return true;
 }
 
-bool xr_reshow_target(int k, int eye, XrEyeTarget *out) {
-    if (!g_xr.in_set || k < 1 || k > XR_RESHOW_MAX || eye < -1 || eye > 1) return false;
-    XrSet *s = &g_xr.building;
-    int i = k - 1, layered = eye < 0;
+// The re-shown refreshes' swapchains for refresh k (both pairs, made at the first call); layered: one image of two layers
+static bool rs_chains(int k, bool layered) {
+    int i = k - 1;
     if (!g_xr.rs[0][i][0].sc) {  // (both pairs and eyes at once: the next set uses the other pair)
         static bool failed[XR_RESHOW_MAX];
         if (failed[i]) return false;
@@ -481,7 +486,14 @@ bool xr_reshow_target(int k, int eye, XrEyeTarget *out) {
             g_xr.eyes[0][0].h, layered ? " (one image of 2 layers a pair)" : "", g_xr.rs[0][i][0].count,
             4.0 * g_xr.rs[0][i][0].count * g_xr.eyes[0][0].w * g_xr.eyes[0][0].h * 4 / 1048576.0);
     }
-    if ((g_xr.rs[0][i][0].layers > 1) != layered) return false;  // (made the other way this session)
+    return (g_xr.rs[0][i][0].layers > 1) == layered;  // (made the other way this session: no)
+}
+
+bool xr_reshow_target(int k, int eye, XrEyeTarget *out) {
+    if (!g_xr.in_set || k < 1 || k > XR_RESHOW_MAX || eye < -1 || eye > 1) return false;
+    XrSet *s = &g_xr.building;
+    int i = k - 1, layered = eye < 0;
+    if (!rs_chains(k, layered)) return false;
     int e = layered ? 0 : eye;
     XrChain *c = &g_xr.rs[s->pair][i][e];
     if (!s->rs_has[i][e]) {
@@ -500,6 +512,69 @@ void xr_reshow_ready(int k, uint64_t seq, uint32_t w, uint32_t h) {
     s->rs_ok[i] = true, s->rs_seq[i] = seq, s->rs_w[i] = w, s->rs_h[i] = h;
     s->reads = s->reads > seq ? s->reads : seq;
     s->rs_n = s->rs_n > k ? s->rs_n : k;
+}
+
+// ---- in-between images (xr.h; runtime/nvn/vulkan/inbetween.c): the refreshes after the first of the set submitted last
+// get eye images of a frame's lists run again for each, drawn after the set went to the XR thread. They travel as the
+// re-shown refreshes' images do (rs, rs_views: end_frame picks them by display time), attached to the set where it is
+// now, pending or shown.
+int xr_ib_due(int64_t times[4], uint64_t *latch_ns, bool *own_hidden) {
+    *latch_ns = g_xr.ib.serial ? g_xr.ib.latch_ns : 0;
+    if (!g_xr.ib.serial || !g_xr.ib.grid0 || g_xr.ib.period <= 0 || !g_xr.ib.latch_ns) return 0;
+    int k = xr_refreshes_per_frame();
+    if (k > XR_RESHOW_MAX + 1) k = XR_RESHOW_MAX + 1;
+    if (g_xr.ib.own_hidden) k++;  // (xr_reshow_times: then at most XR_RESHOW_MAX)
+    for (int i = 0; i < k; i++) times[i] = g_xr.ib.grid0 + i * g_xr.ib.period;
+    *latch_ns = g_xr.ib.latch_ns, *own_hidden = g_xr.ib.own_hidden;
+    return k;
+}
+uint64_t xr_plat_time(int64_t t) { return (uint64_t)(t - atomic_load(&g_xr.xr_minus_plat)); }
+
+bool xr_ib_views(int k, XrEyeView out[2], uint64_t *id) {
+    if (!g_xr.ib.serial || k < 1 || k > XR_RESHOW_MAX) return false;
+    XrView *v = g_xr.ib.views[k - 1];
+    XrTime t = g_xr.ib.grid0 + k * g_xr.ib.period;
+    if (!xr_locate_in(t, g_xr.ib.space, v)) return false;
+    uint64_t n = ++g_xr.latch_next;  // (a latch of its own: foveation's gaze for it, xr_latch_gaze)
+    XrLatch *l = &g_xr.latch[n % XR_LATCHES];
+    pthread_mutex_lock(&g_xr.mu);
+    *l = (XrLatch){n, {v[0], v[1]}, g_xr.ib.space, t, plat_now_ns(), t};
+    pthread_mutex_unlock(&g_xr.mu);
+    views_out(v, out);
+    *id = n;
+    return true;
+}
+
+bool xr_ib_target(int k, int eye, XrEyeTarget *out) {
+    if (!g_xr.ib.serial || k < 1 || k > XR_RESHOW_MAX || eye < 0 || eye > 1 || !rs_chains(k, false)) return false;
+    int i = k - 1;
+    XrChain *c = &g_xr.rs[g_xr.ib.pair][i][eye];
+    if (!g_xr.ib.has[i][eye]) {
+        if (!xr_chain_acquire(c, &g_xr.ib.img[i][eye])) return false;
+        g_xr.ib.has[i][eye] = true;
+    }
+    *out = (XrEyeTarget){c->img[g_xr.ib.img[i][eye]], c->view[g_xr.ib.img[i][eye]], c->view_fmt, {c->w, c->h}};
+    return true;
+}
+
+bool xr_ib_ready(int k, uint64_t seq, uint32_t w, uint32_t h) {
+    if (!g_xr.ib.serial || k < 1 || k > XR_RESHOW_MAX) return false;
+    int i = k - 1;
+    bool both = g_xr.ib.has[i][0] && g_xr.ib.has[i][1] && w && h, put = false;
+    pthread_mutex_lock(&g_xr.mu);
+    XrSet *s = g_xr.pending.valid && g_xr.pending.serial == g_xr.ib.serial ? &g_xr.pending
+             : g_xr.shown_any && g_xr.shown.serial == g_xr.ib.serial ? &g_xr.shown : NULL;
+    if (s && both && !s->rs_has[i][0] && !s->rs_has[i][1]) {
+        for (int e = 0; e < 2; e++) s->rs_has[i][e] = true, s->rs_img[i][e] = g_xr.ib.img[i][e], s->rs_views[i][e] = g_xr.ib.views[i][e];
+        s->rs_ok[i] = true, s->rs_rel[i] = false, s->rs_seq[i] = seq, s->rs_w[i] = w, s->rs_h[i] = h;
+        s->rs_n = s->rs_n > k ? s->rs_n : k;
+        put = true;
+    }
+    pthread_mutex_unlock(&g_xr.mu);
+    if (!put)  // (the set was replaced meanwhile, or an eye is missing: the images go back unused)
+        for (int e = 0; e < 2; e++) if (g_xr.ib.has[i][e]) xr_chain_release(&g_xr.rs[g_xr.ib.pair][i][e]);
+    g_xr.ib.has[i][0] = g_xr.ib.has[i][1] = false;
+    return put;
 }
 
 bool xr_eye_size(uint32_t *w, uint32_t *h) {

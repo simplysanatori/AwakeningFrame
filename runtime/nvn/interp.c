@@ -53,9 +53,6 @@ bool g_interp_log, g_interp_replaying;
 uint64_t g_interp_present_frame;
 
 int interp_wanted(void) {
-    // (the VR mode: off, whatever the setting says - the XR loop paces the frames to the headset's refresh, and the
-    // in-betweens are images for a window's swapchain, which that mode doesn't have)
-    if (xr_wanted && xr_wanted()) return INTERP_OFF;
     static int env = -2;
     if (env == -2) {
         const char *e = getenv("LARECOMP_INTERP");
@@ -63,6 +60,10 @@ int interp_wanted(void) {
             : (!strcmp(e, "0") || !strcmp(e, "off")) ? INTERP_OFF : INTERP_ON;
         if (env >= 0) LOG("[interp] LARECOMP_INTERP=%s\n", e);
     }
+    // (the VR mode: off, whatever the setting says - the XR loop paces the frames to the headset's refresh, and the
+    // in-betweens are images for a window's swapchain, which that mode doesn't have; its own are the stereo executor's,
+    // runtime/nvn/vulkan/inbetween.c. LARECOMP_INTERP=measure, a test, logs and matches there too: the [interp] line's match rates)
+    if (xr_wanted && xr_wanted()) return env == INTERP_MEASURE ? INTERP_MEASURE : INTERP_OFF;
     if (env >= 0) return env;
     return g_settings.frame_interp ? INTERP_ON : INTERP_OFF;
 }
@@ -100,6 +101,11 @@ typedef struct {
 
 static Frame fr[3];
 static Frame *cur = &fr[0], *prev = &fr[1], *prev2 = &fr[2];  // (prev2: the frame before prev - object identity, below)
+// The frame a replay plays: this one (the flat window's in-betweens, made at its present before it is rotated out), or,
+// with interp_replay_last, the frame rotated out at its present (the VR mode's in-betweens, exec.c / inbetween.c: made
+// a refresh or more after that present, while the next frame may already be logged)
+static bool rp_last;
+static Frame *rsrc(void) { return rp_last ? prev : cur; }
 static bool prev_valid, frame_open, force_cut, can_blend;
 static _Atomic uint64_t called[256];  // the game thread's present call time per frame (interp_stamp)
 static uint8_t *blend_bytes; static uint64_t blend_n, blend_cap;
@@ -391,7 +397,7 @@ void interp_free_begin(int kind, uint64_t size) {
 void interp_free_end(void) { pthread_mutex_unlock(&free_lock); }
 bool interp_replay_lock(void) {
     pthread_mutex_lock(&free_lock);
-    if (atomic_load(&free_gen) == cur->free_gen) return true;
+    if (atomic_load(&free_gen) == rsrc()->free_gen) return true;
     uint32_t k = atomic_load(&free_kinds);
     for (int i = 0; i < INTERP_FREE_KINDS; i++) s_free_cuts[i] += (k >> i) & 1;
     pthread_mutex_unlock(&free_lock);
@@ -424,8 +430,9 @@ void interp_draw(uint64_t key, bool depth_only) {
     if (g_interp_replaying) {
         st_replay_draws++;
         rp_cur = -1;
-        for (uint32_t j = rp_draw; j < cur->ndraws && j < rp_draw + 8; j++)
-            if (cur->draws[j].key == key) { rp_cur = (int32_t)j; rp_draw = j + 1; rp_cb = cur->draws[j].first_cb; break; }
+        Frame *F = rsrc();
+        for (uint32_t j = rp_draw; j < F->ndraws && j < rp_draw + 8; j++)
+            if (F->draws[j].key == key) { rp_cur = (int32_t)j; rp_draw = j + 1; rp_cb = F->draws[j].first_cb; break; }
         if (rp_cur < 0) st_replay_misses++;
         return;
     }
@@ -452,12 +459,13 @@ const void *interp_cbuf(int stage, int k, int slot, const void *src, uint64_t si
     last_cb = -1;
     if (g_interp_replaying) {
         if (rp_cur < 0) return src;
-        DrawRec *d = &cur->draws[rp_cur];
+        Frame *F = rsrc();
+        DrawRec *d = &F->draws[rp_cur];
         if (rp_cb >= d->first_cb + d->ncb) { st_replay_cb_miss++; return src; }
-        CbRec *c = &cur->cbs[rp_cb];
+        CbRec *c = &F->cbs[rp_cb];
         if (c->stage != stage || c->slot != slot || c->size != size) { st_replay_cb_miss++; return src; }
         rp_cb++;
-        return c->blend >= 0 ? blend_bytes + c->blend : cur->bytes + c->off;
+        return c->blend >= 0 && !rp_last ? blend_bytes + c->blend : F->bytes + c->off;
     }
     if (!frame_open || !cur->ndraws) return src;
     DrawRec *d = &cur->draws[cur->ndraws - 1];
@@ -544,6 +552,13 @@ void interp_replay_gpu(double ms) {  // (completion handlers, in submission orde
     pthread_mutex_lock(&img_lock);
     img_replay_acc += ms;
     pthread_mutex_unlock(&img_lock);
+}
+double interp_replay_gpu_take(void) {  // (the VR mode's in-betweens: no compose takes it)
+    pthread_mutex_lock(&img_lock);
+    double ms = img_replay_acc;
+    img_replay_acc = 0;
+    pthread_mutex_unlock(&img_lock);
+    return ms;
 }
 void interp_compose_gpu(double ms) {
     pthread_mutex_lock(&img_lock);
@@ -738,15 +753,19 @@ bool interp_replays_allowed(uint64_t frame, uint64_t game_frame, uint64_t now) {
     if (game_frame >= frame + 2) { log_cut(7, NULL); return false; }
     uint64_t c = atomic_load(&called[frame & 255]);
     if (c && now > c && now - c > 100000000ull) { log_cut(5, " (present reached late)"); return false; }
-    // Storage the frame's gmem draws read, rewritten by the game since (its CPU-written tables; a dispatch's output
-    // is left to GPU order): the replays would read the newer data - the village's lighting one image different.
-    for (uint32_t i = 0; i < cur->nsto; i++) {
-        StoRec *r = &cur->sto[i];
+    return interp_storage_same();
+}
+// Storage the frame's gmem draws read, rewritten by the game since (its CPU-written tables; a dispatch's output is left
+// to GPU order): the replays would read the newer data - the village's lighting one image different.
+bool interp_storage_same(void) {
+    Frame *F = rsrc();
+    for (uint32_t i = 0; i < F->nsto; i++) {
+        StoRec *r = &F->sto[i];
         bool gpu = false;
-        for (uint32_t k = 0; k < cur->ndout && !gpu; k++) gpu = r->addr < cur->dout[k].addr + cur->dout[k].size && cur->dout[k].addr < r->addr + r->size;
+        for (uint32_t k = 0; k < F->ndout && !gpu; k++) gpu = r->addr < F->dout[k].addr + F->dout[k].size && F->dout[k].addr < r->addr + r->size;
         if (gpu) continue;
         s_sto_checks++, s_sto_bytes += r->size;
-        if (memcmp(cur->bytes + r->off, (const void *)(uintptr_t)r->addr, r->size) != 0) {
+        if (memcmp(F->bytes + r->off, (const void *)(uintptr_t)r->addr, r->size) != 0) {
             char why[80];
             snprintf(why, sizeof why, " (%llx, %llu bytes)", (unsigned long long)r->addr, (unsigned long long)r->size);
             log_cut(8, why);
@@ -1345,7 +1364,12 @@ bool interp_prepare(float t) {
     return true;
 }
 
-uint32_t interp_handles(const uint64_t **out) { *out = cur->handles; return cur->nhandles; }
+uint32_t interp_handles(const uint64_t **out) { *out = rsrc()->handles; return rsrc()->nhandles; }
+void interp_replay_last(bool on) { rp_last = on; }
+bool interp_last_logged(void) { return prev->ndraws && !prev->overflow && !prev->destroyed; }
+// (stereo, exec.c: a list run once per eye replays the same draws in each: eye 1 starts where eye 0 did)
+void interp_replay_mark(uint32_t m[3]) { m[0] = rp_draw, m[1] = rp_cb, m[2] = (uint32_t)rp_cur; }
+void interp_replay_rewind(const uint32_t m[3]) { rp_draw = m[0], rp_cb = m[1], rp_cur = (int32_t)m[2]; }
 
 // ---- replays (the pacer: rqueue.c takes the time out of the game thread's busy time while it waited for one)
 static _Atomic uint64_t rp_total_ns, rp_since;
@@ -1367,6 +1391,15 @@ void interp_replay_begin(void) {
     atomic_store(&rp_since, rp_t0);
 }
 
+void interp_replay_sleep_until(uint64_t t) {
+    uint64_t t0 = plat_now_ns();
+    if (t <= t0) return;
+    atomic_store(&rp_since, t0);
+    plat_sleep_until_ns(t);
+    atomic_fetch_add(&rp_total_ns, plat_now_ns() - t0);
+    atomic_store(&rp_since, 0);
+}
+
 void interp_replay_end(void) {
     if (!g_interp_replaying) return;
     g_interp_replaying = false;
@@ -1380,6 +1413,7 @@ void interp_replay_end(void) {
 }
 
 uint64_t interp_frame_serial(void) { return frame_serial; }
+uint64_t interp_replay_serial(void) { return frame_serial - (rp_last ? 1 : 0); }
 void interp_frame_rotate(void) {
     frame_serial++;
     Frame *t = prev2; prev2 = prev; prev = cur; cur = t;

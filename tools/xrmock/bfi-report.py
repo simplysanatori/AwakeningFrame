@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# Which refreshes show a set and which are dark, from xrmock's MOCK_XR_SHIFT file (docs/af/STEREO.md "Motion Clarity").
+# Which refreshes show a set and which are dark, from xrmock's MOCK_XR_SHIFT file (docs/af/STEREO.md "Black Frame
+# Insertion").
 # Per ended frame the mock writes an "end" line (its projection and quad layer counts); a frame with a projection layer
 # also has a "disp" line (the image each eye shows: its swapchain and release; the display time its poses were located
 # for; the layer's eye 0 pose against the head's true eye 0 at the display time). Reported over a window of display times:

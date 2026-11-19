@@ -190,6 +190,7 @@ static float g_al_x = 1, g_al_y = 1;   // the allocation scale: the size of scal
 void renderer_get_scale(float *sx, float *sy) { *sx = g_rs_x; *sy = g_rs_y; }
 void renderer_set_scale(float sx, float sy) { g_rs_x = sx; g_rs_y = sy; }
 void renderer_set_alloc_scale(float ax, float ay) { g_al_x = ax; g_al_y = ay; }
+void renderer_get_alloc_scale(float *ax, float *ay) { *ax = g_al_x; *ay = g_al_y; }
 // The tap scale of the ambient occlusion's own blurs: see metal.m renderer_ao_blur_scale.
 float renderer_ao_blur_scale(NvnTexture *t) {
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;

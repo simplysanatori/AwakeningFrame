@@ -1638,6 +1638,8 @@ void vk_frame_end(const char *shot_path) {
         extern void reproj_submit(void);  // (LARECOMP_XR_REPROJ: the set's re-shown refreshes, each a submission of its own)
         reproj_submit();
         xr_set_submit(seq);
+        extern void inbetween_after_submit(void);  // (LARECOMP_XR_INBETWEEN: the set's later refreshes, drawn now)
+        inbetween_after_submit();
     } else
 #endif
     {
@@ -1970,7 +1972,8 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                 ip_presents = ip_gaps = ip_overslept = 0, ip_gap_max = 0;
                 memset(ip_not_made, 0, sizeof ip_not_made);
             }
-            bool blend = interp_frame_end(want != INTERP_OFF);
+            extern bool inbetween_logging(void);  // (the VR mode's in-betweens replay the frame's log: inbetween.c)
+            bool blend = interp_frame_end(want != INTERP_OFF || inbetween_logging());
             if (want == INTERP_ON) {
                 if (blend) interp_note_images(ip_mids(b, frame));
                 else ip_not_made[IP_NO_BLEND]++, interp_note_images(0);
@@ -2046,7 +2049,10 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                     // LARECOMP_VR_HEADROOM=0: the old 14.5 ms.
                     static double b60 = -1;
                     if (b60 < 0) b60 = getenv("LARECOMP_VR_DYNRES_MS") ? atof(getenv("LARECOMP_VR_DYNRES_MS")) : vr_headroom() ? 10.0 : 14.5;
-                    double f = output_scale_vr_factor(SDL_GetTicksNS() / 1e9, game_ms, xr_display_hz() < 100 && !pace_xr_free() ? 29.0 : b60, ew);
+                    // (LARECOMP_XR_INBETWEEN, while made: each image of the frame gets one refresh, inbetween.c)
+                    extern double inbetween_dynres_ms(double ms);
+                    double f = output_scale_vr_factor(SDL_GetTicksNS() / 1e9, game_ms,
+                                                      inbetween_dynres_ms(xr_display_hz() < 100 && !pace_xr_free() ? 29.0 : b60), ew);
                     os.sx = sx = os.ax * f, os.sy = sy = os.ay * f;
                 }
                 crop[2] = (float)(u / os.ax), crop[3] = (float)(u / os.ay);  // (of the allocation: the present takes the drawn part)
@@ -2060,6 +2066,14 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             }
         }
         widescreen_set_factor((float)shape);
+        {   // (LARECOMP_XR_INBETWEEN: the frame's in-betweens, after this present, are drawn at the scale it was)
+            extern void renderer_get_scale(float *sx, float *sy);
+            extern void renderer_get_alloc_scale(float *ax, float *ay);
+            extern void inbetween_frame_scale(float sx, float sy, float ax, float ay);
+            float fs[4];
+            renderer_get_scale(&fs[0], &fs[1]), renderer_get_alloc_scale(&fs[2], &fs[3]);
+            inbetween_frame_scale(fs[0], fs[1], fs[2], fs[3]);
+        }
         extern void renderer_set_alloc_scale(float ax, float ay);
         renderer_set_alloc_scale((float)os.ax, (float)os.ay);
         renderer_set_scale((float)sx, (float)sy);
