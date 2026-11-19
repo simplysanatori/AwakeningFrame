@@ -11115,6 +11115,7 @@ int vk_stereo_eyes(VkCommandBuffer cb, bool (*eye_target)(int, VkImage *, VkImag
         rec_CmdSetViewport(cb, 0, 1, &vp);
         float pc[12] = {renderer_origin_lower_left() ? 1.0f : 0.0f, 0, 0, 0, 0, 0, sfx, sfy};
         screen_filter_params(pc + 8);
+        pc[10] = stereo_eye_gain();
         rec_CmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, pc);
         fullscreen_vertex_bind(cb);
         rec_CmdDraw(cb, 3, 1, 0, 0);
