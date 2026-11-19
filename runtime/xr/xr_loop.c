@@ -140,7 +140,8 @@ bool xr_set_begin(uint64_t timeout_ns, uint32_t *hud_index) {
     }
     bool busy = g_xr.pending.valid;
     int pair = g_xr.shown_any ? 1 - g_xr.shown.pair : 0;  // (the pair no layer names now; shown changes only at a release)
-    if (waited) st.waits++, st.wait_ns += plat_now_ns() - t0;
+    uint64_t wait_ns = waited ? plat_now_ns() - t0 : 0;
+    if (waited) st.waits++, st.wait_ns += wait_ns;
     if (busy) st.skipped++;
     pthread_mutex_unlock(&g_xr.mu);
     if (busy || g_xr.stop) return false;
@@ -149,6 +150,7 @@ bool xr_set_begin(uint64_t timeout_ns, uint32_t *hud_index) {
     memset(&g_xr.building, 0, sizeof g_xr.building);  // (views: xr_set_views, from the eye images' latches)
     g_xr.building.pair = pair;
     g_xr.building.hud = idx;
+    g_xr.building.wait_ns = wait_ns;
     g_xr.in_set = true;
     *hud_index = (pair ? g_xr.hud[0].count : 0) + idx;  // (XrChainInfo: the first pair's images, then the second's)
     return true;
@@ -188,20 +190,31 @@ static int64_t periods(int64_t d, int64_t per) { return d >= 0 ? (d + per / 2) /
 static void lead_note(const XrSet *s, XrTime pdt) {
     int64_t per = atomic_load(&g_xr.grid_period);
     if (!s->vref || per <= 0) return;
-    int64_t m = periods(pdt - s->vref, per);
+    // (LARECOMP_XR_BFI, armed: less the time its present waited for the set before, held for its own refresh. With it,
+    // a phase a refresh later than the sets need keeps every set waiting, the next present waits for that, and its lead
+    // grows to match: the extra refresh would never go)
+    bool bfi = xr_bfi_armed();
+    int64_t m = periods(pdt - s->vref - (bfi ? (int64_t)s->wait_ns : 0), per);
     if (m < -4 || m > 12) return;  // (a hitch or a load, not the pipeline)
     g_xr.leads[g_xr.lead_n++ % XR_LEADS] = (int8_t)m;
     if (g_xr.lead_n < XR_LEADS / 2) return;
     int n = g_xr.lead_n < XR_LEADS ? g_xr.lead_n : XR_LEADS, lead = g_xr.leads[0];
     for (int i = 1; i < n; i++) if (g_xr.leads[i] > lead) lead = g_xr.leads[i];
-    int old = atomic_exchange(&g_xr.lead, lead);
-    // (LARECOMP_XR_BFI) the predictions are moved later onto the lit refreshes' phase (predict_time). A lead grown onto
-    // the other phase moves the phase one refresh later instead (one gap of three refreshes between two flashes), so the
-    // sets are not shown a refresh after their poses for good; a lead shrunk onto the other phase keeps it (moving it
-    // earlier would light two refreshes in a row), its sets' poses then predicted a refresh further ahead than needed
+    atomic_store(&g_xr.lead, lead);
+    // (LARECOMP_XR_BFI) the predictions are moved later onto the lit refreshes' phase (predict_time); the phase is first
+    // taken from the lead. A lead off the phase (one slow set keeps it up for 8) has its sets' poses predicted a refresh
+    // further ahead than needed and their sets wait a refresh longer; only once it has stayed off for 32 sets (half a
+    // second) does the phase move, by one refresh. The move puts the next set's refresh a refresh nearer the flash
+    // before (a lead grown: three refreshes after it; shrunk: one, and that set is lit a refresh late or not at all)
     int64_t ph = atomic_load(&g_xr.bfi_phase), bp = xr_bfi_period();
-    if (ph && xr_bfi_armed() && old != XR_LEAD_NONE && lead > old && (periods(s->vref + lead * bp - ph, bp) & 1))
-        atomic_store(&g_xr.bfi_phase, ph + bp), st.bfi_rephase++;
+    if (!bfi) return;
+    if (!ph) {
+        atomic_store(&g_xr.bfi_phase, s->vref + lead * bp), g_xr.bfi_off = 0;
+    } else if (!(periods(s->vref + lead * bp - ph, bp) & 1)) {
+        g_xr.bfi_off = 0;
+    } else if (++g_xr.bfi_off >= 32) {
+        atomic_store(&g_xr.bfi_phase, ph + bp), g_xr.bfi_off = 0, st.bfi_rephase++;
+    }
 }
 
 // (LARECOMP_XR_REPROJ, mu held) a set's re-shown refreshes' images whose submission is done (all of them: `all`, the set
@@ -386,7 +399,7 @@ static bool bfi_step(XrTime t, int64_t per, bool *first) {
         bfi.last = t, bfi.miss <<= 1, bfi.run = 0;
         if (bfi.slow && __builtin_popcount(bfi.miss & 0xffff) <= 1) bfi.slow = false;
         int64_t ph = atomic_load(&g_xr.bfi_phase);  // (the phase's anchor follows the flashes on it: no drift)
-        if (!ph || !(periods(t - ph, per) & 1)) atomic_store(&g_xr.bfi_phase, t);
+        if (ph && !(periods(t - ph, per) & 1)) atomic_store(&g_xr.bfi_phase, t);
         if (!bfi.slow) st.bfi_gap[gap]++, d ? st.bfi_late++ : st.bfi_on++;
         return true;
     }

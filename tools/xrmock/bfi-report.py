@@ -31,13 +31,13 @@ t_to = float(a[a.index('--to') + 1]) if '--to' in a else 1e9
 lines = '--lines' in a
 
 ends, disps = [], {}
-for line in open(path):
+for line in open(path):  # (a line cut short where the app exited is skipped)
     if line.startswith('end '):
         d = kv(line)
-        if t_from <= d['t'] <= t_to: ends.append(d)
+        if {'frame', 't', 'proj', 'quads'} <= d.keys() and t_from <= d['t'] <= t_to: ends.append(d)
     elif line.startswith('disp '):
         d = kv(line)
-        disps[int(d['frame'])] = d
+        if {'frame', 't', 'sc0', 'rel0', 'rot_err', 'true_pitch'} <= d.keys(): disps[int(d['frame'])] = d
 if len(ends) < 3:
     sys.exit('no "end" lines in the window (an xrmock without them, or MOCK_XR_SHIFT unset)')
 

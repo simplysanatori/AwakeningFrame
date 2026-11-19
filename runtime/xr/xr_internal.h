@@ -105,6 +105,7 @@ typedef struct {
     // (LARECOMP_XR_BFI, XR thread) the refresh it is due to be lit on (grid0; else its first) and whether it has been
     XrTime bfi_slot;
     bool bfi_lit;
+    uint64_t wait_ns;       // how long its xr_set_begin waited for the set before to be released
 } XrSet;
 
 // xr_latch_views_id's latches: the poses each frame's eyes were rendered with, kept until a set names them
@@ -174,6 +175,7 @@ typedef struct {
     // (LARECOMP_XR_BFI) a lit refresh's display time: the lit ones are a whole number of pairs of periods from it, and a
     // set's poses are predicted for one of them (predict_time). 0: none yet. The XR thread's
     _Atomic int64_t bfi_phase;
+    int bfi_off;            // (lead_note) leads in a row whose refresh is off the phase
     int predict;                   // LARECOMP_XR_PREDICT: 1 measured (default), 0 vsync (the latest vsync's time)
     float quad_dist, quad_width;
 } XrCore;
