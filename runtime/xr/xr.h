@@ -133,8 +133,17 @@ int xr_set_views(const uint64_t id[2], const XrEyeView rendered[2]);
 //           for the head pose of each (rotation; and position from the scene depth; and the table's follow motion),
 //           each in a submission of its own after the set's
 enum { XR_REPROJ_OFF, XR_REPROJ_FRESH, XR_REPROJ_ROT, XR_REPROJ_POS, XR_REPROJ_FOLLOW };
-int xr_reproj_mode(void);
+int xr_reproj_mode(void);  // (XR_REPROJ_OFF while Motion Clarity is armed: those refreshes show nothing)
 void xr_set_reproj_mode(int mode);  // (the VR tab; any thread: the next set)
+// ---- Motion Clarity (LARECOMP_XR_BFI; docs/af/STEREO.md "Motion Clarity"): at 120 Hz with the game at 60 FPS each set
+// is shown on one refresh, the one its poses were located for, and the projection layer is left out of the other (black;
+// the HUD and the laser stay). Off by default; elsewhere (90 Hz, the 30 FPS hold, other rates) it waits, as off.
+void xr_set_bfi(int on);  // (the VR tab; any thread: the next refresh)
+// 0 off, 1 flashing, 2 waiting for 120 Hz with the game at 60 (another rate, the 30 FPS lock), 3 waiting while the game
+// runs at 30 (the pacer's hold, or sets missing on most lit refreshes)
+int xr_bfi_state(void);
+// LARECOMP_XR_BFI_GAIN=<g> (off): the eye images' brightness lift while it flashes (0: none; the present / edge pass's pf.z)
+float xr_bfi_gain(void);
 // Between xr_set_begin and xr_set_submit, after the eye images and their views (xr_set_views): the display times of the
 // refreshes this set is expected on (times[0] its first, on the display's grid; then one a refresh, as many as the game's
 // cadence shows a frame, up to 4). Returns how many (0: none: no views, the session not running).

@@ -414,6 +414,14 @@ int stereo_set_views(void) {
 #endif
 }
 
+float stereo_eye_gain(void) {
+#ifdef LARECOMP_HAVE_XR
+    return xr_bfi_gain();
+#else
+    return 0;
+#endif
+}
+
 void stereo_cameras_init(void) {
 #ifdef LARECOMP_HAVE_XR
     const char *t = getenv("LARECOMP_STEREO_TEST");

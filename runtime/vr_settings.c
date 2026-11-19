@@ -66,6 +66,7 @@ extern void vrui_set_hud_quad(float dist_m, float width_m) WEAK;
 extern void vk_vr_eye_post_set(int aa, int up) WEAK;      // VRS_AA_*, VRS_UP_*: exec.c (read per eye)
 extern void xr_set_reproj_mode(int mode) WEAK;            // xr.h XR_REPROJ_* (VRS_RS_* + 1 past off): xr_loop.c (read per set)
 extern void inbetween_set(int on) WEAK;                   // the in-between frames: nvn/vulkan/inbetween.c (read per game frame)
+extern void xr_set_bfi(int on) WEAK;                      // Motion Clarity: xr_loop.c (read per refresh)
 
 // ---------------------------------------------------------------------------------------------------------------------
 static int pick(const char *const *keys, int n, const char *v, int def) {
@@ -104,6 +105,7 @@ bool vr_settings_parse(const char *key, const char *val) {
     else if (!strcmp(key, "upscaler")) VR.upscale = pick(k_up, VRS_N_UP, val, VRS_UP_PLAIN);
     else if (!strcmp(key, "reprojection")) VR.reproj = pick(k_rs, VRS_N_RS, val, VRS_RS_OFF);
     else if (!strcmp(key, "inbetween_frames")) VR.inbetween = atoi(val) != 0;
+    else if (!strcmp(key, "motion_clarity")) VR.bfi = atoi(val) != 0;
     else return false;
     return true;
 }
@@ -122,6 +124,7 @@ void vr_settings_save(FILE *f) {
     fprintf(f, "vr_antialias = %s\nvr_upscaler = %s\n", k_aa[VR.aa], k_up[VR.upscale]);
     fprintf(f, "vr_reprojection = %s\n", k_rs[VR.reproj]);
     fprintf(f, "vr_inbetween_frames = %d\n", VR.inbetween);
+    fprintf(f, "vr_motion_clarity = %d\n", VR.bfi);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -135,7 +138,8 @@ static const char *const k_env[VRO_COUNT] = {
     [VRO_RECENTRE] = "", [VRO_EDGE] = "LARECOMP_VR_EDGE", [VRO_SCENE] = "LARECOMP_VR_SCENE", [VRO_FOVEATION] = "LARECOMP_VR_FOVEATION",
     [VRO_DYNRES] = "LARECOMP_VR_DYNRES", [VRO_HUD_DIST] = "LARECOMP_XR_QUAD",
     [VRO_HUD_WIDTH] = "LARECOMP_XR_QUAD", [VRO_POINTER_HAND] = "LARECOMP_VR_POINTER_HAND", [VRO_AA] = "LARECOMP_VR_AA",
-    [VRO_UPSCALE] = "LARECOMP_VR_UPSCALE", [VRO_REPROJ] = "LARECOMP_XR_REPROJ", [VRO_INBETWEEN] = "LARECOMP_XR_INBETWEEN"};
+    [VRO_UPSCALE] = "LARECOMP_VR_UPSCALE", [VRO_REPROJ] = "LARECOMP_XR_REPROJ", [VRO_INBETWEEN] = "LARECOMP_XR_INBETWEEN",
+    [VRO_BFI] = "LARECOMP_XR_BFI"};
 
 const char *vr_opt_env(VrOpt o) {
     // (the refresh rate is taken by the launch wrapper from AF_REFRESH_HZ before larecomp.ini)
@@ -179,6 +183,7 @@ void vr_settings_apply_env(void) {
     if (!g_given[VRO_UPSCALE] && VR.upscale != VRS_UP_PLAIN) put("LARECOMP_VR_UPSCALE", k_up[VR.upscale]);
     if (!g_given[VRO_REPROJ] && VR.reproj != VRS_RS_OFF) put("LARECOMP_XR_REPROJ", k_rs[VR.reproj]);
     if (!g_given[VRO_INBETWEEN] && VR.inbetween) put("LARECOMP_XR_INBETWEEN", "1");
+    if (!g_given[VRO_BFI] && VR.bfi) put("LARECOMP_XR_BFI", "1");
     if (!g_given[VRO_FOVEATION]) put("LARECOMP_VR_FOVEATION", k_fov[VR.foveation]);
     if (!g_given[VRO_DYNRES]) put("LARECOMP_VR_DYNRES", VR.dynres ? "1" : "0");
     if (!g_given[VRO_HUD_DIST] && (VR.hud_dist != 2.0f || VR.hud_width != 2.2f)) {
@@ -227,6 +232,7 @@ bool vr_opt_live(VrOpt o) {
     case VRO_AA: case VRO_UPSCALE: return vk_vr_eye_post_set != NULL;
     case VRO_REPROJ: return xr_set_reproj_mode != NULL;
     case VRO_INBETWEEN: return inbetween_set != NULL;
+    case VRO_BFI: return xr_set_bfi != NULL;
     default: return false;
     }
 }
@@ -250,6 +256,7 @@ void vr_settings_changed(VrOpt o) {
     case VRO_AA: case VRO_UPSCALE: if (vk_vr_eye_post_set) vk_vr_eye_post_set(VR.aa, VR.upscale); break;
     case VRO_REPROJ: if (xr_set_reproj_mode) xr_set_reproj_mode(VR.reproj ? VR.reproj + 1 : 0); break;
     case VRO_INBETWEEN: if (inbetween_set) inbetween_set(VR.inbetween); break;
+    case VRO_BFI: if (xr_set_bfi) xr_set_bfi(VR.bfi); break;
     default: break;
     }
 }
@@ -283,7 +290,8 @@ void vr_settings_test_tick(uint64_t frame) {
             {"edge_style", VRO_EDGE}, {"surroundings", VRO_SCENE}, {"foveation", VRO_FOVEATION}, {"dynamic_resolution", VRO_DYNRES}, {"follow", VRO_FOLLOW},
             {"layout", VRO_LAYOUT}, {"turn", VRO_TURN}, {"panel_distance", VRO_HUD_DIST}, {"panel_width", VRO_HUD_WIDTH},
             {"refresh", VRO_REFRESH}, {"fps", VRO_REFRESH}, {"antialias", VRO_AA}, {"upscaler", VRO_UPSCALE},
-            {"reprojection", VRO_REPROJ}, {"inbetween_frames", VRO_INBETWEEN}};
+            {"reprojection", VRO_REPROJ}, {"inbetween_frames", VRO_INBETWEEN},
+            {"motion_clarity", VRO_BFI}};
         for (size_t i = 0; i < sizeof map / sizeof *map; i++)
             if (!strcmp(k, map[i].k)) o = map[i].o;
         snprintf(k2, sizeof k2, "vr_%s", k);

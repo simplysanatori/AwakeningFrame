@@ -104,6 +104,10 @@ typedef struct {
     XrTime ready;           // (XR thread) the first refresh it was found finished at (it may wait for grid0 then)
     uint64_t serial;        // counts xr_set_submit: the set the in-between images are for (xr_ib_ready finds it by it)
     bool own_hidden;        // (xr_set_grid 2) grid0 is a refresh before its first: its own images are never shown there
+    // (LARECOMP_XR_BFI, XR thread) the refresh it is due to be lit on (grid0; else its first) and whether it has been
+    XrTime bfi_slot;
+    bool bfi_lit;
+    uint64_t wait_ns;       // how long its xr_set_begin waited for the set before to be released
 } XrSet;
 
 // xr_latch_views_id's latches: the poses each frame's eyes were rendered with, kept until a set names them
@@ -187,6 +191,10 @@ typedef struct {
         XrView views[XR_RESHOW_MAX][2];
     } ib;
     uint64_t set_serial;
+    // (LARECOMP_XR_BFI) a lit refresh's display time: the lit ones are a whole number of pairs of periods from it, and a
+    // set's poses are predicted for one of them (predict_time). 0: none yet. The XR thread's
+    _Atomic int64_t bfi_phase;
+    int bfi_off;            // (lead_note) leads in a row whose refresh is off the phase
     int predict;                   // LARECOMP_XR_PREDICT: 1 measured (default), 0 vsync (the latest vsync's time)
     float quad_dist, quad_width;
 } XrCore;
@@ -216,6 +224,12 @@ void xr_release_completed(XrTime pdt);  // (XR thread) the pending set, once its
 bool xr_layer_matches_render(const XrSet *s);
 // xr_vk.c: one xrLocateViews for both eyes at display time t in `space` (false: no valid pose)
 bool xr_locate_in(XrTime t, XrSpace space, XrView views[2]);
+// xr_loop.c: Motion Clarity armed (LARECOMP_XR_BFI on, at a display rate that shows a 60 FPS game frame on two
+// refreshes): the sets' poses predicted on the display's grid, on the lit refreshes' phase, and no redraws
+bool xr_bfi_armed(void);
+// (LARECOMP_XR_BFI) the display's period from its filtered rate: SteamVR now and then reports one period of two or three
+// refreshes (hz_filter.h), which would make a step of one refresh look like none
+static inline int64_t xr_bfi_period(void) { return g_xr.display_hz > 1 ? (int64_t)(1e9 / g_xr.display_hz) : 8333333; }
 // xr_loop.c: the refreshes a game frame is shown on at the display's rate now (2 at 120 Hz, 4 in the 30 FPS hold; the
 // larger count at an uneven rate)
 int xr_refreshes_per_frame(void);

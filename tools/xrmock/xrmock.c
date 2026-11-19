@@ -39,18 +39,21 @@
 //                            linear, held at the ends; the gaze columns, relative to the head, are what MOCK_XR_GAZE=file
 //                            plays; the game's LARECOMP_XR_POSE_LOG writes this format, tools/xrmock/headpose.py makes it)
 //   MOCK_XR_SHOT=<spec>      write the submitted images to PNG for these frames (1-based, as in the trace):
-//                            "30", "10,20", "5-8", "every:60", "all"
+//                            "30", "10,20", "5-8", "every:60", "all"; a frame without a projection layer (the app's
+//                            LARECOMP_XR_BFI dark refresh) is written again from the next frame with one, under that number
 //                            (a dumped frame stalls the loop for ~0.5 s per image: copy and PNG on the CPU)
 //   MOCK_XR_SHOT_VIEW=1      with MOCK_XR_SHOT: also f<frame>_view.png, what the left eye sees (half size): its projection
 //                            image with the quad layers over it in order, each where its pose puts it (nearest sample)
 //   MOCK_XR_SHOT_DIR=<dir>   where (default .): f<frame>_proj<layer>_eye<0|1>.png, f<frame>_quad<layer>.png
 //   MOCK_XR_SHOT_REQ=<file>  a shot the app asks for: when <file> exists (its first line a path prefix), the projection
-//                            layer's eye images of the MOCK_XR_SHOT_REQ_DELAY'th frame ended after it (4) are written to
+//                            layer's eye images of the MOCK_XR_SHOT_REQ_DELAY'th frame ended after it (4; the first with a
+//                            projection layer from there) are written to
 //                            <prefix>_eye<0|1>.png and the file is removed (the game's LARECOMP_STEREO_DUMP_XR: the eye
 //                            images as the headset gets them, Table Edge applied, at its own dump frames)
 //   MOCK_XR_SHIFT=<file>     per refresh, the projection layer's pose against the head's at the display time; per new
 //                            eye image, its content's shift against a reference image, measured without stalling the
-//                            loop (tools/xrmock/shift-report.py, step-report.py)
+//                            loop (tools/xrmock/shift-report.py, step-report.py); per ended frame an "end" line with its
+//                            projection and quad layer counts, a refresh without a projection layer too (bfi-report.py)
 //   MOCK_XR_SHIFT_REF=<s>    the reference image: each eye's first image this many seconds in (30)
 //   MOCK_XR_SHIFT_DUMP=<dir> also write the probed images (the centre 2/3, luma, half size) as PGM, for the
 //   MOCK_XR_SHIFT_DUMP_AT=a,b  display times a to b seconds (tools/xrmock/reproj-report.py: per refresh, the content
@@ -287,6 +290,7 @@ static char gShotSpec[256] = "";
 static const char* gShotReq;     // MOCK_XR_SHOT_REQ
 static char gShotReqPath[400];   // (the asked shot's prefix, while it waits)
 static int gShotReqWait = -1;    // (frames still to end before it is taken; -1: none asked)
+static int gShotCarry;           // (MOCK_XR_SHOT: a frame without a projection layer, a dark one: the next frame's too)
 
 static int shotWanted(int frame) {
     if (!gShotSpec[0]) return 0;
@@ -1462,7 +1466,7 @@ static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
         return XR_ERROR_CALL_ORDER_INVALID;
     }
     int64_t end = nowNs();
-    int frame = gBeginRec.id, want = shotWanted(frame);
+    int frame = gBeginRec.id, want = shotWanted(frame), wantEyes = want || gShotCarry;
     char req[400] = "";  // (MOCK_XR_SHOT_REQ: this frame's projection images to that prefix)
     if (gShotReq && gShotReqWait < 0) {
         FILE* f = fopen(gShotReq, "r");
@@ -1477,9 +1481,11 @@ static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
     if (ei->environmentBlendMode != XR_ENVIRONMENT_BLEND_MODE_OPAQUE) xrmock_error("xrEndFrame blend mode %d not offered", (int)ei->environmentBlendMode);
     char buf[1024] = "";
     XrResult result = XR_SUCCESS;
+    int nproj = 0, nquad = 0;
     for (uint32_t i = 0; i < ei->layerCount; i++) {
         const XrCompositionLayerBaseHeader* l = ei->layers[i];
         char t[256], nm[64];
+        nproj += l->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION, nquad += l->type == XR_TYPE_COMPOSITION_LAYER_QUAD;
         if (!spaceOf(l->space)) {
             xrmock_error("layer %u: space handle invalid", i);
             result = XR_ERROR_HANDLE_INVALID;
@@ -1510,7 +1516,7 @@ static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
                 snprintf(t, sizeof(t), " sc%d:%dx%d%s", c ? chainId(pv->subImage.swapchain) : -1, pv->subImage.imageRect.extent.width, pv->subImage.imageRect.extent.height,
                          depth ? "+depth" : "");
                 strcat(buf, t);
-                if (want) {
+                if (wantEyes) {
                     snprintf(nm, sizeof(nm), "proj%u_eye%u", i, v);
                     shot(frame, c, &pv->subImage, nm);
                 }
@@ -1533,7 +1539,7 @@ static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
             snprintf(t, sizeof(t), " quad[sc%d:%dx%d eye=%d]", c ? chainId(q->subImage.swapchain) : -1, q->subImage.imageRect.extent.width, q->subImage.imageRect.extent.height,
                      (int)q->eyeVisibility);
             strcat(buf, t);
-            if (want) {
+            if (wantEyes) {
                 snprintf(nm, sizeof(nm), "quad%u", i);
                 shot(frame, c, &q->subImage, nm);
             }
@@ -1543,6 +1549,10 @@ static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
         }
     }
     if (want && getenv("MOCK_XR_SHOT_VIEW")) compositeView(frame, ei);
+    gShotCarry = wantEyes && !nproj;
+    if (req[0] && !nproj) gShotReqWait = 0;  // (a frame without a projection layer, a dark one: the next frame's then)
+    // (MOCK_XR_SHIFT) every ended frame, with or without a projection layer ("disp" only comes with one): its layers
+    if (gShift) fprintf(gShift, "end frame=%d t=%.4f proj=%d quads=%d\n", frame, (double)(ei->displayTime - gT0) / 1e9, nproj, nquad);
     double margin = (double)(gBeginRec.predicted - end) / 1e6;
     double deadline = gDeadlineMs >= 0 ? gDeadlineMs : (double)gPeriod / 2e6;
     int late = margin < deadline;

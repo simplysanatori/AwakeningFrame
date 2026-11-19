@@ -251,10 +251,22 @@ bool xr_eye_used(int eye) { return g_xr.in_set && eye >= 0 && eye < 2 && g_xr.bu
 // compositor's reprojection has least to correct); until it is measured, or LARECOMP_XR_PREDICT=vsync: the latest
 // vsync's display time (two refreshes after it). *ref: that vsync's time (the grid line the re-shown refreshes' lead
 // counts from).
+// (LARECOMP_XR_BFI) a display time on the grid, moved one refresh later when it is not on the lit refreshes' phase (a
+// whole number of pairs of periods from g_xr.bfi_phase; none yet: as it is)
+static XrTime bfi_phase_up(XrTime p, int64_t gp) {
+    int64_t ph = atomic_load(&g_xr.bfi_phase), d = p - ph;
+    if (!ph) return p;
+    int64_t k = d >= 0 ? (d + gp / 2) / gp : -((-d + gp / 2) / gp);
+    return k & 1 ? p + gp : p;
+}
+
 static XrTime predict_time(XrTime *ref) {
     int64_t t = atomic_load(&g_xr.target_time), lat = atomic_load(&g_xr.lat_ns);
     *ref = t;
-    if (!t || !g_xr.predict || !lat) return t;
+    if (!t || !g_xr.predict || !lat) {
+        // (LARECOMP_XR_BFI: a vsync's time, on the lit refreshes' phase)
+        return t && xr_bfi_armed() ? bfi_phase_up(t, xr_bfi_period()) : t;
+    }
     int64_t now = (int64_t)plat_now_ns() + atomic_load(&g_xr.xr_minus_plat);
     int64_t period = g_xr.display_hz > 0 ? (int64_t)(1e9f / g_xr.display_hz) : 11111111;
     int64_t p = now + lat;
@@ -267,17 +279,23 @@ static XrTime predict_time(XrTime *ref) {
     // theirs (xr_release_completed). Not the measured latency rounded: a set is shown at one of two refreshes, by
     // whether its GPU work finishes just before one of them, and the latency's mean lies between the two. A set finished
     // before its refresh waits for it there.
+    // (LARECOMP_XR_BFI, armed) on the grid too, and on the lit refreshes' phase: the set is lit on the refresh its poses
+    // were located for, every second one; a refresh that is not on it moves the prediction one later (bfi_phase_up)
     int64_t g = atomic_load(&g_xr.grid_t), gp = atomic_load(&g_xr.grid_period);
-    if (g && gp > 0 && xr_grid_mode()) {
+    bool bfi = xr_bfi_armed();
+    if (bfi) gp = xr_bfi_period();
+    if (g && gp > 0 && (xr_grid_mode() || bfi)) {
         int lead = atomic_load(&g_xr.lead);
         if (lead != XR_LEAD_NONE) {
             p = t + lead * gp;
-            while (p < now + gp / 2) p += gp;
+            if (bfi) p = bfi_phase_up(p, gp);
+            while (p < now + gp / 2) p += bfi ? 2 * gp : gp;
             return p;
         }
         int64_t d = p - g;
         p = g + (d >= 0 ? (d + gp / 2) / gp : -((-d + gp / 2) / gp)) * gp;
         if (p < now) p += gp;
+        if (bfi) p = bfi_phase_up(p, gp);
     }
     return p;
 }

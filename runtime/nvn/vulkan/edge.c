@@ -958,6 +958,7 @@ bool edge_eye(VkCommandBuffer cb, int eye, VkImageView target, VkFormat fmt, uin
         u.dk[0] = 1, u.dk[1] = FADE_CUT_BAND, u.dk[2] = FADE_CUT_MARGIN;
     }
     screen_filter_params(u.pf);
+    u.pf[2] = stereo_eye_gain();
     // (foveated) a pixel of the foveated passes from the output position: q * fz.xy; a block centre there read at * fz.zw
     u.fz[0] = in->color_px[0], u.fz[1] = in->color_px[1], u.fz[2] = in->color_crop[0] / u.fz[0], u.fz[3] = in->color_crop[1] / u.fz[1];
     if (noted[eye].vrs && !(cfg.smooth_off)) {  // (the foveated passes' shading: edge.c colour())
