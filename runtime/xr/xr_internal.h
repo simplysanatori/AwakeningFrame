@@ -224,7 +224,7 @@ void xr_release_completed(XrTime pdt);  // (XR thread) the pending set, once its
 bool xr_layer_matches_render(const XrSet *s);
 // xr_vk.c: one xrLocateViews for both eyes at display time t in `space` (false: no valid pose)
 bool xr_locate_in(XrTime t, XrSpace space, XrView views[2]);
-// xr_loop.c: Motion Clarity armed (LARECOMP_XR_BFI on, at a display rate that shows a 60 FPS game frame on two
+// xr_loop.c: Black Frame Insertion armed (LARECOMP_XR_BFI on, at a display rate that shows a 60 FPS game frame on two
 // refreshes): the sets' poses predicted on the display's grid, on the lit refreshes' phase, and no redraws
 bool xr_bfi_armed(void);
 // (LARECOMP_XR_BFI) the display's period from its filtered rate: SteamVR now and then reports one period of two or three

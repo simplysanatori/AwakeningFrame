@@ -407,25 +407,26 @@ is under way. With the 30 FPS hold at 120 Hz (four refreshes) `2` makes the in-b
 While logging, the ring and view culls of depth-only passes stay on (`ring_early`): a skipped draw's key is logged, so
 a replay's place in the log follows the frame's draws whichever of them its own views skip.
 
-With Motion Clarity (below) on as well: a refresh with an in-between drawn for it is lit (xr_loop.c `end_frame`,
-`inbetween_for`): what Motion Clarity leaves dark is an image shown again, and an in-between is a new one. So where they
-are made they win, every refresh shows an image of its own and none is dark (`[xr] motion clarity: in-between frames
-made ...`, its 5 s line counts the refreshes lit by an in-between; the VR tab's row "In-between Frames fill the black
-refreshes here."), a refresh whose in-between is missing is dark rather than a repeat, and where they step aside
-Motion Clarity flashes as set. Nor is a refresh lit with the image lit on the one before (`image_for`; the 5 s line's
-"dark (n of them the image lit before)"): a set late for its flash, its in-between lit on the refresh after its own,
-would have that in-between again. The sets' prediction, grid line and hold are Motion Clarity's (its lit phase): the
-set's own image is lit on its refresh and the in-between on the next. With `1` the prediction's lead also counts each
-in-between's (xr_loop.c `lead_note`): its views are located as long after the set's as its refresh is after the set's
-first, so it needs the set's lead; from the sets' alone (Motion Clarity takes the waits for a held set off theirs) the
-lead came down a refresh where the frame is light and no in-between was finished for its refresh.
+With Black Frame Insertion (below) on as well: a refresh with an in-between drawn for it is lit (xr_loop.c `end_frame`,
+`inbetween_for`): what Black Frame Insertion leaves dark is an image shown again, and an in-between is a new one. So
+where they are made they win, every refresh shows an image of its own and none is dark (`[xr] black frame insertion:
+in-between frames made ...`, its 5 s line counts the refreshes lit by an in-between; the VR tab's row "In-between Frames
+fill the black refreshes here."), a refresh whose in-between is missing is dark rather than a repeat, and where they
+step aside Black Frame Insertion flashes as set. Nor is a refresh lit with the image lit on the one before (`image_for`;
+the 5 s line's "dark (n of them the image lit before)"): a set late for its flash, its in-between lit on the refresh
+after its own, would have that in-between again. The sets' prediction, grid line and hold are Black Frame Insertion's
+(its lit phase): the set's own image is lit on its refresh and the in-between on the next. With `1` the prediction's
+lead also counts each in-between's (xr_loop.c `lead_note`): its views are located as long after the set's as its refresh
+is after the set's first, so it needs the set's lead; from the sets' alone (Black Frame Insertion takes the waits for a
+held set off theirs) the lead came down a refresh where the frame is light and no in-between was finished for its
+refresh.
 
-## Motion Clarity (`LARECOMP_XR_BFI`, off by default)
+## Black Frame Insertion (`LARECOMP_XR_BFI`, off by default)
 
-Black frame insertion. At 120 Hz with the game at 60 FPS each set of eye images is shown on one refresh and the other
-refresh is black: the frame is ended without a projection layer. The eyes see each image once, as a 60 Hz flash, so a
-turn of the head cannot show the same image at two places (the second refresh's double image, "Re-shown refreshes"
-above). The images get half the light. The VR tab's Motion Clarity row (Picture), `LARECOMP_XR_BFI=0|1`; live.
+At 120 Hz with the game at 60 FPS each set of eye images is shown on one refresh and the other refresh is black: the
+frame is ended without a projection layer. The eyes see each image once, as a 60 Hz flash, so a turn of the head cannot
+show the same image at two places (the second refresh's double image, "Re-shown refreshes" above). The images get half
+the light. The VR tab's Black Frame Insertion row (Picture), `LARECOMP_XR_BFI=0|1`; live.
 
 - **Which refresh is lit** (`xr_loop.c` `bfi_step`). A set is lit once, on the refresh its poses were located for. While it
   is armed (below) the prediction is on the display's grid as in Reprojection's `rot` (`predict_time`: the latest vsync's
@@ -457,9 +458,9 @@ above). The images get half the light. The VR tab's Motion Clarity row (Picture)
   mock about 20 refreshes at 90 Hz still flash, unevenly). Armed, it flashes only while the game gives 60: the pacer's 30 FPS hold and the FPS
   target's 30 (`pace_is_slow`, `pace_target_30`, noted with each set) show every refresh too (a 30 Hz flash is no use),
   and so do sets missing on 6 of the last 16 lit refreshes (a watchdog for a 30 FPS game the pacer does not report),
-  until no more than one of the last 16 was. Each change is logged once (`[xr] motion clarity: ...`) and the VR tab's
-  row says "Waiting ...". Where in-between frames are made (`LARECOMP_XR_INBETWEEN`, "In-between frames" above) the
-  refreshes with one are lit too.
+  until no more than one of the last 16 was. Each change is logged once (`[xr] black frame insertion: ...`) and the VR
+  tab's row says "Waiting ...". Where in-between frames are made (`LARECOMP_XR_INBETWEEN`, "In-between frames" above)
+  the refreshes with one are lit too.
 - **The other layers.** The HUD / menu panel and the controller laser are quad layers and stay on every refresh: the
   compositor places them for each refresh's own head pose, so they do not double, and their text keeps its brightness.
   Surroundings, the Table Edge's fade and the blink are in the eye images and flash with them. Table Edge Passthrough:
@@ -468,8 +469,8 @@ above). The images get half the light. The VR tab's Motion Clarity row (Picture)
   see-through. `LARECOMP_XR_BFI_ROOM=0` (a test) makes the dark refreshes opaque: black, the room flashing with the
   table. Only the headset can say which looks better (the mock offers no `ALPHA_BLEND`).
 - **Reprojection.** While it is armed `xr_reproj_mode` is off: the refreshes a redraw would be for show nothing, so none
-  is made and its swapchains are never created (the VR tab's Reprojection row says "Off while Motion Clarity is on").
-  At 90 Hz, where Motion Clarity is not armed, Reprojection works as set.
+  is made and its swapchains are never created (the VR tab's Reprojection row says "Off while Black Frame Insertion is
+  on"). At 90 Hz, where Black Frame Insertion is not armed, Reprojection works as set.
 - **Brightness.** `LARECOMP_XR_BFI_GAIN=<g>` (off; 1 to 2) lifts the eye images while it flashes, in the screen filter
   step of the eye present and the edge pass (`screen_filter.h`, pf.z): each pixel times g / (1 + (g - 1) m), m its
   brightest channel (sRGB-encoded): g at black, falling to 1 at m = 1, the same factor for the three channels, so
@@ -478,10 +479,10 @@ above). The images get half the light. The VR tab's Motion Clarity row (Picture)
 - **Cost.** The dark refresh has no projection layer: the compositor's work for it is the quads alone. The game's own
   GPU work is the same; the early sets' wait costs `xr_set_begin` waits, as in Reprojection's modes.
 
-The `[xr] motion clarity (...)` line (every 5 s while it is on) counts the refreshes lit and dark; the sets lit on the
-refresh their poses were located for, later, and never (replaced before their refresh); the lit refreshes without a new
-set, left dark or lit with the set before (and those of them in a stall); the gaps between flashes (1 to 5+ refreshes)
-and the phase moves.
+The `[xr] black frame insertion (...)` line (every 5 s while it is on) counts the refreshes lit and dark; the sets lit
+on the refresh their poses were located for, later, and never (replaced before their refresh); the lit refreshes without
+a new set, left dark or lit with the set before (and those of them in a stall); the gaps between flashes (1 to 5+
+refreshes) and the phase moves.
 
 ## Switches and tests
 
@@ -510,7 +511,7 @@ and the phase moves.
 | `LARECOMP_XR_INBETWEEN_RESERVE_MS=<ms>` | the compositor's GPU time a refresh in the fit (1.5) |
 | `LARECOMP_XR_INBETWEEN_TEST_MS=<ms>[,<from>,<to>]` | a test: ms added to the game frame's and each in-between's measured GPU time (from present `from` to `to`): stepping aside and back |
 | `LARECOMP_XR_INBETWEEN_LOG=1` | an `[inbetween]` line every 5 s: sets, in-betweens made, why none, late ones, times, the fit, L |
-| `LARECOMP_XR_BFI=0\|1` | Motion Clarity: each set on one refresh, black on the other, at 120 Hz with the game at 60 (off; above; the VR tab's Motion Clarity row) |
+| `LARECOMP_XR_BFI=0\|1` | Black Frame Insertion: each set on one refresh, black on the other, at 120 Hz with the game at 60 (off; above; the VR tab's Black Frame Insertion row) |
 | `LARECOMP_XR_BFI_LATE=relight`, `LARECOMP_XR_BFI_ROOM=0`, `LARECOMP_XR_BFI_GAIN=<g>`, `LARECOMP_XR_BFI_PHASE_DOWN=<sets>` | tests: a late set's missed flash lit with the set before; Passthrough's dark refreshes opaque; the eyes' brightness lift; the sets a lead stays below the phase before it moves (off; off; off; 32, 0: never; above) |
 | `LARECOMP_GPU_OVERLAP=0\|1` | the CPU / GPU overlap (VR default on, flat off on Turnip; docs/af/PASSES.md) |
 | `LARECOMP_VR_FOVEATION=off\|low\|medium\|high` | eye-tracked foveation of the eye passes (above) |

@@ -133,11 +133,12 @@ int xr_set_views(const uint64_t id[2], const XrEyeView rendered[2]);
 //           for the head pose of each (rotation; and position from the scene depth; and the table's follow motion),
 //           each in a submission of its own after the set's
 enum { XR_REPROJ_OFF, XR_REPROJ_FRESH, XR_REPROJ_ROT, XR_REPROJ_POS, XR_REPROJ_FOLLOW };
-int xr_reproj_mode(void);  // (XR_REPROJ_OFF while Motion Clarity is armed: those refreshes show nothing)
+int xr_reproj_mode(void);  // (XR_REPROJ_OFF while Black Frame Insertion is armed: those refreshes show nothing)
 void xr_set_reproj_mode(int mode);  // (the VR tab; any thread: the next set)
-// ---- Motion Clarity (LARECOMP_XR_BFI; docs/af/STEREO.md "Motion Clarity"): at 120 Hz with the game at 60 FPS each set
-// is shown on one refresh, the one its poses were located for, and the projection layer is left out of the other (black;
-// the HUD and the laser stay). Off by default; elsewhere (90 Hz, the 30 FPS hold, other rates) it waits, as off.
+// ---- Black Frame Insertion (LARECOMP_XR_BFI; docs/af/STEREO.md "Black Frame Insertion"): at 120 Hz with the game at
+// 60 FPS each set is shown on one refresh, the one its poses were located for, and the projection layer is left out of
+// the other (black; the HUD and the laser stay). Off by default; elsewhere (90 Hz, the 30 FPS hold, other rates) it
+// waits, as off.
 void xr_set_bfi(int on);  // (the VR tab; any thread: the next refresh)
 // 0 off, 1 flashing, 2 waiting for 120 Hz with the game at 60 (another rate, the 30 FPS lock), 3 waiting while the game
 // runs at 30 (the pacer's hold, or sets missing on most lit refreshes), 4 flashing where in-between frames are made

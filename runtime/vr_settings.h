@@ -48,7 +48,7 @@ typedef struct {
     int upscale;       // VRS_UP_*: the eyes' upscale when dynamic resolution renders them smaller
     int reproj;        // VRS_RS_*: the refreshes between game frames drawn again for the head's pose
     bool inbetween;    // LARECOMP_XR_INBETWEEN: those refreshes from the game frame's lists run again (inbetween.c)
-    bool bfi;          // Motion Clarity: each game frame on one refresh, black on the other (LARECOMP_XR_BFI)
+    bool bfi;          // Black Frame Insertion: each game frame on one refresh, black on the other (LARECOMP_XR_BFI)
 } VrSettings;
 
 #define VR_DEFAULTS {.refresh = VRS_REFRESH_120, .layout = VRS_LAYOUT_SWITCH, .turn = VRS_TURN_SMOOTH, .follow = VRS_FOLLOW_SMOOTH, \
@@ -92,7 +92,7 @@ void vr_settings_recentre(void);
 // (test hook, once per game frame: hle/warp.c) LARECOMP_VR_SET_AT=<frame>:<key>=<value>[,<frame>:<key>=<value>...]: at
 // that game frame, the change as the VR tab makes it (g_settings.vr, the ini saved, vr_settings_changed). Keys: the ini's
 // without vr_ (edge_style, surroundings, foveation, dynamic_resolution, follow, layout, turn, panel_distance, panel_width, refresh, fps,
-// antialias, upscaler, reprojection, inbetween_frames, motion_clarity)
+// antialias, upscaler, reprojection, inbetween_frames, black_frame_insertion)
 // and edge, dynres, label (Buttons Match Labels, 0 / 1); values as in the ini. Frames in increasing order.
 void vr_settings_test_tick(uint64_t frame);
 

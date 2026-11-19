@@ -15,7 +15,7 @@ extern "C" {
 #include "../vr_settings.h"
 bool xr_wanted(void) __attribute__((weak));  // (VR builds only)
 bool xr_input_touch(void) __attribute__((weak));  // (VR builds only: Touch controllers in use)
-int xr_bfi_state(void) __attribute__((weak));  // (VR builds only: Motion Clarity off, flashing, waiting for 120 Hz, waiting at 30 FPS)
+int xr_bfi_state(void) __attribute__((weak));  // (VR builds only: Black Frame Insertion off, flashing, waiting for 120 Hz, waiting at 30 FPS)
 }
 
 extern "C" bool vr_tab_visible(void) {
@@ -127,13 +127,15 @@ extern "C" void vr_tab_draw(float scale) {
                    desc(VRO_UPSCALE, "How the picture is scaled up when Dynamic Resolution renders it smaller. AMD FSR 1 "
                                      "sharpens edges as it scales and costs GPU time, Bilinear is plain and soft.")))
         changed(VRO_UPSCALE);
-    // (Motion Clarity, armed at 120 Hz, shows nothing on the refreshes Reprojection would redraw: xr_reproj_mode)
+    // (Black Frame Insertion, armed at 120 Hz, shows nothing on the refreshes Reprojection would redraw:
+    // xr_reproj_mode)
     int bfi = xr_bfi_state ? xr_bfi_state() : 0;
     char note[512];
     snprintf(note, sizeof note, "%s%s",
              "Redraws the picture for where your head is on the refreshes between game frames, so the world stays still when "
              "you move your head. Full also follows your head's position, Full + Follow also the table following Link. Costs "
-             "GPU time.", v.reproj != VRS_RS_OFF && (bfi == 1 || bfi == 3) ? " Off while Motion Clarity is on." : "");
+             "GPU time.",
+             v.reproj != VRS_RS_OFF && (bfi == 1 || bfi == 3) ? " Off while Black Frame Insertion is on." : "");
     grey(VRO_REPROJ);
     if (opt_choice("Reprojection", &v.reproj, g_vr_rs_names, VRS_N_RS, VRS_RS_OFF, desc(VRO_REPROJ, note)))
         changed(VRO_REPROJ);
@@ -141,14 +143,15 @@ extern "C" void vr_tab_draw(float scale) {
     if (opt_toggle("In-between Frames", &v.inbetween, false,
                    desc(VRO_INBETWEEN, "Draws the world again for where your head is on the refreshes between game frames, "
                                        "so it stays still and sharp when you move your head. Used only where the GPU has time "
-                                       "for it; elsewhere Reprojection or Motion Clarity acts. Costs GPU time.")))
+                                       "for it; elsewhere Reprojection or Black Frame Insertion acts. Costs GPU "
+                                       "time.")))
         changed(VRO_INBETWEEN);
     snprintf(note, sizeof note, "%s%s",
              "Shows each game frame for one refresh and black for the next, so moving your head doesn't double the picture. "
              "The picture is darker.", bfi == 2 ? " Waiting for 120 Hz at 60 FPS." : bfi == 3 ? " Waiting while the game runs at 30 FPS."
              : bfi == 4 ? " In-between Frames fill the black refreshes here." : "");
     grey(VRO_BFI);
-    if (opt_toggle("Motion Clarity", &v.bfi, false, desc(VRO_BFI, note)))
+    if (opt_toggle("Black Frame Insertion", &v.bfi, false, desc(VRO_BFI, note)))
         changed(VRO_BFI);
 
     opt_section("Performance");

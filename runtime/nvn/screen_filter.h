@@ -12,9 +12,9 @@ enum { SCREEN_FILTER_OFF, SCREEN_FILTER_GB, SCREEN_FILTER_GBC, SCREEN_FILTER_GRA
 
 // pf for the present shader (x: the mode)
 // pf.y: the VR rig's blink (runtime/xr/xr_rig.c: 0 none .. 1 black; there only in Linux builds with the VR mode)
-// pf.z: the VR eyes' brightness lift g (exec.c / edge.c set it there only, from stereo_eye_gain: Motion Clarity's
-// LARECOMP_XR_BFI_GAIN; 0 off): x g at black, falling to x 1 at the brightest channel's 1, the same for all three
-// channels, so nothing clips and the hue stays
+// pf.z: the VR eyes' brightness lift g (exec.c / edge.c set it there only, from stereo_eye_gain: Black Frame
+// Insertion's LARECOMP_XR_BFI_GAIN; 0 off): x g at black, falling to x 1 at the brightest channel's 1, the same for all
+// three channels, so nothing clips and the hue stays
 #if defined(__linux__)
 extern float xr_rig_fade(void) __attribute__((weak));
 #endif

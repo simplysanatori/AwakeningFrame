@@ -57,9 +57,9 @@ carried render poses and the table moving only on new game frames are unchanged.
 | Table Edge | Off, Fade, Passthrough (default Off) | `vr_edge_style = black \| fade \| passthrough` | `LARECOMP_VR_EDGE` (`black`, `fade`, `passthrough`; the variable still takes `fog` and `gradient`) | live (`edge_set_mode`, edge.c: the next eye is drawn in the new mode; each XR set carries its mode, so the projection layer's alpha flag and the blend mode follow the images; Passthrough needs the runtime's `ALPHA_BLEND`, else the void shows black) |
 | Anti-aliasing | Off, FXAA, SMAA (default Off) | `vr_antialias = off \| fxaa \| smaa` | `LARECOMP_VR_AA` | live (`vk_vr_eye_post_set`, exec.c: the next eye; STEREO.md "Anti-aliasing of the eyes") |
 | Upscaler | Bilinear, AMD FSR 1 (default Bilinear) | `vr_upscaler = off \| fsr` | `LARECOMP_VR_UPSCALE` (`fsr`) | live (`vk_vr_eye_post_set`); FSR 1 runs only while dynamic resolution renders the eyes below the XR image's size |
-| Reprojection | Off, Rotation, Full, Full + Follow (default Off) | `vr_reprojection = off \| rot \| pos \| follow` | `LARECOMP_XR_REPROJ` (`rot`, `pos`, `follow`; also the test `fresh`) | live (`xr_set_reproj_mode`, xr_loop.c: the next set; STEREO.md "Re-shown refreshes"); off while Motion Clarity is armed, and the row says so |
+| Reprojection | Off, Rotation, Full, Full + Follow (default Off) | `vr_reprojection = off \| rot \| pos \| follow` | `LARECOMP_XR_REPROJ` (`rot`, `pos`, `follow`; also the test `fresh`) | live (`xr_set_reproj_mode`, xr_loop.c: the next set; STEREO.md "Re-shown refreshes"); off while Black Frame Insertion is armed, and the row says so |
 | In-between Frames | Off, On (default Off) | `vr_inbetween_frames = 0 \| 1` | `LARECOMP_XR_INBETWEEN` (`0`, `1`) | live (`inbetween_set`, inbetween.c: from the next game frame; STEREO.md "In-between frames") |
-| Motion Clarity | Off, On (default Off) | `vr_motion_clarity = 0 \| 1` | `LARECOMP_XR_BFI` (`0`, `1`) | live (`xr_set_bfi`, xr_loop.c: the next refresh; STEREO.md "Motion Clarity"). Only at 120 Hz with the game at 60 FPS; elsewhere the row adds "Waiting for 120 Hz at 60 FPS." or "Waiting while the game runs at 30 FPS." (`xr_bfi_state`) and every refresh shows the picture; where In-between Frames are made, "In-between Frames fill the black refreshes here." (a refresh with its own picture is lit) |
+| Black Frame Insertion | Off, On (default Off) | `vr_black_frame_insertion = 0 \| 1` | `LARECOMP_XR_BFI` (`0`, `1`) | live (`xr_set_bfi`, xr_loop.c: the next refresh; STEREO.md "Black Frame Insertion"). Only at 120 Hz with the game at 60 FPS; elsewhere the row adds "Waiting for 120 Hz at 60 FPS." or "Waiting while the game runs at 30 FPS." (`xr_bfi_state`) and every refresh shows the picture; where In-between Frames are made, "In-between Frames fill the black refreshes here." (a refresh with its own picture is lit) |
 | Foveation | Off, Low, Medium, High (eye-tracked only; default High) | `vr_foveation = off \| low \| medium \| high` | `LARECOMP_VR_FOVEATION` (always set from the tab: the code's own default is medium) | live (`fov_set_level`; the level is in the shading-rate map's key, so the next pass redraws it). Off at start still enables the extension, so it can be turned on; only `LARECOMP_VR_FOVEATION=off` from the launch environment leaves it out |
 | Dynamic Resolution | Off, On (default On; floor 1152 px; 10 ms budget at 120 Hz) | `vr_dynamic_resolution = 1 \| 0` | `LARECOMP_VR_DYNRES` (always set from the tab: the code's own default is off) | live (`diet_set_dynres`) |
 | Panel Distance | 2.0 m, 0.8 to 4.0 m | `vr_panel_distance = <metres>` | `LARECOMP_XR_QUAD=<dist>,<width>` | live (`vrui_set_hud_quad`) |
@@ -116,7 +116,7 @@ Moonlight and Apollo: Title Case, no filler.
 | `LARECOMP_VR_EDGE=black` / `fade` / `passthrough` | Table Edge | Off, Fade, Passthrough | What fills the space past the world. Fade softens the world into darkness around Link, Passthrough shows your room. |
 | `LARECOMP_VR_FOVEATION=off` / `low` / `medium` / `high` | Foveation (default High) | Off, Low, Medium, High | Follows your eyes and draws what you aren't looking at in less detail. Higher levels save more GPU time. Without eye tracking it draws everything in full detail. |
 | `LARECOMP_VR_DYNRES` | Dynamic Resolution (default On) | Off, On | Lowers the resolution when the GPU can't keep up and raises it again when it can. |
-| `LARECOMP_XR_BFI` (new) | Motion Clarity (default Off) | Off, On | Shows each game frame for one refresh and black for the next, so moving your head doesn't double the picture. The picture is darker. |
+| `LARECOMP_XR_BFI` (new) | Black Frame Insertion (default Off) | Off, On | Shows each game frame for one refresh and black for the next, so moving your head doesn't double the picture. The picture is darker. |
 | `LARECOMP_XR_QUAD` (distance) | Panel Distance | 0.8 m to 4.0 m | How far away the HUD and menus float. |
 | `LARECOMP_XR_QUAD` (width) | Panel Width | 0.6 m to 4.0 m | How wide the HUD and menus are. |
 | (new) | tab: VR; sections Display, Controls, Table, Edge, Performance, Menu Panel | | |
@@ -135,8 +135,8 @@ out and skipped.
 
 `LARECOMP_VR_SET_AT=<frame>:<key>=<value>[,...]` makes a change at a game frame the way the tab does (the ini saved, the
 hook called; `vr_settings_test_tick`, called from hle/warp.c): keys `edge`, `foveation`, `dynres`, `follow`, `layout`,
-`turn`, `panel_distance`, `panel_width`, `refresh`, `fps`, `antialias`, `upscaler`, `reprojection`, `motion_clarity`, `label`,
-values as in the ini (`edge=fade`, `dynres=0`, `motion_clarity=1`).
+`turn`, `panel_distance`, `panel_width`, `refresh`, `fps`, `antialias`, `upscaler`, `reprojection`, `black_frame_insertion`, `label`,
+values as in the ini (`edge=fade`, `dynres=0`, `black_frame_insertion=1`).
 
 ```
 LARECOMP_SHOW_VR_TAB=1 LARECOMP_SETTINGS=/tmp/vr.ini LARECOMP_MENU_TAB=12 ...   # the tab, flat; the ini is the scratch one
