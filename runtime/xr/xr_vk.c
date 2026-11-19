@@ -450,8 +450,10 @@ int xr_reshow_times(int64_t times[4]) {
     if (k > XR_RESHOW_MAX + 1) k = XR_RESHOW_MAX + 1;
     if (k < 1) k = 1;
     // (xr_set_grid 2: every refresh an in-between, the set's own images only in their place when one is missing; its
-    // grid0 a refresh before its first, never shown, so that refresh k is due at grid0 + k periods as for the others)
-    s->own_hidden = atomic_load(&g_xr.grid) == 2 && k <= XR_RESHOW_MAX;
+    // grid0 a refresh before its first, never shown, so that refresh k is due at grid0 + k periods as for the others.
+    // LARECOMP_XR_BFI armed: the in-betweens of 1, the set's own lit on its refresh. Its lit phase, hold and lead are
+    // for the sets' own refreshes; with the own image hidden half the sets were lit a refresh late on the desktop)
+    s->own_hidden = atomic_load(&g_xr.grid) == 2 && k <= XR_RESHOW_MAX && !xr_bfi_armed();
     if (s->own_hidden) s->grid0 -= per, k++;
     for (int i = 0; i < k; i++) times[i] = s->grid0 + i * per;
     return k;

@@ -387,6 +387,12 @@ predicted less far ahead is a jump between them. So each refresh's image is pred
   (down 1 ms when the render thread came to over a tenth of them after their time: L is longer than the frame's latch
   to its present; else up 1 ms when an image was not finished in time, the XR thread's count; else down 0.1 ms); `LARECOMP_XR_INBETWEEN_LEAD_MS=<ms>` fixes it. One image more a frame than `1`.
 
+Executions of the eye passes per game frame: `1` two (the set and one in-between), `2` three (the set, never shown, and
+two). On is `1`: on the desktop at the house (xrmock, the owner's recorded head track, the double image measured from
+the pixels of consecutive refreshes, `tools/xrmock/reproj-report.py`) the double image is 0.74 deg rms off, 0.29 with
+`1` and 0.25 with `2`; on a steady 30 deg/s turn 0.25, 0.042 and 0.032. `2` takes off a further seventh for half as
+much again GPU and render-thread time, which the Steam Frame has nowhere (by estimate not even at the house at 1728).
+
 Where they are made: only where they fit. Every half second the game frame's GPU time, the in-betweens' (measured while
 made; else the game frame's times their ratio to it, averaged over the half seconds measured) and the compositor's (`LARECOMP_XR_INBETWEEN_RESERVE_MS`
 a refresh, 1.5) are checked against the frame's refreshes, and the render thread's time for the frame (from its views' latch to its
@@ -402,7 +408,8 @@ the frame its share of the refreshes less the compositor's. Stepped aside is the
 the sets are not on the grid, nothing is replayed, and Reprojection (`LARECOMP_XR_REPROJ`) acts as set; while they are
 made it does not run. A frame gets none when its log is not whole, the storage its draws read changed since, an object
 it used was freed, the game thread is two frames on, its render scale's allocation changed, or a Surroundings capture
-is under way. With the 30 FPS hold at 120 Hz (four refreshes) `2` makes the in-betweens of `1`.
+is under way. With the 30 FPS hold at 120 Hz (four refreshes), and while Black Frame Insertion is armed, `2` makes the
+in-betweens of `1`.
 
 While logging, the ring and view culls of depth-only passes stay on (`ring_early`): a skipped draw's key is logged, so
 a replay's place in the log follows the frame's draws whichever of them its own views skip.
