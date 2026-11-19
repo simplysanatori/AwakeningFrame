@@ -196,10 +196,11 @@ static int64_t periods(int64_t d, int64_t per) { return d >= 0 ? (d + per / 2) /
 
 // (LARECOMP_XR_REPROJ) a finished set's first possible refresh, `pdt`: its lead, whole periods from its latch's vsync
 // target, into the last XR_LEADS; the prediction's lead is their latest (predict_time)
-// (LARECOMP_XR_INBETWEEN 1) also each in-between's, own false: the refresh it was finished for less its place after the
-// set's first. Its views are located as long after the set's as its refresh is after the set's first, so it needs the
-// same lead as the set; with only the set's, a set finished early (a light frame, or Black Frame Insertion's lead less
-// the waits) brings the lead down a refresh and every in-between is finished after its refresh, none shown
+// (LARECOMP_XR_INBETWEEN 1, while made; not Reprojection's redraws) also each in-between's, own false: the refresh it
+// was finished for less its place after the set's first. Its views are located as long after the set's as its refresh
+// is after the set's first, so it needs the same lead as the set; with only the set's, a set finished early (a light
+// frame, or Black Frame Insertion's lead less the waits) brings the lead down a refresh and every in-between is
+// finished after its refresh, none shown
 static void lead_note(const XrSet *s, XrTime pdt, bool own) {
     int64_t per = atomic_load(&g_xr.grid_period);
     if (!s->vref || per <= 0) return;
@@ -223,7 +224,7 @@ static void lead_note(const XrSet *s, XrTime pdt, bool own) {
     // then each set is held a refresh longer than it needs and its present waits for the one before, and the move puts
     // one set's refresh right after a flash, so that set is lit a refresh late or not at all
     int64_t ph = atomic_load(&g_xr.bfi_phase), bp = xr_bfi_period();
-    if (!bfi) return;
+    if (!bfi || !own) return;  // (the phase follows the sets: an in-between's lead counts at the next set's)
     if (!ph) {
         atomic_store(&g_xr.bfi_phase, s->vref + lead * bp), g_xr.bfi_off = 0;
     } else if (!(periods(s->vref + lead * bp - ph, bp) & 1)) {
@@ -243,7 +244,7 @@ static void reshow_release(XrSet *s, uint64_t done, XrTime pdt, bool all) {
         if (s->rs_ok[k] && pdt && s->grid0 && s->period > 0 && !all) {  // (how early: refreshes before the one it is for)
             int64_t d = s->grid0 + (k + 1) * s->period - pdt, m = d >= 0 ? (d + s->period / 2) / s->period : -((-d + s->period / 2) / s->period);
             st.rs_ahead[m >= 2 ? 0 : m == 1 ? 1 : m == 0 ? 2 : 3]++;
-            if (!s->own_hidden) lead_note(s, pdt - (k + 1) * s->period, false);
+            if (atomic_load(&g_xr.grid) > 0 && !s->own_hidden) lead_note(s, pdt - (k + 1) * s->period, false);
         }
     }
 }
