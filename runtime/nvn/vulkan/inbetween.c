@@ -253,6 +253,15 @@ static void rule(uint64_t latch) {
             S.over = S.under = 0;
         }
     } else if (!area_no_fit(area)) {
+        // (wanted, never made in this area yet: one line per area, so a session where they never fit says so; the
+        // headset session of 2026-11-20 had none at all in the overworld and no line to tell)
+        static uint64_t waited_area;
+        if (!fits && waited_area != area) {
+            waited_area = area;
+            LOG("[inbetween] waiting: %s (game frame GPU %.2f ms, in-betweens %.2f ms, render thread %.2f + %.2f ms; %.2f ms for %d refreshes)\n",
+                need_gpu > budget ? "the GPU has no time for them here" : "the render thread has no time for them here",
+                gpu_f, nib * ib_gpu, cpu_f, ib_cpu, budget, refr);
+        }
         if (fits) {
             S.back_at = now;
             S.fell_prev = xr_ib_fell();

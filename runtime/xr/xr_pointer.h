@@ -15,3 +15,6 @@ bool xr_pointer_create(void);   // false: no layers (LARECOMP_XR_LASER=0, or the
 void xr_pointer_destroy(void);
 void xr_pointer_set(const XrPointerPose *p);       // (XR thread)
 uint32_t xr_pointer_layers(XrCompositionLayerQuad out[2]);  // (XR thread) 0..2 layers to show this refresh
+// Black Frame Insertion's dark refresh (xr_loop.c end_frame, LARECOMP_XR_BFI_DARK=black): a small opaque black image,
+// made once with the laser's, shown as the projection layer so every refresh has one. NULL: none (failed).
+const XrChain *xr_black_chain(void);

@@ -81,6 +81,9 @@ print('%s: %.1f s (%.3f to %.3f), period %.3f ms: %d refreshes ended (%d lost), 
       (path, ends[-1]['t'] - t0, t0, ends[-1]['t'], per * 1e3, len(ends), lost, len(lit), len(dark)))
 print('quad layers on lit refreshes %s; on dark refreshes %s' %
       (dict(sorted(quads_lit.items())), dict(sorted(quads_dark.items())) if dark else 'none'))
+blk = sum(1 for _, e in dark if int(e.get('black', 0)) > 0)
+print('dark refreshes with the black projection layer (LARECOMP_XR_BFI_DARK=black): %d of %d; lit refreshes with one too: %d' %
+      (blk, len(dark), sum(1 for _, e, _ in lit if int(e.get('black', 0)) > 0)))
 
 # sets: eye 0's image (swapchain, release)
 img = lambda d: (int(d['sc0']), int(d['rel0']))

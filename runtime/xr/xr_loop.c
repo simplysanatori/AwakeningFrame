@@ -42,6 +42,7 @@ static struct {  // (XR thread; the presenting thread's fields under g_xr.mu)
     // skipped), the set before lit again (the late test, and a second in a row: a stall); flashes 1, 2, 3, 4, 5+ refreshes
     // after the one before; the lit refreshes' phase moved (a lead grown by one)
     uint64_t bfi_lit, bfi_dark, bfi_ib, bfi_again, bfi_on, bfi_late, bfi_unlit, bfi_skip, bfi_relit, bfi_stall, bfi_gap[5], bfi_rephase;
+    uint64_t bfi_black;  // dark refreshes shown with the black projection layer (LARECOMP_XR_BFI_DARK=black)
 } st;
 
 // LARECOMP_XR_REPROJ=off|fresh|rot|pos|follow (xr.h; docs/af/STEREO.md "Re-shown refreshes"); the VR tab sets it live
@@ -454,6 +455,25 @@ static bool bfi_step(XrTime t, int64_t per, bool *first) {
     return false;
 }
 
+// LARECOMP_XR_BFI_DARK=black|none: what a dark refresh shows in the eyes' place. black (default): a projection layer
+// with the black image (xr_pointer.c xr_black_chain), so every refresh has one; none: no projection layer (as up to
+// 2026-11-20; the headset showed flashing and jumping with it, cause unproven). Read once.
+static bool bfi_dark_black(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("LARECOMP_XR_BFI_DARK");
+        v = !(e && !strcmp(e, "none"));
+        LOG("[xr] black frame insertion: dark refreshes %s (LARECOMP_XR_BFI_DARK)\n", v ? "with the black image" : "without a projection layer");
+    }
+    return v;
+}
+// LARECOMP_XR_BFI_ROOM=0 (a test): Passthrough's dark refreshes opaque, black, instead of showing the room
+static bool bfi_room(void) {
+    static int room = -1;
+    if (room < 0) room = !getenv("LARECOMP_XR_BFI_ROOM") || atoi(getenv("LARECOMP_XR_BFI_ROOM")) != 0;
+    return room;
+}
+
 static void end_frame(const XrFrameState *fs, bool new_set) {
     XrCompositionLayerProjectionView pv[2];
     XrCompositionLayerProjection proj = {.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION};
@@ -544,6 +564,22 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
             proj.viewCount = 2;
             proj.views = pv;
             layers[n++] = (const XrCompositionLayerBaseHeader *)&proj;
+        } else if (!lit && bfi_dark_black() && s->views_ok && !(s->alpha && bfi_room())) {
+            // (LARECOMP_XR_BFI_DARK=black, the default) a dark refresh still has its projection layer: the black image,
+            // opaque, with the set's views, so the layer list has the same shape on every refresh and the compositor
+            // has nothing of its own to show in the eyes' place. Passthrough's dark refresh (the room) keeps none.
+            const XrChain *bc = xr_black_chain();
+            if (bc) {
+                for (int i = 0; i < 2; i++)
+                    pv[i] = (XrCompositionLayerProjectionView){
+                        .type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW, .pose = s->views[i].pose, .fov = s->views[i].fov,
+                        .subImage = {bc->sc, {{0, 0}, {(int32_t)bc->w, (int32_t)bc->h}}, 0}};
+                proj.space = s->space;
+                proj.viewCount = 2;
+                proj.views = pv;
+                layers[n++] = (const XrCompositionLayerBaseHeader *)&proj;
+                st.bfi_black++;
+            }
         }
         // the HUD: a flat screen straight ahead at eye height, LARECOMP_XR_QUAD="distance,width" (2 m, 2.2 m)
         // (LARECOMP_XR_HUD=0, a test: no HUD / menu layer at all, to tell what is on it from what is in the eye images)
@@ -567,9 +603,7 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
     // (Table Edge Passthrough: a dark refresh keeps the alpha blend, so it shows the room with nothing over it; the table
     // is on half the refreshes and the room on all, so the room shows through the table. LARECOMP_XR_BFI_ROOM=0, a test:
     // dark refreshes opaque, black, the room flashing with the table)
-    static int room = -1;
-    if (room < 0) room = !getenv("LARECOMP_XR_BFI_ROOM") || atoi(getenv("LARECOMP_XR_BFI_ROOM")) != 0;
-    bool blend = g_xr.has_alpha_blend && g_xr.shown_any && g_xr.shown.alpha && (lit || room);
+    bool blend = g_xr.has_alpha_blend && g_xr.shown_any && g_xr.shown.alpha && (lit || bfi_room());
     XrFrameEndInfo ei = {.type = XR_TYPE_FRAME_END_INFO, .displayTime = fs->predictedDisplayTime,
                          .environmentBlendMode = blend ? XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND : XR_ENVIRONMENT_BLEND_MODE_OPAQUE, .layerCount = n, .layers = layers};
     uint64_t t0 = plat_now_ns();
@@ -615,12 +649,12 @@ static void log_stats(double secs) {
     if (bfi_wanted()) {
         static const char *const k_state[] = {"off", "flashing", "waits for 120 Hz at 60 fps", "waits: the game at 30",
                                               "in-between frames made"};
-        LOG("[xr] black frame insertion (%s): %llu refreshes lit (%llu of them by an in-between), %llu dark (%llu of them the image lit before); sets lit on the refresh their poses were located for "
+        LOG("[xr] black frame insertion (%s): %llu refreshes lit (%llu of them by an in-between), %llu dark (%llu of them the image lit before, %llu with the black image); sets lit on the refresh their poses were located for "
             "%llu, later %llu, never %llu; lit refreshes with no new set: %llu left dark (a flash skipped), %llu the set "
             "before again (%llu a stall); flashes 1 / 2 / 3 / 4 / 5+ refreshes after the one before: %llu / %llu / %llu / "
             "%llu / %llu; phase moved %llu (lead %d)\n",
             k_state[atomic_load(&g_bfi_state) % 5], (unsigned long long)st.bfi_lit, (unsigned long long)st.bfi_ib,
-            (unsigned long long)st.bfi_dark, (unsigned long long)st.bfi_again,
+            (unsigned long long)st.bfi_dark, (unsigned long long)st.bfi_again, (unsigned long long)st.bfi_black,
             (unsigned long long)st.bfi_on, (unsigned long long)st.bfi_late, (unsigned long long)st.bfi_unlit,
             (unsigned long long)st.bfi_skip, (unsigned long long)(st.bfi_relit + st.bfi_stall), (unsigned long long)st.bfi_stall,
             (unsigned long long)st.bfi_gap[0], (unsigned long long)st.bfi_gap[1], (unsigned long long)st.bfi_gap[2],

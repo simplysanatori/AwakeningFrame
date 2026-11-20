@@ -1481,11 +1481,17 @@ static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
     if (ei->environmentBlendMode != XR_ENVIRONMENT_BLEND_MODE_OPAQUE) xrmock_error("xrEndFrame blend mode %d not offered", (int)ei->environmentBlendMode);
     char buf[1024] = "";
     XrResult result = XR_SUCCESS;
-    int nproj = 0, nquad = 0;
+    int nproj = 0, nquad = 0, nblack = 0;
     for (uint32_t i = 0; i < ei->layerCount; i++) {
         const XrCompositionLayerBaseHeader* l = ei->layers[i];
         char t[256], nm[64];
-        nproj += l->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION, nquad += l->type == XR_TYPE_COMPOSITION_LAYER_QUAD;
+        // (a projection layer whose views are 16 px or less is Black Frame Insertion's black image, LARECOMP_XR_BFI_DARK:
+        // counted as black, not as a picture, and left out of the shift / flicker probes and the shots)
+        int black = l->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION && ((const XrCompositionLayerProjection*)l)->viewCount &&
+                     ((const XrCompositionLayerProjection*)l)->views[0].subImage.imageRect.extent.width <= 16;
+        nproj += l->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION && !black, nquad += l->type == XR_TYPE_COMPOSITION_LAYER_QUAD;
+        nblack += black;
+        if (black) { strcat(buf, " black"); continue; }
         if (!spaceOf(l->space)) {
             xrmock_error("layer %u: space handle invalid", i);
             result = XR_ERROR_HANDLE_INVALID;
@@ -1552,7 +1558,7 @@ static XrResult XRAPI_CALL mEndFrame(XrSession s, const XrFrameEndInfo* ei) {
     gShotCarry = wantEyes && !nproj;
     if (req[0] && !nproj) gShotReqWait = 0;  // (a frame without a projection layer, a dark one: the next frame's then)
     // (MOCK_XR_SHIFT) every ended frame, with or without a projection layer ("disp" only comes with one): its layers
-    if (gShift) fprintf(gShift, "end frame=%d t=%.4f proj=%d quads=%d\n", frame, (double)(ei->displayTime - gT0) / 1e9, nproj, nquad);
+    if (gShift) fprintf(gShift, "end frame=%d t=%.4f proj=%d quads=%d black=%d\n", frame, (double)(ei->displayTime - gT0) / 1e9, nproj, nquad, nblack);
     double margin = (double)(gBeginRec.predicted - end) / 1e6;
     double deadline = gDeadlineMs >= 0 ? gDeadlineMs : (double)gPeriod / 2e6;
     int late = margin < deadline;

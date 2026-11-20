@@ -150,7 +150,27 @@ out:
     return ok;
 }
 
+// Black Frame Insertion's dark refresh: an opaque black image (alpha 1), BLACK_S square, one swapchain for both eyes.
+// With the SteamVR back end the projection layer is the scene's submit; a refresh without one leaves the compositor to
+// show whatever it has behind the app (Azahar for Frame met that with quads: its fix keeps the layer list's shape).
+// Made for every session: one tiny swapchain, whether or not the setting is ever turned on.
+#define BLACK_S 16
+static XrChain g_black;
+static bool g_black_ok;
+static void black_create(void) {
+    if (!xr_chain_create(&g_black, "black", BLACK_S, BLACK_S)) {
+        LOG("[xr] black frame insertion: the black image could not be made (dark refreshes have no projection layer)\n");
+        return;
+    }
+    uint8_t px[BLACK_S * BLACK_S * 4];
+    for (int i = 0; i < BLACK_S * BLACK_S; i++) px[4 * i] = px[4 * i + 1] = px[4 * i + 2] = 0, px[4 * i + 3] = 255;
+    g_black_ok = upload(&g_black, px);
+    if (!g_black_ok) LOG("[xr] black frame insertion: the black image could not be filled (dark refreshes have no projection layer)\n");
+}
+const XrChain *xr_black_chain(void) { return g_black_ok ? &g_black : NULL; }
+
 bool xr_pointer_create(void) {
+    black_create();
     if (getenv("LARECOMP_XR_LASER") && !atoi(getenv("LARECOMP_XR_LASER"))) {
         LOG("[xr] menu laser: off (LARECOMP_XR_LASER=0; the controller still clicks)\n");
         return false;
@@ -172,8 +192,9 @@ fail:
 }
 
 void xr_pointer_destroy(void) {
-    XrChain *cs[] = {&P.beam, &P.dot};
-    for (int k = 0; k < 2; k++) {
+    XrChain *cs[] = {&P.beam, &P.dot, &g_black};
+    g_black_ok = false;
+    for (int k = 0; k < 3; k++) {
         XrChain *c = cs[k];
         for (uint32_t i = 0; i < c->count; i++) if (c->view[i]) vkDestroyImageView(g_xr.vdev, c->view[i], NULL);
         if (c->sc) { vk_queue_lock(); XR_RT(p_xrDestroySwapchain(c->sc)); vk_queue_unlock(); }
