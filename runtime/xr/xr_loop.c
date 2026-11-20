@@ -558,6 +558,23 @@ static void end_frame(const XrFrameState *fs, bool new_set) {
                     .type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW, .pose = views[i].pose, .fov = views[i].fov,
                     .subImage = {c->sc, {{0, 0}, {(int32_t)w, (int32_t)h}}, lay ? (uint32_t)i : 0}};
             }
+            // LARECOMP_XR_TEST_LAYER_YAW=<deg> (a headset test, off): every other second the layer's views say the eyes
+            // were turned <deg> about the vertical, with the same images. A compositor that reprojects each refresh by
+            // the layer's pose moves the picture sideways once a second; one that shows the layer as it is shows no
+            // change. That tells whether SteamVR corrects a picture for the head's turn after the app (2026-11-20).
+            static float test_yaw = -1;
+            if (test_yaw < 0) {
+                const char *e = getenv("LARECOMP_XR_TEST_LAYER_YAW");
+                test_yaw = e ? fabsf((float)atof(e)) : 0;
+                if (test_yaw > 0) LOG("[xr] test: the layer's views turned %.1f deg every other second (LARECOMP_XR_TEST_LAYER_YAW)\n", test_yaw);
+            }
+            if (test_yaw > 0 && (fs->predictedDisplayTime / 1000000000) % 2) {
+                float h = test_yaw * 3.14159265f / 360, sy = sinf(h), cy = cosf(h);
+                for (int i = 0; i < 2; i++) {  // (q' = yaw * q: turned about the space's vertical, the eye where it was)
+                    XrQuaternionf q = pv[i].pose.orientation;
+                    pv[i].pose.orientation = (XrQuaternionf){cy * q.x + sy * q.z, cy * q.y + sy * q.w, cy * q.z - sy * q.x, cy * q.w - sy * q.y};
+                }
+            }
             proj.space = s->space;
             // (LARECOMP_VR_EDGE=passthrough: the eye images carry premultiplied alpha, 0 in the void: runtime/nvn/vulkan/edge.c)
             if (s->alpha) proj.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
