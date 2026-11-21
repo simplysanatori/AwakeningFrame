@@ -93,7 +93,7 @@ static struct {
     int mode;  // what on is: 1, or 2 (LARECOMP_XR_INBETWEEN=2)
     double reserve_ms, test_ms, lead_ms;
     long test_from, test_to;
-    bool log;
+    bool log, force;  // (force: LARECOMP_XR_INBETWEEN_TEST_FORCE=1, a desktop test: made wherever they are wanted, fit or not)
 } cfg;
 static _Atomic int g_want = -1;  // 0 off, else the mode (-1: the environment's, read once)
 
@@ -113,6 +113,7 @@ static void cfg_init(void) {
     e = getenv("LARECOMP_XR_INBETWEEN_LEAD_MS");
     cfg.lead_ms = e ? atof(e) : 0;
     cfg.log = getenv("LARECOMP_XR_INBETWEEN_LOG") != NULL;
+    cfg.force = getenv("LARECOMP_XR_INBETWEEN_TEST_FORCE") && atoi(getenv("LARECOMP_XR_INBETWEEN_TEST_FORCE")) > 0;
     if (atomic_load(&g_want) > 0 || cfg.test_ms)
         LOG("[inbetween] %s; compositor's GPU %.1f ms a refresh; test %.1f ms\n",
             atomic_load(&g_want) == 2 ? "every refresh" : atomic_load(&g_want) ? "after the set's first refresh" : "off now", cfg.reserve_ms, cfg.test_ms);
@@ -237,7 +238,7 @@ static void rule(uint64_t latch) {
         S.lead_ms = S.lead_ms < 8 ? 8 : S.lead_ms > 60 ? 60 : S.lead_ms;
         S.fell_prev = fell;
     }
-    bool want = atomic_load(&g_want) > 0, fits = need_gpu <= budget && need_cpu <= budget;
+    bool want = atomic_load(&g_want) > 0, fits = cfg.force || (need_gpu <= budget && need_cpu <= budget);
     if (!want) {
         if (S.engaged) note_change(false, "turned off", gpu_f, nib * ib_gpu, cpu_f, ib_cpu, budget, refr);
         S.over = S.under = 0;
@@ -280,15 +281,22 @@ static void rule(uint64_t latch) {
     static uint64_t t_log;
     if (cfg.log && now - t_log > 5000000000ull) {
         t_log = now;
+        extern void interp_replay_counts_take(uint64_t *draws, uint64_t *misses, uint64_t *cb_misses);
+        uint64_t rd, rm, rc;
+        interp_replay_counts_take(&rd, &rm, &rc);
+        extern void inbetween_shared_counts_take(uint64_t out[3]);
+        uint64_t sk[3];
+        inbetween_shared_counts_take(sk);
         LOG("[inbetween] 5 s: %s; sets %llu, in-betweens made %llu, set gone %llu; none: no times %llu, log %llu, storage %llu, "
             "freed %llu, scale %llu, capture %llu, game ahead %llu, failed %llu; late %llu, camera changed %llu; game frame GPU %.2f ms, in-between %.2f ms (x%.2f), "
             "render thread %.2f ms, in-between %.2f ms; need %.2f / %.2f of %.2f ms; waits %.1f ms, replays %.1f ms (images %.1f, "
-            "lock %.1f); lead %.1f ms\n",
+            "lock %.1f); lead %.1f ms; replayed draws %llu, not found in the frame's log %llu, uniform copies not found %llu; left out (shared targets): draws %llu, clears %llu, copies %llu\n",
             S.engaged ? "made" : want ? "stepped aside" : "off", (unsigned long long)st.sets, (unsigned long long)st.made,
             (unsigned long long)st.gone, (unsigned long long)st.no_times, (unsigned long long)st.no_log, (unsigned long long)st.no_storage,
             (unsigned long long)st.freed, (unsigned long long)st.scale, (unsigned long long)st.capture, (unsigned long long)st.ahead,
             (unsigned long long)st.failed, (unsigned long long)st.late, (unsigned long long)st.stale, gpu_f, ib_gpu, S.ratio_gpu, cpu_f, ib_cpu, need_gpu, need_cpu, budget, st.wait_ms, st.cpu_ms,
-            st.acq_ms, st.lock_ms, S.mode == 2 ? (cfg.lead_ms ? cfg.lead_ms : S.lead_ms) : 0.0);
+            st.acq_ms, st.lock_ms, S.mode == 2 ? (cfg.lead_ms ? cfg.lead_ms : S.lead_ms) : 0.0, (unsigned long long)rd,
+            (unsigned long long)rm, (unsigned long long)rc, (unsigned long long)sk[0], (unsigned long long)sk[1], (unsigned long long)sk[2]);
         memset(&st, 0, sizeof st);
     }
     S.wn = S.wib = S.w_late = 0, S.w_gpu = S.w_ib_gpu = S.w_test = 0;

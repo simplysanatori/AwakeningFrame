@@ -1366,6 +1366,12 @@ bool interp_prepare(float t) {
 
 uint32_t interp_handles(const uint64_t **out) { *out = rsrc()->handles; return rsrc()->nhandles; }
 void interp_replay_last(bool on) { rp_last = on; }
+// (the VR mode's in-betweens, inbetween.c's 5 s line) the replays' draws, those whose record was not found (they drew
+// with guest memory as it is), and uniform copies not found; taken: counted from zero again
+void interp_replay_counts_take(uint64_t *draws, uint64_t *misses, uint64_t *cb_misses) {
+    *draws = st_replay_draws, *misses = st_replay_misses, *cb_misses = st_replay_cb_miss;
+    st_replay_draws = st_replay_misses = st_replay_cb_miss = 0;
+}
 bool interp_last_logged(void) { return prev->ndraws && !prev->overflow && !prev->destroyed; }
 // (stereo, exec.c: a list run once per eye replays the same draws in each: eye 1 starts where eye 0 did)
 void interp_replay_mark(uint32_t m[3]) { m[0] = rp_draw, m[1] = rp_cb, m[2] = (uint32_t)rp_cur; }

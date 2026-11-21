@@ -1197,6 +1197,33 @@ static int mv_rt_kind(void) {
     if (lay && other && other == pres && !twu) return 2;
     return lay && !other ? 1 : lay || twu ? -1 : 0;
 }
+// LARECOMP_XR_INBETWEEN_SHARED=skip|draw (inbetween.c; docs/af/STEREO.md "In-between frames"): an in-between's replay
+// (eye 0; default skip) leaves out the draws, clears and copies whose targets are all shared (not twinned): the shadow map, the
+// bloom's small passes, the HUD. Their results from the frame's own execution are still in their targets when the
+// in-betweens run (the replays come after the frame's present, before the next frame's lists), as the frame's compute
+// results are (CMD_DISPATCH below). draw: run them again (as up to 2026-11-20). Skipped draws still move the replay's
+// cursor (interp_draw), so the next draw's record is found.
+static int g_ib_shared_skip = -1;
+static bool ib_shared_skip_on(void) {
+    if (g_ib_shared_skip < 0) {
+        const char *e = getenv("LARECOMP_XR_INBETWEEN_SHARED");
+        g_ib_shared_skip = !(e && !strcmp(e, "draw"));
+        LOG("[inbetween] shared passes in the in-betweens: %s (LARECOMP_XR_INBETWEEN_SHARED)\n", g_ib_shared_skip ? "left out" : "drawn again");
+    }
+    return g_ib_shared_skip;
+}
+static uint64_t ib_shared_skipped[3];  // (stats) draws, clears, copies left out of in-betweens
+static bool ib_skip_rt(int kind) {  // kind 0 draw, 1 clear
+    if (!g_interp_replaying || g_eye != 0 || !ib_shared_skip_on()) return false;
+    for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i] && vk_tex_twinned(st.rt.color[i])) return false;
+    if (st.rt.depth && vk_tex_twinned(st.rt.depth)) return false;
+    if (!st.rt.ncolor && !st.rt.depth) return false;
+    ib_shared_skipped[kind]++;
+    return true;
+}
+void inbetween_shared_counts_take(uint64_t out[3]) {
+    for (int i = 0; i < 3; i++) out[i] = ib_shared_skipped[i], ib_shared_skipped[i] = 0;
+}
 static bool eye1_skip_rt(void) {
     if (g_eye != 1) return false;
     if (g_mv_run && mv_rt_kind() >= 1) { st_skipped[0]++; return true; }  // (eye 0's multiview pass drew it)
@@ -8584,6 +8611,10 @@ static void draw_(CmdRec *r, bool indexed) {
         if (wx_composite && !wx_mirror) stereo_composite();
         else if (g_eye == 0 && st_hud_alpha && g_hud_win && st.rt.ncolor && st.rt.color[0] == g_hud_win) stereo_hud_redirect();
         if (eye1_skip_rt()) return;
+        if (ib_skip_rt(0)) {
+            if (g_interp_log) interp_draw(interp_key(r, indexed), st.rt.ncolor == 0);  // (the cursor steps over it)
+            return;
+        }
     }
     if (g_interp_log) interp_draw(interp_key(r, indexed), st.rt.ncolor == 0);  // (frame interpolation, runtime/nvn/interp.c)
     snap_apply(0, pr->vi->ssbo_read);  // (overlap) the storage slots the shaders read: a copy where the CPU rewrites the range
@@ -10445,7 +10476,7 @@ static void exec_list(uint64_t handle, int depth) {
             if (ct_on() && index < st.rt.ncolor && st.rt.color[index])
                 LOG("[ct] clear-color %p mask %#x sc %d %d %d %d\n", (void *)st.rt.color[index], (uint32_t)r->x[2], st.scissor[0][0], st.scissor[0][1],
                     st.scissor[0][2], st.scissor[0][3]);
-            if (eye1_skip_rt()) break;
+            if (eye1_skip_rt() || ib_skip_rt(1)) break;
             if (index < st.rt.ncolor && st.rt.color[index]) alias_before_write(st.rt.color[index], 0, "clear");
             if (index < st.rt.ncolor && st.rt.color[index]) clear(index, (int)r->x[5], x, (uint32_t)r->x[2], false, 0, false, 0, 0);
             break;
@@ -10455,6 +10486,7 @@ static void exec_list(uint64_t handle, int depth) {
             const struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; float color[4]; } *ct = x;
             NvnTexture *t = (NvnTexture *)(uintptr_t)ct->tex;
             if (!t || (g_eye == 1 && (!vk_tex_twinned(t) || (g_mv_run && vk_b_layered(t->backend))))) break;  // (mv: eye 0 did both)
+            if (g_interp_replaying && g_eye == 0 && ib_shared_skip_on() && !vk_tex_twinned(t)) { ib_shared_skipped[1]++; break; }
             if (g_eye == 0 && g_mv_run && vk_tex_twinned(t) && !vk_b_layered(t->backend)) mv_need_eye1 = true;
             snap_reason = "clear-texture"; snapshots_invalidate(NULL);
             alias_before_write(t, 0, "clear");
@@ -10478,7 +10510,7 @@ static void exec_list(uint64_t handle, int depth) {
             break;
         }
         case CMD_CLEAR_DEPTH_STENCIL:
-            if (eye1_skip_rt()) break;
+            if (eye1_skip_rt() || ib_skip_rt(1)) break;
             snap_reason = "clear-depth"; snapshots_invalidate(NULL);
             if (ct_on() && st.rt.depth)
                 LOG("[ct] clear-depth %p d%d s%d sc %d %d %d %d\n", (void *)st.rt.depth, r->x[0] != 0, r->x[2] != 0, st.scissor[0][0],
@@ -10589,6 +10621,7 @@ static void exec_list(uint64_t handle, int depth) {
                 NvnTexture *d_ = (NvnTexture *)(uintptr_t)dst->tex;
                 bool tw = vk_tex_twinned(d_), lay = d_ && vk_b_layered(d_->backend);
                 if (g_eye == 1 && (!tw || (g_mv_run && lay))) { st_skipped[1]++; break; }  // (stereo: shared; mv: eye 0 did both layers)
+                if (g_interp_replaying && g_eye == 0 && !tw && ib_shared_skip_on()) { ib_shared_skipped[2]++; break; }  // (in-between: the frame made it)
                 if (g_eye == 0 && g_mv_run && tw && !lay) mv_need_eye1 = true;  // (a twin without an eye-1 layer: eye 1 copies)
             }
             if (r->op == CMD_COPY_TEXTURE_TO_TEXTURE && g_eye == 0 && st_hud_alpha && g_hud_ok && g_hud_win &&

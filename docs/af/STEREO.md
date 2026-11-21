@@ -468,6 +468,13 @@ the light. The VR tab's Black Frame Insertion row (Picture), `LARECOMP_XR_BFI=0|
   until no more than one of the last 16 was. Each change is logged once (`[xr] black frame insertion: ...`) and the VR
   tab's row says "Waiting ...". Where in-between frames are made (`LARECOMP_XR_INBETWEEN`, "In-between frames" above)
   the refreshes with one are lit too.
+- **The dark refresh's projection layer** (`LARECOMP_XR_BFI_DARK=black|none`, 2026-11-20). With SteamVR the projection
+  layer is the scene's submit, so a refresh without one leaves the compositor to show what it has behind the app; in
+  the headset (2026-11-20, dark refreshes without one) the picture flashed and jumped. `black` (default): a dark refresh
+  has a projection layer with a 16x16 opaque black image (made once with the laser's, `xr_pointer.c` `xr_black_chain`)
+  and the set's views, so the layer list has the same shape on every refresh. `none`: no projection layer (as before).
+  Passthrough's dark refresh keeps none (the room, below). The mock counts a projection layer of 16 px or less as
+  `black=N` on its end line, not as a picture.
 - **The other layers.** The HUD / menu panel and the controller laser are quad layers and stay on every refresh: the
   compositor places them for each refresh's own head pose, so they do not double, and their text keeps its brightness.
   Surroundings, the Table Edge's fade and the blink are in the eye images and flash with them. Table Edge Passthrough:
@@ -517,8 +524,12 @@ refreshes) and the phase moves.
 | `LARECOMP_XR_INBETWEEN_LEAD_MS=<ms>` | with `2`: L fixed (default: adapted, above) |
 | `LARECOMP_XR_INBETWEEN_RESERVE_MS=<ms>` | the compositor's GPU time a refresh in the fit (1.5) |
 | `LARECOMP_XR_INBETWEEN_TEST_MS=<ms>[,<from>,<to>]` | a test: ms added to the game frame's and each in-between's measured GPU time (from present `from` to `to`): stepping aside and back |
-| `LARECOMP_XR_INBETWEEN_LOG=1` | an `[inbetween]` line every 5 s: sets, in-betweens made, why none, late ones, times, the fit, L |
+| `LARECOMP_XR_INBETWEEN_LOG=1` | an `[inbetween]` line every 5 s: sets, in-betweens made, why none, late ones, times, the fit, L, the replays' draws not found in the frame's log, the draws / clears / copies left out (shared targets). Without it, one `[inbetween] waiting: ...` line per area where they are wanted and have never fitted |
+| `LARECOMP_XR_INBETWEEN_SHARED=skip\|draw` | (default skip) an in-between's replay leaves out the draws, clears and copies whose targets are all shared (shadow map, bloom, HUD): their results from the frame are still there, as its compute results are; skipped draws still move the replay's cursor. `draw`: run them again |
+| `LARECOMP_XR_INBETWEEN_TEST_FORCE=1` | a desktop test: in-betweens made wherever wanted, fit or not (for image checks where they step aside) |
 | `LARECOMP_XR_BFI=0\|1` | Black Frame Insertion: each set on one refresh, black on the other, at 120 Hz with the game at 60 (off; above; the VR tab's Black Frame Insertion row) |
+| `LARECOMP_XR_BFI_DARK=black\|none` | the dark refresh's projection layer: the black image (default) or none (above) |
+| `LARECOMP_XR_TEST_LAYER_YAW=<deg>` | a headset test: every other second the projection layer's views say the eyes were turned <deg> about the vertical, same images. A compositor that reprojects by the layer's pose moves the picture sideways once a second |
 | `LARECOMP_XR_BFI_LATE=relight`, `LARECOMP_XR_BFI_ROOM=0`, `LARECOMP_XR_BFI_GAIN=<g>`, `LARECOMP_XR_BFI_PHASE_DOWN=<sets>` | tests: a late set's missed flash lit with the set before; Passthrough's dark refreshes opaque; the eyes' brightness lift; the sets a lead stays below the phase before it moves (off; off; off; 32, 0: never; above) |
 | `LARECOMP_GPU_OVERLAP=0\|1` | the CPU / GPU overlap (VR default on, flat off on Turnip; docs/af/PASSES.md) |
 | `LARECOMP_VR_FOVEATION=off\|low\|medium\|high` | eye-tracked foveation of the eye passes (above) |
