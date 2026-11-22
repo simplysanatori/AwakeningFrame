@@ -56,7 +56,7 @@ jobs:
           update: true
           install: make git python curl tar xz unzip zip
           pacboy: clang:p lld:p binutils:p python:p sdl3:p ffmpeg:p vulkan-devel:p shaderc:p spirv-tools:p pkgconf:p
-            vulkan-memory-allocator:p
+            vulkan-memory-allocator:p nasm:p
       - name: OpenXR headers and loader
         run: pcvr/fetch-openxr-windows.sh
       - name: App builds with the VR mode
