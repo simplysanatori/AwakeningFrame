@@ -4,8 +4,10 @@ The VR mode on a PC headset through SteamVR or another OpenXR runtime: a Quest o
 or ALVR, an Index. One code path with the Frame build (`runtime/xr/`,
 `runtime/nvn/vulkan/`); the Frame's packaging (`steam-frame/`) is not involved.
 
-Status: Linux tested under the mock runtime only (`tools/xrmock`), not yet with a headset. Windows: prepared and
-compile-checked with a MinGW cross compiler, **not run on Windows**.
+Status: Linux tested under the mock runtime only (`tools/xrmock`), not yet with a headset. Windows: the 0.2.0 zip ran
+once (2026-11-22: Windows 11, RTX 3080, a Steam Frame over Steam Link, SteamVR 2.19.4): VR at 60 FPS on 120 Hz, the
+Frame controller profile, the runtime's time conversion present. That first run found a crash when the game code was
+built from VR (fixed after 0.2.0, below).
 
 ## Packages
 
@@ -46,7 +48,12 @@ The program opens the loader at run time; nothing is linked.
   launcher's `--play`). With game files but no game code yet, the start screen comes first and builds it, as on the
   Frame. `--flat` gives upstream's start screen in the window.
 - No game files yet: the first start opens the start screen in the window, where its folder picker can be seen. Set up
-  the game files there, quit, and start again: VR from then on.
+  the game files there, quit, and start again: VR from then on. Do this at the desk: the start screen is a desktop
+  window, and SteamVR's desktop view in the headset could not click it (Windows, 2026-11-22). `--flat` opens it.
+- With game files but no game code, a start in VR shows the start screen and builds the game code. Up to 0.2.0 that
+  crashed: the frame logs asked for the level name while no game was loaded (`game_level_name`, hle/widescreen.c).
+- `--build-game-code` and `--game-code-status` are Linux only (the Frame's install and launcher use them); on Windows
+  they are ignored and the game starts.
 - No OpenXR runtime, or none with a headset (SteamVR not running, the headset off): the game starts in the window, and
   `lasrecomp.log` says why (`[xr] PC VR package: no OpenXR runtime with a headset`).
 - `--vr` and `--flat` work in every build with the VR mode, not only the packages. The Frame build is unchanged: VR only
@@ -75,11 +82,15 @@ settings, Video, Per-Application Video Settings, for this program (a manual step
 
 For a Steam library entry the same keys can be set with SteamVR's `vrcmd`, as the Frame's launcher does:
 `vrcmd --set-settings-int steam.app.<app id>.<key> <value>` with `preferredRefreshRate`, `framesToThrottle`,
-`additionalFramesToPredict` and `motionSmoothingOverride` (2: off). Not tried on a PC yet.
+`additionalFramesToPredict` and `motionSmoothingOverride` (2: off). On Windows (2026-11-22, SteamVR 2.19.4) a non-Steam
+entry got the rate through `steamvr.vrsettings` (`"steam.app.<app id>": {"preferredRefreshRate": 120}`); Steam Link
+offers no Motion Smoothing setting.
 
-The program also asks the runtime for a rate where the runtime takes such requests (`XR_FB_display_refresh_rate`;
-Meta's runtime for Link has it, SteamVR may not): `LARECOMP_XR_HZ`, else the VR tab's Refresh Rate, else 120 Hz, else
-90 Hz when 120 is not offered.
+**The per-application refresh rate is required with SteamVR.** The program asks the runtime for a rate where the runtime
+takes such requests (`XR_FB_display_refresh_rate`): `LARECOMP_XR_HZ`, else the VR tab's Refresh Rate, else 120 Hz, else
+90 Hz when 120 is not offered. SteamVR has the extension but lists only the rate it already runs at, so the request
+fails (`XR_ERROR_DISPLAY_REFRESH_RATE_UNSUPPORTED_FB`): without the per-application setting the game ran at 90 Hz, held
+at 30 FPS. Meta's runtime for Link may take the request.
 
 ## Refresh rates
 

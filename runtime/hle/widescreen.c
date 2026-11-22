@@ -391,9 +391,12 @@ void widescreen_present_crop(uint64_t frame, double shape, float crop[4], double
     if (hud_corners_shown_whole(frame)) crop[0] = 0, crop[2] = 1, *vx = full_vx, *vw = full_vw;
 }
 
-// Current level name for logs ("-" when not in play).
+// Current level name for logs ("-" when not in play). game_in_play() first: on the start screen no game is loaded and
+// g_ga is not set yet, and the frame logs ask for the name there too (a PC VR package building the game code in VR
+// crashed here, 2026-11-22).
 const char *game_level_name(void) {
     extern int game_in_play(void);
+    if (!game_in_play()) return "-";
     uint64_t ps = LD64(GA(PLAYER_STATUS_PTR));
-    return game_in_play() && ps && *(const char *)(uintptr_t)ps ? (const char *)(uintptr_t)ps : "-";
+    return ps && *(const char *)(uintptr_t)ps ? (const char *)(uintptr_t)ps : "-";
 }
